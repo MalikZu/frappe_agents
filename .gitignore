@@ -1,0 +1,23 @@
+# internal working documents — never committed
+internal/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# node
+node_modules/
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/
+
+# local agent settings
+.claude/settings.local.json
