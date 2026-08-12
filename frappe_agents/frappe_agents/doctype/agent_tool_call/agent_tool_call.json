@@ -1,0 +1,104 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-12 00:00:00.000000",
+ "description": "Audit record of one tool call. Append-only: no role may edit or delete it.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "run",
+  "tool",
+  "args_json",
+  "outcome",
+  "result_summary",
+  "docs_touched",
+  "duration_ms",
+  "error"
+ ],
+ "fields": [
+  {
+   "fieldname": "run",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Run",
+   "options": "Agent Run",
+   "reqd": 1
+  },
+  {
+   "fieldname": "tool",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Tool",
+   "reqd": 1
+  },
+  {
+   "fieldname": "args_json",
+   "fieldtype": "Code",
+   "label": "Args JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Outcome",
+   "options": "Success\nDenied\nError",
+   "reqd": 1
+  },
+  {
+   "fieldname": "result_summary",
+   "fieldtype": "Small Text",
+   "label": "Result Summary"
+  },
+  {
+   "description": "Documents this call read or changed.",
+   "fieldname": "docs_touched",
+   "fieldtype": "Small Text",
+   "label": "Docs Touched"
+  },
+  {
+   "default": "0",
+   "fieldname": "duration_ms",
+   "fieldtype": "Int",
+   "label": "Duration (ms)"
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Tool Call",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "if_owner": 1,
+   "read": 1,
+   "role": "Agent User"
+  },
+  {
+   "read": 1,
+   "role": "Agent Auditor"
+  },
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

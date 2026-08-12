@@ -1,0 +1,69 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-08-12 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "global_enabled",
+  "max_depth",
+  "default_daily_token_budget",
+  "suppress_on_import"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "description": "Kill switch. Clear this to stop every agent run and tool call at once.",
+   "fieldname": "global_enabled",
+   "fieldtype": "Check",
+   "label": "Global Enabled"
+  },
+  {
+   "default": "3",
+   "description": "Maximum nesting depth for agent runs that start other runs.",
+   "fieldname": "max_depth",
+   "fieldtype": "Int",
+   "label": "Max Depth"
+  },
+  {
+   "description": "Fallback token budget per agent per day when the agent sets none.",
+   "fieldname": "default_daily_token_budget",
+   "fieldtype": "Int",
+   "label": "Default Daily Token Budget"
+  },
+  {
+   "default": "1",
+   "description": "Skip agent triggers during data import and migration.",
+   "fieldname": "suppress_on_import",
+   "fieldtype": "Check",
+   "label": "Suppress on Import"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Agent Manager",
+   "write": 1
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

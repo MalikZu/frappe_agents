@@ -1,0 +1,159 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-12 00:00:00.000000",
+ "description": "One execution of an agent. Written by framework code only.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "agent",
+  "conversation",
+  "effective_user",
+  "run_as_mode",
+  "surface",
+  "status",
+  "parent_run",
+  "depth",
+  "input_message",
+  "output_message",
+  "error",
+  "started_at",
+  "ended_at",
+  "tokens_in",
+  "tokens_out",
+  "steps_taken"
+ ],
+ "fields": [
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Agent",
+   "options": "Agent",
+   "reqd": 1
+  },
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "Agent Conversation"
+  },
+  {
+   "description": "The user whose permissions this run executes under.",
+   "fieldname": "effective_user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Effective User",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "run_as_mode",
+   "fieldtype": "Select",
+   "label": "Run As Mode",
+   "options": "Session User\nService User"
+  },
+  {
+   "default": "Desk Chat",
+   "fieldname": "surface",
+   "fieldtype": "Select",
+   "label": "Surface",
+   "options": "Desk Chat"
+  },
+  {
+   "default": "Queued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Queued\nRunning\nCompleted\nFailed\nCancelled"
+  },
+  {
+   "fieldname": "parent_run",
+   "fieldtype": "Link",
+   "label": "Parent Run",
+   "options": "Agent Run"
+  },
+  {
+   "default": "0",
+   "fieldname": "depth",
+   "fieldtype": "Int",
+   "label": "Depth"
+  },
+  {
+   "fieldname": "input_message",
+   "fieldtype": "Long Text",
+   "label": "Input Message"
+  },
+  {
+   "fieldname": "output_message",
+   "fieldtype": "Long Text",
+   "label": "Output Message"
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error"
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At"
+  },
+  {
+   "fieldname": "ended_at",
+   "fieldtype": "Datetime",
+   "label": "Ended At"
+  },
+  {
+   "default": "0",
+   "fieldname": "tokens_in",
+   "fieldtype": "Int",
+   "label": "Tokens In"
+  },
+  {
+   "default": "0",
+   "fieldname": "tokens_out",
+   "fieldtype": "Int",
+   "label": "Tokens Out"
+  },
+  {
+   "default": "0",
+   "fieldname": "steps_taken",
+   "fieldtype": "Int",
+   "label": "Steps Taken"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Run",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "if_owner": 1,
+   "read": 1,
+   "role": "Agent User"
+  },
+  {
+   "read": 1,
+   "role": "Agent Auditor"
+  },
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

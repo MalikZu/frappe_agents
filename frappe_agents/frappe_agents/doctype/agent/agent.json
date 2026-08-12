@@ -1,0 +1,137 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:agent_name",
+ "creation": "2026-08-12 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "agent_name",
+  "enabled",
+  "run_as",
+  "service_user",
+  "model_profile",
+  "autonomy",
+  "instructions",
+  "allowed_roles",
+  "tools",
+  "max_steps",
+  "daily_token_budget"
+ ],
+ "fields": [
+  {
+   "fieldname": "agent_name",
+   "fieldtype": "Data",
+   "label": "Agent Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "Session User",
+   "description": "Session User runs with the permissions of the person chatting. Service User runs as a dedicated, restricted account.",
+   "fieldname": "run_as",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Run As",
+   "options": "Session User\nService User",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.run_as==\"Service User\"",
+   "fieldname": "service_user",
+   "fieldtype": "Link",
+   "label": "Service User",
+   "options": "User"
+  },
+  {
+   "fieldname": "model_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Model Profile",
+   "options": "LLM Model Profile",
+   "reqd": 1
+  },
+  {
+   "default": "Suggest",
+   "fieldname": "autonomy",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Autonomy",
+   "options": "Suggest\nDraft\nWrite",
+   "reqd": 1
+  },
+  {
+   "description": "System prompt for this agent.",
+   "fieldname": "instructions",
+   "fieldtype": "Long Text",
+   "label": "Instructions"
+  },
+  {
+   "description": "Roles allowed to use this agent. Empty means any user with the Agent User role.",
+   "fieldname": "allowed_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Roles",
+   "options": "Agent Allowed Role"
+  },
+  {
+   "fieldname": "tools",
+   "fieldtype": "Table",
+   "label": "Tools",
+   "options": "Agent Selected Tool"
+  },
+  {
+   "default": "10",
+   "fieldname": "max_steps",
+   "fieldtype": "Int",
+   "label": "Max Steps"
+  },
+  {
+   "description": "Tokens per day across all runs of this agent. Empty falls back to Agent Settings.",
+   "fieldname": "daily_token_budget",
+   "fieldtype": "Int",
+   "label": "Daily Token Budget"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Agent Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Agent User"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

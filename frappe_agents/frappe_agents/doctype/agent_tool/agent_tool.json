@@ -1,0 +1,91 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:tool_name",
+ "creation": "2026-08-12 00:00:00.000000",
+ "description": "Registry of tools an agent may call. Rows are synced from app hooks, not edited by hand.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "tool_name",
+  "description",
+  "provider_app",
+  "handler_path",
+  "capability",
+  "args_schema",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "tool_name",
+   "fieldtype": "Data",
+   "label": "Tool Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "description": "App that registered this tool.",
+   "fieldname": "provider_app",
+   "fieldtype": "Data",
+   "label": "Provider App"
+  },
+  {
+   "description": "Dotted path to the handler function.",
+   "fieldname": "handler_path",
+   "fieldtype": "Data",
+   "label": "Handler Path",
+   "reqd": 1
+  },
+  {
+   "fieldname": "capability",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Capability",
+   "options": "Read\nDraft\nWrite\nSubmit",
+   "reqd": 1
+  },
+  {
+   "fieldname": "args_schema",
+   "fieldtype": "Code",
+   "label": "Args Schema",
+   "options": "JSON"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Tool",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Agent Manager"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
