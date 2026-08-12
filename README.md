@@ -19,8 +19,16 @@ not a service you deploy.
 
 ## Install
 
-Not yet. This section will have real instructions when there is something
-to install.
+Early software — expect sharp edges and breaking changes.
+
+```bash
+bench get-app https://github.com/MalikZu/frappe_agents
+bench --site yoursite install-app frappe_agents
+```
+
+Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
+Agent Auditor) and registers the built-in read tools. Then, in the Desk:
+create an LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
 
 ## License
 
