@@ -97,9 +97,7 @@ class TestFormAgents(AgentTestCase):
 		self.assertNotIn(service, self.names(RESTRICTED_USER))
 
 	def test_an_agent_gated_on_a_role_is_offered_only_to_that_role(self):
-		gated = self.make_agent(
-			"Gated Form Agent", show_in_forms=1, allowed_roles=[{"role": PERMLEVEL_ROLE}]
-		)
+		gated = self.make_agent("Gated Form Agent", show_in_forms=1, allowed_roles=[{"role": PERMLEVEL_ROLE}])
 
 		self.assertNotIn(gated, self.names(RESTRICTED_USER))
 		self.assertIn(gated, self.names(OPEN_USER))

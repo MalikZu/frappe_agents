@@ -164,9 +164,7 @@ class TestDocumentContext(AgentTestCase):
 		run = make_run(effective_user=RESTRICTED_USER)
 
 		with as_user(RESTRICTED_USER):
-			payload = execute_tool(
-				run, "get_document_context", {"doctype": VAULT_DT, "name": VAULT_RECORD}
-			)
+			payload = execute_tool(run, "get_document_context", {"doctype": VAULT_DT, "name": VAULT_RECORD})
 
 		self.assertFalse(payload["ok"])
 		self.assertIsNone(payload["result"])

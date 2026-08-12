@@ -44,9 +44,7 @@ class TestAgentSkills(AgentTestCase):
 					"doctype": "Agent Skill",
 					"skill_title": f"FA Skill {frappe.generate_hash(length=6)}",
 					"body": body,
-					"applies_to_doctypes": [
-						{"document_type": doctype} for doctype in doctypes or []
-					],
+					"applies_to_doctypes": [{"document_type": doctype} for doctype in doctypes or []],
 				}
 			)
 			skill.insert()

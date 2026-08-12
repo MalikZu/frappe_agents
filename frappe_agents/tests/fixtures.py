@@ -501,9 +501,9 @@ def _ensure_records() -> None:
 		).insert(ignore_permissions=True)
 
 	if not frappe.db.exists(VAULT_DT, VAULT_RECORD):
-		frappe.get_doc(
-			{"doctype": VAULT_DT, "label": VAULT_RECORD, "ticket": TICKET_ALPHA}
-		).insert(ignore_permissions=True)
+		frappe.get_doc({"doctype": VAULT_DT, "label": VAULT_RECORD, "ticket": TICKET_ALPHA}).insert(
+			ignore_permissions=True
+		)
 
 	_ensure_orders()
 
