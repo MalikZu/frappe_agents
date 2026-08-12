@@ -345,6 +345,29 @@ def call_tool(
 	return payload, run
 
 
+def make_proposal(
+	target: str,
+	action_type: str = "Submit",
+	user: str = DRAFT_USER,
+	agent: str = DRAFT_AGENT,
+	run: Any = None,
+	reason: str = "The quantities match the signed quotation.",
+) -> str:
+	"""Drive one proposal through the tools and return the Agent Action name.
+
+	For the tests about what happens *after* a proposal. The proposal path itself
+	is asserted in `test_proposals`, so a refusal here is a broken fixture rather
+	than a finding, and it fails loudly.
+	"""
+	tool = "propose_submit" if action_type == "Submit" else "propose_cancel"
+	payload, _ = call_tool(
+		user, tool, {"doctype": ORDER_DT, "name": target, "reason": reason}, agent=agent, run=run
+	)
+	if not payload["ok"]:
+		raise AssertionError(f"the fixture proposal was refused: {payload['error']}")
+	return payload["result"]["action"]
+
+
 def make_order_draft(user: str = DRAFT_USER, title: str | None = None, amount: int = 100) -> Any:
 	"""Insert one FA Test Order draft as `user`, through their own permissions."""
 	order = frappe.get_doc(
