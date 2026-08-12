@@ -38,7 +38,7 @@ from typing import Any
 import frappe
 from frappe import _
 from frappe.model.workflow import get_workflow_name
-from frappe.utils import add_to_date, cint, get_datetime, now, now_datetime, strip_html
+from frappe.utils import add_to_date, cint, get_datetime, now_datetime, strip_html
 
 APPROVER_ROLE = "Agent Approver"
 
@@ -183,10 +183,7 @@ def expire_stale_actions() -> int:
 	leaves `modified` alone because expiry is the clock, not an edit.
 	"""
 	days = _expiry_days()
-	filters = {
-		"status": STATUS_PENDING,
-		"creation": ("<", add_to_date(now(), days=-days, as_datetime=True)),
-	}
+	filters = {"status": STATUS_PENDING, "creation": ("<", _cutoff(days))}
 
 	stale = frappe.get_all("Agent Action", filters=filters, pluck="name")
 	if not stale:
@@ -235,7 +232,7 @@ def is_stale(action: Any) -> bool:
 	created = get_datetime(action.creation)
 	if not created:
 		return False
-	return created < add_to_date(now(), days=-_expiry_days(), as_datetime=True)
+	return created < _cutoff(_expiry_days())
 
 
 def _check_kill_switch() -> None:
@@ -382,6 +379,16 @@ def _same_timestamp(left: Any, right: Any) -> bool:
 	"""Compare two `modified` values as instants, never as strings."""
 	left, right = get_datetime(left), get_datetime(right)
 	return bool(left) and bool(right) and left == right
+
+
+def _cutoff(days: int) -> Any:
+	"""The moment `days` ago, as a datetime.
+
+	Fed a datetime, never a string: `add_to_date` flips its own return type to a
+	string whenever the date it is handed is one, and a datetime will not compare
+	against that.
+	"""
+	return add_to_date(now_datetime(), days=-days)
 
 
 def _expiry_days() -> int:
