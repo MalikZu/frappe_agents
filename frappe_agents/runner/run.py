@@ -58,7 +58,8 @@ def execute_run(run_name: str) -> None:
 		if run is not None:
 			_fail(run, str(exc) or exc.__class__.__name__)
 	finally:
-		frappe.set_user(original_user)
+		# Restore the job's original identity once the run ends.
+		frappe.set_user(original_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 
 def _execute(run: Any) -> None:
@@ -82,7 +83,9 @@ def _execute(run: Any) -> None:
 	if cint(run.depth) > max_depth:
 		return _fail(run, f"Run depth {cint(run.depth)} is over the limit of {max_depth}.")
 
-	frappe.set_user(effective_user)
+	# The identity binding this app exists for: the run executes as the checked
+	# effective user, and the finally block above restores the worker's identity.
+	frappe.set_user(effective_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 	_update(run, {"status": "Running", "started_at": now_datetime()})
 	_publish(run, "status", status="Running")
