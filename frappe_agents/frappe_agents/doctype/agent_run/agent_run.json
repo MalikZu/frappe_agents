@@ -13,6 +13,8 @@
   "effective_user",
   "run_as_mode",
   "surface",
+  "context_doctype",
+  "context_name",
   "status",
   "parent_run",
   "depth",
@@ -62,6 +64,19 @@
    "fieldtype": "Select",
    "label": "Surface",
    "options": "Desk Chat"
+  },
+  {
+   "description": "The document this run is about, if it started from a form.",
+   "fieldname": "context_doctype",
+   "fieldtype": "Link",
+   "label": "Context Doctype",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "context_name",
+   "fieldtype": "Dynamic Link",
+   "label": "Context Name",
+   "options": "context_doctype"
   },
   {
    "default": "Queued",
