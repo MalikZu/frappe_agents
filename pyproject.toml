@@ -1,7 +1,7 @@
 [project]
 name = "frappe_agents"
 authors = [
-    { name = "Malik AlZubaidi", email = "malikzu.sg@gmail.com" }
+    { name = "Malik AlZubaidi", email = "malik@leam.ae" }
 ]
 description = "Agent runtime for Frappe. Agents are records, not deployments."
 requires-python = ">=3.14"
