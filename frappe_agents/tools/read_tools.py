@@ -4,6 +4,10 @@ Every handler runs as `frappe.session.user` â€” the effective user of the run â€
 never changes it. Data is reached through the permission-checked ORM only:
 `frappe.get_list`, `frappe.get_doc` after `has_permission`, `frappe.get_meta`.
 No `frappe.get_all`, no `frappe.db.sql`, no `ignore_permissions` in this file.
+
+`get_list` alone is not the whole check: it never runs the per-row
+`has_permission` hooks, so results on the doctypes that register one are
+re-checked row by row before they leave.
 """
 
 from typing import Any
@@ -12,6 +16,7 @@ import frappe
 from frappe.model import no_value_fields
 from frappe.utils import cint
 
+from frappe_agents.context.slices import has_row_permission_hook, may_read, status_word
 from frappe_agents.tools.base import CAPABILITY_READ, ToolDenied
 
 MAX_LIMIT = 50
@@ -43,29 +48,53 @@ def search_documents(args: dict) -> dict:
 	filters = _resolve_filters(meta, args.get("filters"), allowed_levels)
 	limit = _resolve_limit(args.get("limit"))
 	order_by = _resolve_order_by(meta, args.get("order_by"), allowed_levels)
+	include_cancelled = _as_bool(args.get("include_cancelled"))
+
+	# A cancelled document is a document that was undone. Answering from one is
+	# how an agent states a number that stopped being true, so it takes an
+	# explicit ask to see them.
+	if cint(meta.is_submittable) and not include_cancelled and "docstatus" not in filters:
+		filters = dict(filters, docstatus=("!=", 2))
+
+	query_fields = list(fields)
+	if "docstatus" not in query_fields:
+		query_fields.append("docstatus")
 
 	rows = frappe.get_list(
 		doctype,
 		filters=filters,
-		fields=fields,
+		fields=query_fields,
 		order_by=order_by,
-		limit_page_length=limit,
+		limit=limit,
 	)
 
-	# Restricted fields come back marked, never silently dropped: the model has to
-	# be able to tell "you cannot see this" from "this is empty".
+	# frappe.get_list applies query conditions but never the per-row has_permission
+	# hooks, so on a doctype that registers one the list can carry rows this user
+	# may not read. Drop them and say how many.
+	filtered = 0
+	if has_row_permission_hook(doctype):
+		permitted = [row for row in rows if may_read(doctype, row.get("name"))]
+		filtered = len(rows) - len(permitted)
+		rows = permitted
+
 	for row in rows:
+		# Restricted fields come back marked, never silently dropped: the model has
+		# to be able to tell "you cannot see this" from "this is empty".
 		for fieldname in restricted:
 			row[fieldname] = RESTRICTED
+		# docstatus is an integer nobody should have to decode.
+		row["status_word"] = status_word(row.pop("docstatus", 0))
 
 	names = [row.get("name") for row in rows if row.get("name")]
 	return {
 		"doctype": doctype,
-		"fields": list(fields) + list(restricted),
+		"fields": [field for field in fields if field != "docstatus"] + ["status_word"] + list(restricted),
 		"restricted_fields": restricted,
 		"rows": rows,
 		"count": len(rows),
 		"limit": limit,
+		"include_cancelled": include_cancelled,
+		"filtered_by_permission": filtered,
 		"_docs_touched": _docs_touched(doctype, names),
 	}
 
@@ -236,6 +265,12 @@ def _resolve_filters(meta: Any, filters: Any, allowed_levels: list) -> dict:
 	return filters
 
 
+def _as_bool(value: Any) -> bool:
+	if isinstance(value, str):
+		return value.strip().lower() in ("1", "true", "yes")
+	return bool(value)
+
+
 def _resolve_limit(limit: Any) -> int:
 	limit = cint(limit) or DEFAULT_LIMIT
 	return max(1, min(limit, MAX_LIMIT))
@@ -283,7 +318,9 @@ TOOLS = [
 		"description": (
 			"List documents of one doctype. Returns only rows and fields the current user "
 			"is allowed to read; fields above the user's permission level come back as "
-			"'<restricted>'."
+			"'<restricted>'. Every row carries status_word (DRAFT, SUBMITTED or CANCELLED). "
+			"Cancelled documents are left out unless you pass include_cancelled: a cancelled "
+			"document was undone, and answering from one states a number that stopped being true."
 		),
 		"args_schema": {
 			"type": "object",
@@ -307,6 +344,13 @@ TOOLS = [
 				"order_by": {
 					"type": "string",
 					"description": "One field and a direction, e.g. 'modified desc'.",
+				},
+				"include_cancelled": {
+					"type": "boolean",
+					"description": (
+						"Include cancelled documents. Default false. Only set it when the "
+						"question is about what was cancelled."
+					),
 				},
 			},
 			"required": ["doctype"],
