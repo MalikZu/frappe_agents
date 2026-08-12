@@ -125,7 +125,7 @@ def _upsert_tool(name: str, spec: dict) -> None:
 		tool.save(ignore_permissions=True)
 		return
 
-	tool = frappe.get_doc(dict(doctype="Agent Tool", tool_name=name, **values))
+	tool = frappe.get_doc(doctype="Agent Tool", tool_name=name, **values)
 	tool.flags.ignore_permissions = True
 	tool.insert(ignore_permissions=True)
 
