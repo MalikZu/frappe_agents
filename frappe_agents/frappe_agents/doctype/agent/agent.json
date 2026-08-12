@@ -16,6 +16,9 @@
   "instructions",
   "allowed_roles",
   "tools",
+  "skills",
+  "show_in_forms",
+  "form_doctypes",
   "max_steps",
   "daily_token_budget"
  ],
@@ -86,6 +89,28 @@
    "fieldtype": "Table",
    "label": "Tools",
    "options": "Agent Selected Tool"
+  },
+  {
+   "description": "Skills to load into this agent's instructions. Only Approved skills are used.",
+   "fieldname": "skills",
+   "fieldtype": "Table",
+   "label": "Skills",
+   "options": "Agent Selected Skill"
+  },
+  {
+   "default": "0",
+   "description": "Offer this agent from a button on document forms.",
+   "fieldname": "show_in_forms",
+   "fieldtype": "Check",
+   "label": "Show In Forms"
+  },
+  {
+   "depends_on": "show_in_forms",
+   "description": "Forms that offer this agent. Empty means every doctype.",
+   "fieldname": "form_doctypes",
+   "fieldtype": "Table MultiSelect",
+   "label": "Form Doctypes",
+   "options": "Agent DocType Scope"
   },
   {
    "default": "10",
