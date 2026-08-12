@@ -22,6 +22,8 @@ Rules:
 
 - Title says what happened. Bullets say what was done. Nothing else.
 - No plan text, no internal references, no issue-tracker prose.
+- No phase or plan labels (P0, P1, milestone names, spec names). The commit
+  describes the code, not the plan that produced it.
 - No Co-Authored-By trailers.
 - Commit only what belongs in the open-source repo. `internal/` never.
 - Stage files by name: `git add <file> <file>`. Never `git add -A`,
