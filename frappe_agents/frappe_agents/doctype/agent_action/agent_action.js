@@ -69,7 +69,9 @@ function add_styles() {
 
 function with_doctype(doctype) {
 	// with_doctype fires the callback straight away when the meta is cached.
-	return new Promise((resolve) => frappe.model.with_doctype(doctype, () => resolve(frappe.get_meta(doctype))));
+	return new Promise((resolve) =>
+		frappe.model.with_doctype(doctype, () => resolve(frappe.get_meta(doctype) || locals.DocType[doctype]))
+	);
 }
 
 function doc_url(doctype, name) {
@@ -137,13 +139,9 @@ function $value_cell(doc, df) {
 }
 
 function child_columns(child_meta) {
-	const listed = (child_meta.fields || []).filter(
-		(df) => df.in_list_view && !SKIP_TYPES.includes(df.fieldtype) && df.fieldtype !== "Table"
-	);
-	if (listed.length) return listed.slice(0, 5);
-	return (child_meta.fields || [])
-		.filter((df) => !SKIP_TYPES.includes(df.fieldtype) && df.fieldtype !== "Table" && !df.hidden)
-		.slice(0, 4);
+	const fields = visible_fields(child_meta).filter((df) => df.fieldtype !== "Table");
+	const listed = fields.filter((df) => df.in_list_view);
+	return listed.length ? listed.slice(0, 5) : fields.slice(0, 4);
 }
 
 function $child_table(rows, child_meta) {
@@ -169,7 +167,7 @@ function $child_table(rows, child_meta) {
 
 /** Fields worth showing: has a value, is not layout, is not hidden from the user. */
 function visible_fields(meta) {
-	return (meta.fields || []).filter((df) => {
+	return ((meta && meta.fields) || []).filter((df) => {
 		if (SKIP_TYPES.includes(df.fieldtype)) return false;
 		if (df.hidden) return false;
 		return true;
@@ -419,9 +417,14 @@ function approve(frm) {
 }
 
 function send_approval(frm, expected_modified, note) {
+	// The note is optional, and an omitted argument is the only way to say so:
+	// a null in args reaches the server as an empty string.
+	const args = { action: frm.doc.name, expected_modified: expected_modified };
+	if (note) args.note = note;
+
 	frappe.call({
 		method: APPROVE_METHOD,
-		args: { action: frm.doc.name, expected_modified: expected_modified, note: note || null },
+		args: args,
 		freeze: true,
 		freeze_message: __("Applying the action…"),
 		callback: () => {
