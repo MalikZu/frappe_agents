@@ -16,9 +16,12 @@ Two throwaway users carry the whole permission story:
   no role with permlevel 1 access.
 * `OPEN_USER` — no User Permission, and a role that reads permlevel 1.
 
-Two more carry the skill story, because approving a skill takes two people:
+Three more carry the skill story, because approving a skill takes two people:
 `SKILL_AUTHOR` writes one and `SKILL_APPROVER` signs it off. Both hold Agent
-Manager; neither may approve their own.
+Manager; neither may approve their own. `SKILL_WRITER` may write an Agent Skill
+without holding Agent Manager, which is the only way to reach the controller's
+own approval check — a user without write permission is stopped a layer earlier,
+by the framework.
 
 The `FA Test Order` family is submittable and exists for the questions where the
 answer depends on docstatus: one submitted order, one cancelled order, and the
@@ -42,6 +45,7 @@ TICKET_DT = "FA Test Ticket"
 VAULT_DT = "FA Test Vault"
 ORDER_DT = "FA Test Order"
 ORDER_ITEM_DT = "FA Test Order Item"
+BUNDLE_DT = "FA Test Bundle"
 
 PROJECT_ALPHA = "FA Alpha"
 PROJECT_BETA = "FA Beta"
@@ -50,6 +54,7 @@ TICKET_BETA = "FA Ticket Beta"
 ALPHA_SECRET = "alpha-secret"
 BETA_SECRET = "beta-secret"
 VAULT_RECORD = "FA Vault One"
+BUNDLE_RECORD = "FA Bundle One"
 
 ORDER_LIVE = "FA Order Live"
 ORDER_CANCELLED = "FA Order Cancelled"
@@ -68,6 +73,7 @@ OPEN_USER = "fa-open@example.com"
 DISABLED_USER = "fa-disabled@example.com"
 SKILL_AUTHOR = "fa-author@example.com"
 SKILL_APPROVER = "fa-approver@example.com"
+SKILL_WRITER = "fa-writer@example.com"
 
 MANAGER_ROLE = "Agent Manager"
 
@@ -184,6 +190,34 @@ def make_comment(doctype: str, name: str, content: str) -> str:
 	comment.insert(ignore_permissions=True)
 	write_raw(comment.doctype, comment.name, "content", content)
 	return comment.name
+
+
+def make_attachment(doctype: str, name: str, file_name: str) -> str:
+	"""Get-or-create one small private attachment on a document.
+
+	Real File rows, because the manifest counts File rows — a stub would count
+	nothing that exists.
+	"""
+	existing = frappe.db.exists(
+		"File",
+		{"attached_to_doctype": doctype, "attached_to_name": name, "file_name": file_name},
+	)
+	if existing:
+		return existing
+
+	file = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"attached_to_doctype": doctype,
+			"attached_to_name": name,
+			"is_private": 1,
+			"content": f"fa test attachment {file_name}",
+		}
+	)
+	file.flags.ignore_permissions = True
+	file.insert(ignore_permissions=True)
+	return file.name
 
 
 def write_raw(doctype: str, name: str, fieldname: str, value: str) -> None:
@@ -329,6 +363,42 @@ def _ensure_doctypes() -> None:
 		permissions=[{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1}],
 	)
 
+	# Two Link fields pointing at the same doctype, one of them at a project the
+	# restricted user may not read. `ignore_user_permissions` keeps the bundle itself
+	# readable, so the unreadable neighbour is the only hole in it.
+	_make_doctype(
+		BUNDLE_DT,
+		"label",
+		fields=[
+			{
+				"fieldname": "label",
+				"fieldtype": "Data",
+				"label": "Label",
+				"reqd": 1,
+				"unique": 1,
+				"in_list_view": 1,
+			},
+			{
+				"fieldname": "first_project",
+				"fieldtype": "Link",
+				"label": "First Project",
+				"options": PROJECT_DT,
+				"ignore_user_permissions": 1,
+			},
+			{
+				"fieldname": "second_project",
+				"fieldtype": "Link",
+				"label": "Second Project",
+				"options": PROJECT_DT,
+				"ignore_user_permissions": 1,
+			},
+		],
+		permissions=[
+			{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1},
+			{"role": READER_ROLE, "read": 1},
+		],
+	)
+
 	_ensure_order_doctypes()
 
 
@@ -463,6 +533,10 @@ def _ensure_users() -> None:
 	_make_user(DISABLED_USER, "Disabled", ["Agent User", READER_ROLE], enabled=0)
 	_make_user(SKILL_AUTHOR, "Author", ["Agent User", MANAGER_ROLE, READER_ROLE])
 	_make_user(SKILL_APPROVER, "Approver", ["Agent User", MANAGER_ROLE, READER_ROLE])
+	# System Manager is the stock role that writes an Agent Skill without approving
+	# one: the doctype grants write to System Manager and to Agent Manager, and this
+	# user deliberately holds only the first.
+	_make_user(SKILL_WRITER, "Writer", ["Agent User", "System Manager"])
 
 
 def _make_user(email: str, first_name: str, roles: list[str], enabled: int = 1) -> None:
@@ -504,6 +578,16 @@ def _ensure_records() -> None:
 		frappe.get_doc({"doctype": VAULT_DT, "label": VAULT_RECORD, "ticket": TICKET_ALPHA}).insert(
 			ignore_permissions=True
 		)
+
+	if not frappe.db.exists(BUNDLE_DT, BUNDLE_RECORD):
+		frappe.get_doc(
+			{
+				"doctype": BUNDLE_DT,
+				"label": BUNDLE_RECORD,
+				"first_project": PROJECT_ALPHA,
+				"second_project": PROJECT_BETA,
+			}
+		).insert(ignore_permissions=True)
 
 	_ensure_orders()
 
