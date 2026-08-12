@@ -58,7 +58,7 @@ def build_manifest(doctype: str, name: str) -> dict:
 		"slices": {
 			"child_tables": _child_tables(meta, doc),
 			"timeline": _timeline_counts(meta, doctype, name),
-			"attachments": {"count": _count_rows("File", _attachment_filters(doctype, name))},
+			"attachments": _attachment_counts(doctype, name),
 			"links": links,
 		},
 		"not_visible": not_visible,
@@ -190,6 +190,16 @@ def _communication_count(doctype: str, name: str) -> int:
 		)
 	)
 	return len(names)
+
+
+def _attachment_counts(doctype: str, name: str) -> dict:
+	# Attachments are plucked under the same cap as the timeline counts, so they need
+	# the same marker: exactly COUNT_CAP means "at least this many", not "this many".
+	count = _count_rows("File", _attachment_filters(doctype, name))
+	counts = {"count": count}
+	if count >= COUNT_CAP:
+		counts["capped_at"] = COUNT_CAP
+	return counts
 
 
 def _attachment_filters(doctype: str, name: str) -> dict:
