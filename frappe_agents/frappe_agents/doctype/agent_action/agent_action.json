@@ -152,7 +152,13 @@
   },
   {
    "read": 1,
+   "report": 1,
    "role": "Agent Auditor"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Agent Manager"
   }
  ],
  "quick_entry": 0,
