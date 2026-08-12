@@ -2,3 +2,4 @@
 // The basename is the global assets.json key, so it must stay app-unique.
 import "./chat_ui.js";
 import "./form_button.js";
+import "./agent_action_list.js";
