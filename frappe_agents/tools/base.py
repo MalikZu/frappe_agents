@@ -19,6 +19,8 @@ OUTCOME_SUCCESS = "Success"
 OUTCOME_DENIED = "Denied"
 OUTCOME_ERROR = "Error"
 
+RUN_FLAG = "agent_current_run"
+
 ARGS_JSON_LIMIT = 10_000
 RESULT_SUMMARY_LIMIT = 500
 DOCS_TOUCHED_LIMIT = 500
@@ -69,6 +71,11 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 
 	docs_touched = None
 	result: Any = None
+	# A handler that records something — a proposal, an audit row — has to say which
+	# run asked for it. The run is the caller's, not the handler's argument, so it
+	# travels beside the call rather than inside the model's payload.
+	previous_run = frappe.flags.get(RUN_FLAG)
+	frappe.flags[RUN_FLAG] = run_doc
 	try:
 		handler = _resolve_handler(run_doc, tool_name)
 		result = handler(args)
@@ -80,6 +87,8 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 	except Exception as exc:
 		outcome, result, error = OUTCOME_ERROR, None, _message(exc)
 		frappe.logger("frappe_agents").warning(f"tool {tool_name} failed on run {run_name}: {error}")
+	finally:
+		frappe.flags[RUN_FLAG] = previous_run
 
 	_log_call(
 		run_name,
@@ -93,6 +102,11 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 	)
 
 	return {"ok": outcome == OUTCOME_SUCCESS, "result": result, "error": error}
+
+
+def current_run() -> Any:
+	"""The Agent Run this tool call belongs to, or None outside a run."""
+	return frappe.flags.get(RUN_FLAG)
 
 
 def _check_kill_switch() -> None:
