@@ -1,0 +1,6 @@
+app_name = "frappe_agents"
+app_title = "Frappe Agents"
+app_publisher = "Malik AlZubaidi"
+app_description = "Agent runtime for Frappe. Agents are records, not deployments."
+app_email = "malikzu.sg@gmail.com"
+app_license = "mit"
