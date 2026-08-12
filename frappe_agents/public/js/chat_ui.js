@@ -20,6 +20,11 @@ const STYLES = `
 	.agent-chat-tool-args { display: none; margin: 4px 0 8px 14px; padding: 6px 8px; background: var(--control-bg); border-radius: 6px; font-size: var(--text-sm); white-space: pre-wrap; }
 	.agent-chat-status { font-size: var(--text-sm); color: var(--text-muted); margin-bottom: 10px; }
 	.agent-chat-empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+	.agent-chat-action { border: 1px solid var(--border-color); border-left: 3px solid var(--orange-500, var(--border-color)); border-radius: 8px; padding: 8px 12px; margin: 4px 0 10px 0; background: var(--card-bg, var(--control-bg)); }
+	.agent-chat-action-title { font-weight: 600; }
+	.agent-chat-action-target { font-size: var(--text-sm); color: var(--text-muted); }
+	.agent-chat-action-reason { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+	.agent-chat-action-link { display: inline-block; margin-top: 6px; font-size: var(--text-sm); }
 `;
 
 function add_styles() {
@@ -280,6 +285,9 @@ frappe_agents.ChatUI = class ChatUI {
 			case "error":
 				this.render_error(data);
 				break;
+			case "action_proposed":
+				this.render_action_proposed(data);
+				break;
 			default:
 				this.render_status(data);
 		}
@@ -326,6 +334,43 @@ frappe_agents.ChatUI = class ChatUI {
 
 		this.insert_before_pending(data.run, $line);
 		this.insert_before_pending(data.run, $args);
+	}
+
+	/**
+	 * The agent has asked for a submit or a cancel. That is not a message and not
+	 * a tool result — it is a thing waiting for a person, so it gets a card with
+	 * the agent's stated reason and a way through to the approval form.
+	 */
+	render_action_proposed(data) {
+		if (!data.action) return;
+		this.clear_empty();
+
+		const verb = data.action_type === "Cancel" ? __("Cancel") : __("Submit");
+		const $card = $("<div class='agent-chat-action'></div>");
+		$("<div class='agent-chat-action-title'></div>")
+			.text(__("Waiting for your approval: {0}", [verb]))
+			.appendTo($card);
+
+		if (data.target_doctype && data.target_name) {
+			$("<div class='agent-chat-action-target'></div>")
+				.text(`${__(data.target_doctype)}: ${data.target_name}`)
+				.appendTo($card);
+		}
+		if (data.reason) {
+			$("<div class='agent-chat-action-reason'></div>").text(data.reason).appendTo($card);
+		}
+
+		// A plain desk link: the router picks it up, so it works in the page and
+		// in the form panel without either of them knowing about routes.
+		$("<a class='agent-chat-action-link'></a>")
+			.attr("href", `/app/agent-action/${encodeURIComponent(data.action)}`)
+			.text(__("Review the proposal"))
+			// Mounted in the form panel the route changes behind the dialog, so
+			// step out of the way and let the router carry on.
+			.on("click", () => this.$body.closest(".modal").modal("hide"))
+			.appendTo($card);
+
+		this.insert_before_pending(data.run, $card);
 	}
 
 	render_message(data) {
