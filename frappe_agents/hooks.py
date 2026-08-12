@@ -8,6 +8,18 @@ app_license = "mit"
 # Desk
 # ----
 
+# The apps screen tile. Shown to anyone holding an agent role; everyone else
+# would only land on a workspace they cannot read.
+add_to_apps_screen = [
+	{
+		"name": "frappe_agents",
+		"logo": "/assets/frappe_agents/images/logo.svg",
+		"title": "Frappe Agents",
+		"route": "/desk/frappe-agents",
+		"has_permission": "frappe_agents.utils.has_app_permission",
+	}
+]
+
 app_include_js = ["frappe_agents.bundle.js"]
 
 # Puts the form-eligible agents on the boot payload so the Ask Agent button
