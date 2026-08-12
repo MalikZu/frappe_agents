@@ -18,6 +18,11 @@ Two permission shapes live side by side, and the difference matters:
   every single row is then re-checked with `frappe.has_permission(..., doc=...)`,
   because `get_list` never runs per-row `has_permission` hooks. What the user
   may not see is reported as a count, never as content.
+
+"Not here" has two causes and they are never merged. A row the permission system
+hid is `not_visible_count`; a row that exists past the sample limit is
+`beyond_sample_count`, alongside `sampled: true`. Only the first is a permission
+denial, and only the first puts a doctype in the `not_visible` block.
 """
 
 import json
@@ -193,25 +198,26 @@ def _slice_links(doctype: str, name: str, params: dict) -> dict:
 		raise ValueError("direction must be up, down or all.")
 
 	limit = _limit(params.get("limit"), MAX_LINK_ROWS)
-	payload: dict = {"direction": direction}
-	invisible = 0
-	invisible_doctypes: list[str] = []
+	payload: dict = {"direction": direction, "limit": limit}
+	not_visible = 0
+	not_visible_doctypes: list[str] = []
 
 	if direction in ("up", "all"):
 		up = _links_up(doctype, name, limit)
 		payload["up"] = up["groups"]
-		invisible += up["invisible_count"]
-		invisible_doctypes += up["invisible_doctypes"]
+		not_visible += up["not_visible_count"]
+		not_visible_doctypes += up["not_visible_doctypes"]
 
 	if direction in ("down", "all"):
 		down = _links_down(doctype, name, limit)
 		payload["down"] = down["groups"]
-		invisible += down["invisible_count"]
-		invisible_doctypes += down["invisible_doctypes"]
+		not_visible += down["not_visible_count"]
+		not_visible_doctypes += down["not_visible_doctypes"]
 
+	# Permission denials only. A group capped by the limit says so with `sampled`.
 	payload["not_visible"] = {
-		"count": invisible,
-		"doctypes": sorted(set(invisible_doctypes)),
+		"count": not_visible,
+		"doctypes": sorted(set(not_visible_doctypes)),
 	}
 	return payload
 
@@ -436,8 +442,8 @@ def _links_up(doctype: str, name: str, limit: int) -> dict:
 	allowed = meta.get_permlevel_access("read")
 
 	groups: dict[str, dict] = {}
-	invisible = 0
-	invisible_doctypes: list[str] = []
+	not_visible = 0
+	not_visible_doctypes: list[str] = []
 	seen: set[tuple[str, str]] = set()
 
 	for df in meta.fields:
@@ -456,16 +462,16 @@ def _links_up(doctype: str, name: str, limit: int) -> dict:
 
 		group = groups.setdefault(
 			target_doctype,
-			{"doctype": target_doctype, "docs": [], "visible_count": 0, "invisible_count": 0},
+			{"doctype": target_doctype, "docs": [], "visible_count": 0, "not_visible_count": 0},
 		)
 		if len(group["docs"]) >= limit:
 			continue
 
 		summary = _document_summary(target_doctype, value)
 		if summary is None:
-			invisible += 1
-			group["invisible_count"] += 1
-			invisible_doctypes.append(target_doctype)
+			not_visible += 1
+			group["not_visible_count"] += 1
+			not_visible_doctypes.append(target_doctype)
 			continue
 		summary["field"] = df.fieldname
 		group["docs"].append(summary)
@@ -473,53 +479,97 @@ def _links_up(doctype: str, name: str, limit: int) -> dict:
 
 	return {
 		"groups": [groups[key] for key in sorted(groups)],
-		"invisible_count": invisible,
-		"invisible_doctypes": invisible_doctypes,
+		"not_visible_count": not_visible,
+		"not_visible_doctypes": not_visible_doctypes,
 	}
 
 
 def _links_down(doctype: str, name: str, limit: int) -> dict:
 	"""Documents that point at this one, per linked doctype."""
 	groups = []
-	invisible = 0
-	invisible_doctypes: list[str] = []
+	not_visible = 0
+	not_visible_doctypes: list[str] = []
 
 	for linked_doctype, info in link_targets(doctype)[:MAX_LINK_DOCTYPES]:
 		filters, or_filters = link_filters(doctype, name, info)
-		rows = visible_rows(linked_doctype, filters, or_filters, limit)
-		total = total_count(linked_doctype, filters, or_filters)
+		sample = sample_linked_rows(linked_doctype, filters, or_filters, limit)
 
 		docs = []
-		for row in rows:
+		hidden = sample["not_visible"]
+		for row in sample["rows"]:
 			summary = _document_summary(linked_doctype, row.get("name"))
-			if summary is not None:
-				docs.append(summary)
+			if summary is None:
+				hidden += 1
+				continue
+			docs.append(summary)
 
-		hidden = 0
-		if total is not None:
-			hidden = max(0, cint(total) - len(docs))
-		elif len(rows) > len(docs):
-			hidden = len(rows) - len(docs)
-
-		if not docs and not hidden:
+		beyond = sample["beyond_sample"]
+		if not docs and not hidden and not beyond:
 			continue
 
-		groups.append(
-			{
-				"doctype": linked_doctype,
-				"docs": docs,
-				"visible_count": len(docs),
-				"invisible_count": hidden,
-			}
-		)
+		group = {
+			"doctype": linked_doctype,
+			"docs": docs,
+			"visible_count": len(docs),
+			"not_visible_count": hidden,
+		}
+		if sample["sampled"]:
+			# The list stopped at the limit. Rows past it were never looked at, so
+			# nothing is known about who may read them.
+			group["sampled"] = True
+			group["beyond_sample_count"] = beyond
+		groups.append(group)
+
 		if hidden:
-			invisible += hidden
-			invisible_doctypes.append(linked_doctype)
+			not_visible += hidden
+			not_visible_doctypes.append(linked_doctype)
 
 	return {
 		"groups": groups,
-		"invisible_count": invisible,
-		"invisible_doctypes": invisible_doctypes,
+		"not_visible_count": not_visible,
+		"not_visible_doctypes": not_visible_doctypes,
+	}
+
+
+def sample_linked_rows(linked_doctype: str, filters: list, or_filters: list, limit: int) -> dict:
+	"""One capped, permission-checked sample of the rows pointing at a document.
+
+	The two reasons a row is missing from the sample are kept apart, because only one
+	of them is a permission denial:
+
+	* `not_visible` — rows the permission system hid. `get_list` dropped them, or a
+	  per-row `has_permission` hook did. This is the honest hole.
+	* `beyond_sample` — rows that exist past `limit`. The sample stopped before them,
+	  so their visibility is unknown and claiming they are hidden would be a lie.
+
+	`beyond_sample` is only filled when the sample actually hit the limit; below it,
+	`get_list` returned everything the user may list and the rest of the raw total is
+	genuinely permission-hidden.
+	"""
+	listed = visible_rows(linked_doctype, filters, or_filters, limit)
+	sampled = len(listed) >= limit
+
+	rows = listed
+	if has_row_permission_hook(linked_doctype):
+		# get_list skipped the per-row hook, so a listed row is not yet a visible row.
+		rows = [row for row in listed if may_read(linked_doctype, row.get("name"))]
+
+	not_visible = len(listed) - len(rows)
+	beyond_sample = 0
+
+	total = total_count(linked_doctype, filters, or_filters)
+	if total is not None:
+		remainder = max(0, cint(total) - len(listed))
+		if sampled:
+			beyond_sample = remainder
+		else:
+			not_visible += remainder
+
+	return {
+		"rows": rows,
+		"not_visible": not_visible,
+		"beyond_sample": beyond_sample,
+		"sampled": sampled,
 	}
 
 

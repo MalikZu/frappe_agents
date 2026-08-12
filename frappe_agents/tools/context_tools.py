@@ -53,7 +53,9 @@ TOOLS: list[dict[str, Any]] = [
 			"the shape of everything attached to it — child table row counts, timeline and "
 			"attachment counts, and how many linked documents of each doctype exist. "
 			"Counts only, no content: use get_document_slice to read a part of it. "
-			"Documents the user may not see are reported under not_visible as counts."
+			"Documents the user may not see are reported under not_visible as counts. "
+			"A linked doctype marked sampled:true was counted up to a cap: its "
+			"beyond_sample_count is rows nobody looked at, not rows the user is denied."
 		),
 		"args_schema": {
 			"type": "object",

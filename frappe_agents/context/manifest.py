@@ -8,9 +8,14 @@ being handed a dump it did not ask for.
 
 Counts are permission-aware where it matters. Visible counts come from
 `get_list`; the raw total comes from `frappe.db.count`, which bypasses
-permissions entirely, and is used for one thing only: the arithmetic
-`invisible = total - visible`. Documents the user may not see are reported as a
-number and a doctype name — never as content.
+permissions entirely, and is used for one thing only: telling a permission
+denial apart from a row the sample never reached. Documents the user may not see
+are reported as a number and a doctype name — never as content.
+
+Linked rows are sampled at `VISIBLE_SAMPLE_CAP`, so a count carries which kind of
+hole it is: `not_visible_count` is a permission denial, `beyond_sample_count`
+(with `sampled: true`) is a row the sample stopped short of. Only a denial puts a
+doctype in the `not_visible` block.
 """
 
 from typing import Any
@@ -21,15 +26,12 @@ from frappe.utils import cint
 
 from frappe_agents.context.slices import (
 	COUNT_CAP,
-	has_row_permission_hook,
 	link_filters,
 	link_targets,
-	may_read,
 	project_fields,
 	require_read,
+	sample_linked_rows,
 	status_word,
-	total_count,
-	visible_rows,
 )
 
 MAX_CORE_FIELDS = 10
@@ -219,28 +221,33 @@ def _pluck(doctype: str, filters: Any) -> list:
 
 def _links(doctype: str, name: str) -> tuple[dict, dict]:
 	links: dict = {}
-	invisible_total = 0
-	invisible_doctypes: list[str] = []
+	not_visible_total = 0
+	not_visible_doctypes: list[str] = []
 
 	for linked_doctype, info in link_targets(doctype)[:MAX_LINK_DOCTYPES]:
 		filters, or_filters = link_filters(doctype, name, info)
-		rows = visible_rows(linked_doctype, filters, or_filters, VISIBLE_SAMPLE_CAP)
-		if has_row_permission_hook(linked_doctype):
-			# get_list skipped the per-row hook, so a listed row is not yet a visible row.
-			rows = [row for row in rows if may_read(linked_doctype, row.get("name"))]
-		visible = len(rows)
-		total = total_count(linked_doctype, filters, or_filters)
-		invisible = max(0, cint(total) - visible) if total is not None else 0
+		sample = sample_linked_rows(linked_doctype, filters, or_filters, VISIBLE_SAMPLE_CAP)
+		visible = len(sample["rows"])
+		hidden = sample["not_visible"]
+		beyond = sample["beyond_sample"]
 
-		if not visible and not invisible:
+		if not visible and not hidden and not beyond:
 			continue
 
-		links[linked_doctype] = {"visible_count": visible, "invisible_count": invisible}
-		if invisible:
-			invisible_total += invisible
-			invisible_doctypes.append(linked_doctype)
+		entry = {"visible_count": visible, "not_visible_count": hidden}
+		if sample["sampled"]:
+			# The count stopped at the cap. Rows past it may well be readable, so they
+			# are reported as unread, not as hidden.
+			entry["sampled"] = True
+			entry["sample_cap"] = VISIBLE_SAMPLE_CAP
+			entry["beyond_sample_count"] = beyond
+		links[linked_doctype] = entry
 
-	return links, {"count": invisible_total, "doctypes": invisible_doctypes}
+		if hidden:
+			not_visible_total += hidden
+			not_visible_doctypes.append(linked_doctype)
+
+	return links, {"count": not_visible_total, "doctypes": not_visible_doctypes}
 
 
 def _require_str(value: Any, label: str) -> str:
