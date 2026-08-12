@@ -43,7 +43,9 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 	}
 
 	refresh() {
-		this.load_agents().then(() => this.rehydrate());
+		this.load_agents()
+			.then(() => this.rehydrate())
+			.catch((error) => console.error("frappe_agents: could not load agents", error));
 	}
 
 	load_agents() {
