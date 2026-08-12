@@ -1,0 +1,101 @@
+name: Server Tests
+
+on:
+  pull_request:
+    # Skip docs-only and stray-script changes, but keep the js we actually ship.
+    paths:
+      - "**"
+      - "!**.md"
+      - "!**.js"
+      - "frappe_agents/public/js/**"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping --host=127.0.0.1 --password=root"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          path: frappe_agents
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Add test site to hosts
+        run: echo "127.0.0.1 test_site" | sudo tee -a /etc/hosts
+
+      - name: Install system packages
+        # bench init shells out to `redis-server --version` and dies with exit 127
+        # if it is missing, so install it explicitly instead of trusting the image.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server mariadb-client
+
+      - name: Install bench
+        run: pip install frappe-bench
+
+      - name: Init bench
+        run: bench init --skip-assets --frappe-branch version-16 /home/runner/frappe-bench
+
+      - name: Start redis and point bench at the services
+        working-directory: /home/runner/frappe-bench
+        run: |
+          redis-server --daemonize yes --port 13000
+          redis-server --daemonize yes --port 11000
+          bench set-config -g db_host 127.0.0.1
+          bench set-config -g redis_cache redis://localhost:13000
+          bench set-config -g redis_queue redis://localhost:11000
+          bench set-config -g redis_socketio redis://localhost:11000
+
+      - name: Create test site
+        working-directory: /home/runner/frappe-bench
+        run: >
+          bench new-site test_site
+          --db-root-password root
+          --admin-password admin
+          --mariadb-user-host-login-scope=%
+
+      - name: Install frappe_agents
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench get-app frappe_agents ${{ github.workspace }}/frappe_agents
+          bench --site test_site install-app frappe_agents
+          bench --site test_site set-config allow_tests true
+
+      - name: Run tests
+        working-directory: /home/runner/frappe-bench
+        run: bench --site test_site run-tests --app frappe_agents
