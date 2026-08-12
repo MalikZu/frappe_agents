@@ -18,7 +18,12 @@ The permission model is the product.
 ## Working on this repo
 
 - Committing? Use the `semantic-commit` skill.
+- Commit as you go: one small commit per coherent change. Don't batch a
+  phase or milestone into one big commit.
 - `internal/` is never committed. No internal plans or notes in commits,
   docs, or code comments.
+- Frappe's official skills help here. Install locally:
+  `npx skills add frappe/skills --skill frappe-app-dev --skill quality-code-review -a claude-code -y`
+  They have no upstream license — never commit them.
 - Docs are for users: short sentences, plain words, no filler.
 - Keep this file small. Details go in `docs/` and get linked, not inlined.

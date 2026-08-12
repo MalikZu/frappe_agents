@@ -21,3 +21,9 @@ node_modules/
 
 # local agent settings
 .claude/settings.local.json
+
+# third-party skills installed locally (frappe/skills has no license — do not commit)
+.agents/
+.claude/skills/frappe-app-dev/
+.claude/skills/quality-code-review/
+skills-lock.json
