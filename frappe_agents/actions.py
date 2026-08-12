@@ -33,6 +33,7 @@ approval time. That is recorded on the row as Failed with the reason, never rais
 into the approver's request as an unhandled error.
 """
 
+import datetime
 from typing import Any
 
 import frappe
@@ -61,11 +62,17 @@ SAVEPOINT = "agent_action_apply"
 
 
 @frappe.whitelist(methods=["POST"])
-def approve_action(action: str, expected_modified: str, note: str | None = None) -> dict:
+def approve_action(action: str, expected_modified: Any, note: str | None = None) -> dict:
 	"""Approve one Agent Action and apply it as the approver.
 
 	`expected_modified` is the target document's `modified` as it was on the screen
 	the approver decided from. It is required, and a mismatch refuses the approval.
+
+	It is annotated `Any` on purpose. `frappe.whitelist` validates arguments against
+	their annotations, and `modified` is a `datetime` whenever it came out of the
+	database and a `str` whenever it came off the wire — so pinning it to `str` would
+	reject the value every server-side caller naturally has. `_check_lock` is what
+	narrows it, through `get_datetime`, and it fails closed on anything unparseable.
 	"""
 	doc_action = _load_action(action)
 	note = _clean_note(note)
@@ -340,7 +347,7 @@ def _load_target(action: Any) -> Any:
 
 def _check_lock(action: Any, target: Any, expected_modified: Any) -> None:
 	"""Refuse an approval of a version the approver did not look at."""
-	expected = get_datetime(expected_modified)
+	expected = _as_instant(expected_modified)
 	if not expected:
 		# Fail closed. An unreadable timestamp is not a match, it is a missing lock.
 		frappe.throw(
@@ -428,6 +435,19 @@ def _same_timestamp(left: Any, right: Any) -> bool:
 	"""Compare two `modified` values as instants, never as strings."""
 	left, right = get_datetime(left), get_datetime(right)
 	return bool(left) and bool(right) and left == right
+
+
+def _as_instant(value: Any) -> Any:
+	"""`value` as a datetime, or None if it is not one.
+
+	`get_datetime` is only total over strings and datetimes: it reads None as *now*
+	and treats a list as constructor arguments. Since this is what the lock is
+	checked against, anything outside those two types is a missing lock, not a
+	timestamp — it comes back None and the caller refuses.
+	"""
+	if not isinstance(value, str | datetime.datetime):
+		return None
+	return get_datetime(value)
 
 
 def _cutoff(days: int) -> Any:
