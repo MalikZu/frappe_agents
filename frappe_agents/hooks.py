@@ -15,4 +15,7 @@ after_migrate = "frappe_agents.tools.registry.sync_tools"
 
 # Modules that expose agent tools. Each one defines a TOOLS list.
 # Other apps extend this from their own hooks.py.
-agent_tools = ["frappe_agents.tools.read_tools"]
+agent_tools = [
+	"frappe_agents.tools.read_tools",
+	"frappe_agents.tools.context_tools",
+]
