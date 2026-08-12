@@ -9,6 +9,7 @@
   "global_enabled",
   "max_depth",
   "default_daily_token_budget",
+  "action_expiry_days",
   "suppress_on_import"
  ],
  "fields": [
@@ -31,6 +32,13 @@
    "fieldname": "default_daily_token_budget",
    "fieldtype": "Int",
    "label": "Default Daily Token Budget"
+  },
+  {
+   "default": "7",
+   "description": "Days a pending Agent Action waits for a decision. After that it expires and the agent has to propose again.",
+   "fieldname": "action_expiry_days",
+   "fieldtype": "Int",
+   "label": "Action Expiry (days)"
   },
   {
    "default": "1",
