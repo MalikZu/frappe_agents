@@ -135,6 +135,13 @@ ORDER_ROLE_RIGHTS = {
 	SUBMITTER_ROLE: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
 }
 
+# The two roles that exist to hold read and nothing else, and the doctypes they
+# read. A permission rule written as `{"read": 1}` does not say read-only: DocPerm
+# defaults write, create and delete to 1 and frappe fills them in on insert, so
+# every rule below has to be held to what it names.
+READ_ONLY_ROLES = (READER_ROLE, PERMLEVEL_ROLE)
+WRITE_RIGHTS = ("write", "create", "delete", "submit", "cancel", "amend")
+
 WORKFLOW_NAME = "FA Test Order Workflow"
 WORKFLOW_DRAFT_STATE = "FA Workflow Draft"
 WORKFLOW_APPROVED_STATE = "FA Workflow Approved"
@@ -167,6 +174,7 @@ def ensure_fixtures() -> None:
 	"""Create every fixture the tests need. Safe to call again."""
 	_ensure_roles()
 	_ensure_doctypes()
+	_ensure_read_only_roles()
 	_ensure_order_permissions()
 	_ensure_users()
 	_ensure_records()
@@ -724,6 +732,33 @@ def _ensure_order_doctypes() -> None:
 		],
 		is_submittable=1,
 	)
+
+
+def _ensure_read_only_roles() -> None:
+	"""Hold the reader roles to reading, on every doctype that grants them anything.
+
+	Frappe fills a DocPerm's unstated rights from the field defaults, and those
+	default `write`, `create` and `delete` to 1 — so `{"role": READER_ROLE,
+	"read": 1}` above quietly hands out three rights it does not name. The tests
+	that prove an agent cannot write what its user may not write would pass on a
+	user who may, which is the same as not testing it.
+	"""
+	for doctype in (PROJECT_DT, TICKET_DT, VAULT_DT, BUNDLE_DT, ORDER_DT):
+		doc = frappe.get_doc("DocType", doctype)
+		granted = [
+			perm
+			for perm in doc.permissions
+			if perm.role in READ_ONLY_ROLES and any(cint(perm.get(right)) for right in WRITE_RIGHTS)
+		]
+		if not granted:
+			continue
+
+		for perm in granted:
+			for right in WRITE_RIGHTS:
+				perm.set(right, 0)
+		doc.flags.ignore_permissions = True
+		doc.save(ignore_permissions=True)
+		frappe.clear_cache(doctype=doctype)
 
 
 def _ensure_order_permissions() -> None:
