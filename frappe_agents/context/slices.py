@@ -462,20 +462,30 @@ def _links_up(doctype: str, name: str, limit: int) -> dict:
 
 		group = groups.setdefault(
 			target_doctype,
-			{"doctype": target_doctype, "docs": [], "visible_count": 0, "not_visible_count": 0},
+			{
+				"doctype": target_doctype,
+				"docs": [],
+				"visible_count": 0,
+				"not_visible_count": 0,
+				"truncated": False,
+			},
 		)
-		if len(group["docs"]) >= limit:
-			continue
 
+		# Read permission is decided before the display limit. A linked document the
+		# user may not read is counted whether or not there is room left to list it.
 		summary = _document_summary(target_doctype, value)
 		if summary is None:
 			not_visible += 1
 			group["not_visible_count"] += 1
 			not_visible_doctypes.append(target_doctype)
 			continue
+
+		group["visible_count"] += 1
+		if len(group["docs"]) >= limit:
+			group["truncated"] = True
+			continue
 		summary["field"] = df.fieldname
 		group["docs"].append(summary)
-		group["visible_count"] += 1
 
 	return {
 		"groups": [groups[key] for key in sorted(groups)],
