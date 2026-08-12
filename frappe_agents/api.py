@@ -8,11 +8,16 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import cint, now_datetime, today
+from frappe.utils import cint, get_datetime, now_datetime, today
+
+from frappe_agents.actions import APPROVER_ROLE, separation_of_duties_block
 
 MAX_MESSAGE_CHARS = 20_000
 TITLE_CHARS = 140
 DESCRIPTION_CHARS = 200
+
+DEFAULT_PENDING_LIMIT = 50
+MAX_PENDING_LIMIT = 200
 
 
 @frappe.whitelist()
@@ -136,6 +141,72 @@ def get_conversation(conversation: str) -> dict:
 		"last_activity": doc.last_activity,
 		"runs": runs,
 	}
+
+
+@frappe.whitelist()
+def list_pending_actions(limit: int | None = None) -> list[dict]:
+	"""The proposals waiting on this approver, oldest first.
+
+	Reads through `frappe.get_list`, so an approver only sees the rows their
+	permissions already allow. Each row carries whether *this* user may decide it —
+	the separation of duties is a property of the pair, not of the row, and the
+	queue should say so before the approver opens anything.
+	"""
+	if APPROVER_ROLE not in set(frappe.get_roles()):
+		raise frappe.PermissionError(
+			_("You need the {0} role to review agent proposals.").format(APPROVER_ROLE)
+		)
+
+	rows = frappe.get_list(
+		"Agent Action",
+		filters={"status": "Pending"},
+		fields=[
+			"name",
+			"action_type",
+			"target_doctype",
+			"target_name",
+			"reason",
+			"agent",
+			"run",
+			"requested_by",
+			"proposal_modified",
+			"creation",
+		],
+		order_by="creation asc",
+		limit_page_length=_pending_limit(limit),
+	)
+
+	for row in rows:
+		block = separation_of_duties_block(frappe._dict(row))
+		row["can_decide"] = 0 if block else 1
+		row["blocked_because"] = block
+		# What the approver will be asked to send back as expected_modified, and the
+		# first hint that the document moved since the agent proposed it.
+		row["target_modified"] = _target_modified(row)
+		row["edited_since_proposal"] = (
+			0 if _same_instant(row["target_modified"], row.get("proposal_modified")) else 1
+		)
+
+	return rows
+
+
+def _pending_limit(limit: Any) -> int:
+	limit = cint(limit) or DEFAULT_PENDING_LIMIT
+	return max(1, min(limit, MAX_PENDING_LIMIT))
+
+
+def _target_modified(row: dict) -> Any:
+	doctype, name = row.get("target_doctype"), row.get("target_name")
+	if not doctype or not name:
+		return None
+	if not frappe.has_permission(doctype, "read", doc=name):
+		return None
+	return frappe.db.get_value(doctype, name, "modified")
+
+
+def _same_instant(left: Any, right: Any) -> bool:
+	left, right = get_datetime(left), get_datetime(right)
+	return bool(left) and bool(right) and left == right
 
 
 def _validate_context(doctype: Any, name: Any) -> tuple[str | None, str | None]:
