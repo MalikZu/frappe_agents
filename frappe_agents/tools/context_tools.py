@@ -22,19 +22,19 @@ from frappe_agents.tools.base import CAPABILITY_READ
 SLICE_PARAMS = ("table", "direction", "limit")
 
 
-def get_document_context(args: dict) -> dict:
+def get_document_context(payload: dict) -> dict:
 	"""What exists around one document: core fields and counts, no content."""
-	return build_manifest(_arg(args, "doctype"), _arg(args, "name"))
+	return build_manifest(_arg(payload, "doctype"), _arg(payload, "name"))
 
 
-def get_document_slice(args: dict) -> dict:
+def get_document_slice(payload: dict) -> dict:
 	"""One named slice of one document."""
-	params = {key: args[key] for key in SLICE_PARAMS if args.get(key) is not None}
-	return get_slice(_arg(args, "doctype"), _arg(args, "name"), _arg(args, "slice"), **params)
+	params = {key: payload[key] for key in SLICE_PARAMS if payload.get(key) is not None}
+	return get_slice(_arg(payload, "doctype"), _arg(payload, "name"), _arg(payload, "slice"), **params)
 
 
-def _arg(args: dict, key: str) -> str:
-	value = args.get(key)
+def _arg(payload: dict, key: str) -> str:
+	value = payload.get(key)
 	if isinstance(value, int) and not isinstance(value, bool):
 		# Documents on autoincrement naming come back as integers.
 		return str(value)

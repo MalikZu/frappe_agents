@@ -36,19 +36,19 @@ STANDARD_FIELDS = (
 )
 
 
-def search_documents(args: dict) -> dict:
+def search_documents(payload: dict) -> dict:
 	"""List documents of one doctype the current user is allowed to see."""
-	doctype = _require_str(args, "doctype")
+	doctype = _require_str(payload, "doctype")
 	_require_read(doctype)
 
 	meta = frappe.get_meta(doctype)
 	allowed_levels = meta.get_permlevel_access("read")
 
-	fields, restricted = _resolve_fields(meta, args.get("fields"), allowed_levels)
-	filters = _resolve_filters(meta, args.get("filters"), allowed_levels)
-	limit = _resolve_limit(args.get("limit"))
-	order_by = _resolve_order_by(meta, args.get("order_by"), allowed_levels)
-	include_cancelled = _as_bool(args.get("include_cancelled"))
+	fields, restricted = _resolve_fields(meta, payload.get("fields"), allowed_levels)
+	filters = _resolve_filters(meta, payload.get("filters"), allowed_levels)
+	limit = _resolve_limit(payload.get("limit"))
+	order_by = _resolve_order_by(meta, payload.get("order_by"), allowed_levels)
+	include_cancelled = _as_bool(payload.get("include_cancelled"))
 
 	# A cancelled document is a document that was undone. Answering from one is
 	# how an agent states a number that stopped being true, so it takes an
@@ -99,9 +99,9 @@ def search_documents(args: dict) -> dict:
 	}
 
 
-def get_doctype_meta(args: dict) -> dict:
+def get_doctype_meta(payload: dict) -> dict:
 	"""Describe the fields of a doctype the current user is allowed to read."""
-	doctype = _require_str(args, "doctype")
+	doctype = _require_str(payload, "doctype")
 	_require_read(doctype)
 
 	meta = frappe.get_meta(doctype)
@@ -135,10 +135,10 @@ def get_doctype_meta(args: dict) -> dict:
 	}
 
 
-def run_report(args: dict) -> dict:
+def run_report(payload: dict) -> dict:
 	"""Run a saved report as the current user and return its rows."""
-	report_name = _require_str(args, "report_name")
-	filters = args.get("filters") or {}
+	report_name = _require_str(payload, "report_name")
+	filters = payload.get("filters") or {}
 	if not isinstance(filters, dict):
 		raise ValueError("filters must be an object of fieldname to value.")
 
@@ -193,8 +193,8 @@ def _require_read(doctype: str) -> None:
 		raise ToolDenied(f"You are not allowed to read {doctype}.")
 
 
-def _require_str(args: dict, key: str) -> str:
-	value = args.get(key)
+def _require_str(payload: dict, key: str) -> str:
+	value = payload.get(key)
 	if not isinstance(value, str) or not value.strip():
 		raise ValueError(f"{key} is required and must be a string.")
 	return value.strip()
