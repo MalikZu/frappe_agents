@@ -165,15 +165,37 @@ def make_run(
 
 def make_comment(doctype: str, name: str, content: str) -> str:
 	"""Get-or-create one Comment on a document, keyed on its text."""
-	filters = {"reference_doctype": doctype, "reference_name": name, "content": content}
-	existing = frappe.db.exists("Comment", filters)
+	existing = frappe.db.exists(
+		"Comment", {"reference_doctype": doctype, "reference_name": name, "content": content}
+	)
 	if existing:
 		return existing
 
-	comment = frappe.get_doc({"doctype": "Comment", "comment_type": "Comment", **filters})
+	comment = frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Comment",
+			"reference_doctype": doctype,
+			"reference_name": name,
+			"content": "placeholder",
+		}
+	)
 	comment.flags.ignore_permissions = True
 	comment.insert(ignore_permissions=True)
+	write_raw(comment.doctype, comment.name, "content", content)
 	return comment.name
+
+
+def write_raw(doctype: str, name: str, fieldname: str, value: str) -> None:
+	"""Put a value on a row exactly as given, skipping the save path.
+
+	Frappe's XSS filter rewrites tags in text fields on save, and the fixtures that
+	carry hostile text exist to keep those tags. Text like this reaches a real
+	database through doors that never sanitise — imports, patches, direct SQL — so
+	the assembler has to handle what is actually stored.
+	"""
+	if frappe.db.get_value(doctype, name, fieldname) != value:
+		frappe.db.set_value(doctype, name, fieldname, value, update_modified=False)
 
 
 def amended_order() -> str:
@@ -498,6 +520,9 @@ def _ensure_orders() -> None:
 		amendment.amended_from = ORDER_CANCELLED
 		amendment.insert(ignore_permissions=True)
 
+	for name in frappe.get_all(ORDER_DT, pluck="name"):
+		write_raw(ORDER_DT, name, "notes", INJECTION)
+
 
 def _submit_order(title: str) -> Any:
 	order = _order_doc(title)
@@ -514,7 +539,6 @@ def _order_doc(title: str) -> Any:
 			"project": PROJECT_ALPHA,
 			"amount": 100,
 			"internal_rate": ORDER_RATE,
-			"notes": INJECTION,
 			"items": [{"item": "FA Widget", "qty": 2, "unit_cost": ORDER_UNIT_COST}],
 		}
 	)
