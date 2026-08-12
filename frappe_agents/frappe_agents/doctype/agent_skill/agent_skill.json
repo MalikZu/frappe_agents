@@ -1,0 +1,99 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:skill_title",
+ "creation": "2026-08-12 00:00:00.000000",
+ "description": "A reusable instruction block an agent loads into its system prompt. Only Approved skills reach a model.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "skill_title",
+  "status",
+  "approved_by",
+  "body",
+  "applies_to_doctypes",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "skill_title",
+   "fieldtype": "Data",
+   "label": "Skill Title",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "Draft",
+   "description": "A skill enters context only while it is Approved.",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nIn Review\nApproved\nRetired",
+   "reqd": 1
+  },
+  {
+   "description": "Set on approval. Cannot be the author of the skill.",
+   "fieldname": "approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "description": "The text appended to the agent's instructions.",
+   "fieldname": "body",
+   "fieldtype": "Long Text",
+   "label": "Body",
+   "reqd": 1
+  },
+  {
+   "description": "Doctypes this skill applies to. Empty means every doctype.",
+   "fieldname": "applies_to_doctypes",
+   "fieldtype": "Table MultiSelect",
+   "label": "Applies To Doctypes",
+   "options": "Agent DocType Scope"
+  },
+  {
+   "description": "Review notes. Never sent to a model.",
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Skill",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Agent Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Agent User"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
