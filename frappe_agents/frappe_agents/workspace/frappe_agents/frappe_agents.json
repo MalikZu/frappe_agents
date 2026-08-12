@@ -1,0 +1,219 @@
+{
+ "app": "frappe_agents",
+ "charts": [],
+ "content": "[{\"id\":\"fa-sc-chat\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Agent Chat\",\"col\":3}},{\"id\":\"fa-sc-pending\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Pending Actions\",\"col\":3}},{\"id\":\"fa-sc-agents\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Agents\",\"col\":3}},{\"id\":\"fa-sc-skills\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Skills\",\"col\":3}},{\"id\":\"fa-sc-convs\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Conversations\",\"col\":3}},{\"id\":\"fa-sc-providers\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"LLM Providers\",\"col\":3}},{\"id\":\"fa-sc-profiles\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Model Profiles\",\"col\":3}},{\"id\":\"fa-sc-review\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Review Quality\",\"col\":3}},{\"id\":\"fa-spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"fa-header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Masters &amp; Reports</b></span>\",\"col\":12}},{\"id\":\"fa-card-setup\",\"type\":\"card\",\"data\":{\"card_name\":\"Agent Setup\",\"col\":4}},{\"id\":\"fa-card-models\",\"type\":\"card\",\"data\":{\"card_name\":\"Models\",\"col\":4}},{\"id\":\"fa-card-activity\",\"type\":\"card\",\"data\":{\"card_name\":\"Activity\",\"col\":4}},{\"id\":\"fa-card-reports\",\"type\":\"card\",\"data\":{\"card_name\":\"Reports\",\"col\":4}}]",
+ "creation": "2026-08-13 00:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "message",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Frappe Agents",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Setup",
+   "link_count": 4,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent",
+   "link_count": 0,
+   "link_to": "Agent",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Skill",
+   "link_count": 0,
+   "link_to": "Agent Skill",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Tool",
+   "link_count": 0,
+   "link_to": "Agent Tool",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Settings",
+   "link_count": 0,
+   "link_to": "Agent Settings",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Models",
+   "link_count": 2,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "LLM Provider",
+   "link_count": 0,
+   "link_to": "LLM Provider",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "LLM Model Profile",
+   "link_count": 0,
+   "link_to": "LLM Model Profile",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Activity",
+   "link_count": 3,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Conversation",
+   "link_count": 0,
+   "link_to": "Agent Conversation",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Run",
+   "link_count": 0,
+   "link_to": "Agent Run",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Action",
+   "link_count": 0,
+   "link_to": "Agent Action",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Reports",
+   "link_count": 1,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Agent Action Review Quality",
+   "link_count": 0,
+   "link_to": "Agent Action Review Quality",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-08-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Frappe Agents",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [],
+ "sequence_id": 20.0,
+ "shortcuts": [
+  {
+   "label": "Agent Chat",
+   "link_to": "agent-chat",
+   "type": "Page"
+  },
+  {
+   "color": "Orange",
+   "doc_view": "List",
+   "format": "{} Pending",
+   "label": "Pending Actions",
+   "link_to": "Agent Action",
+   "stats_filter": "{\"status\": \"Pending\"}",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "List",
+   "label": "Agents",
+   "link_to": "Agent",
+   "stats_filter": "[]",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "List",
+   "label": "Skills",
+   "link_to": "Agent Skill",
+   "stats_filter": "[]",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "List",
+   "label": "Conversations",
+   "link_to": "Agent Conversation",
+   "stats_filter": "[]",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "List",
+   "label": "LLM Providers",
+   "link_to": "LLM Provider",
+   "stats_filter": "[]",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "List",
+   "label": "Model Profiles",
+   "link_to": "LLM Model Profile",
+   "stats_filter": "[]",
+   "type": "DocType"
+  },
+  {
+   "label": "Review Quality",
+   "link_to": "Agent Action Review Quality",
+   "report_ref_doctype": "Agent Action",
+   "type": "Report"
+  }
+ ],
+ "title": "Frappe Agents",
+ "type": "Workspace"
+}
