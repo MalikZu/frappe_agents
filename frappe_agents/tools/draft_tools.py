@@ -80,7 +80,10 @@ def create_draft(payload: dict) -> dict:
 		raise ToolDenied(f"You are not allowed to create {doctype}.")
 
 	clean, stripped = _strip_system_fields(meta, values)
-	doc = frappe.get_doc(dict(clean, doctype=doctype))
+	# new_doc rather than a dict: it applies the doctype's own field defaults first,
+	# so the agent's values land on a document the desk would have handed a person.
+	doc = frappe.new_doc(doctype)
+	doc.update(clean)
 
 	if dry_run:
 		return dict(_dry_run(doc), doctype=doctype, stripped_keys=stripped)
