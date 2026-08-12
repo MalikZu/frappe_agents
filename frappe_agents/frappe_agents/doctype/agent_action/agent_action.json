@@ -1,0 +1,164 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-13 00:00:00.000000",
+ "description": "A write an agent proposed and a human decides. Rows move only through the approve and reject methods: no role may create, edit or delete one.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "run",
+  "agent",
+  "requested_by",
+  "action_type",
+  "target_doctype",
+  "target_name",
+  "reason",
+  "proposal_modified",
+  "status",
+  "decided_by",
+  "decided_at",
+  "decision_note",
+  "edited_before_approval",
+  "applied_doc",
+  "failure"
+ ],
+ "fields": [
+  {
+   "fieldname": "run",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Run",
+   "options": "Agent Run",
+   "reqd": 1
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Agent",
+   "options": "Agent",
+   "reqd": 1
+  },
+  {
+   "description": "The user the run acted as. They may not approve their own proposal.",
+   "fieldname": "requested_by",
+   "fieldtype": "Link",
+   "label": "Requested By",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "action_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Action Type",
+   "options": "Submit\nCancel",
+   "reqd": 1
+  },
+  {
+   "fieldname": "target_doctype",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Target Doctype",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "fieldname": "target_name",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Target Name",
+   "options": "target_doctype",
+   "reqd": 1
+  },
+  {
+   "description": "The case the agent made for this write. Read it before deciding.",
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Reason"
+  },
+  {
+   "description": "The target document's modified timestamp when the agent proposed. A later timestamp at apply time means a human edited the draft first.",
+   "fieldname": "proposal_modified",
+   "fieldtype": "Datetime",
+   "label": "Proposal Modified",
+   "reqd": 1
+  },
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Pending\nApproved\nRejected\nApplied\nFailed\nExpired"
+  },
+  {
+   "fieldname": "decided_by",
+   "fieldtype": "Link",
+   "label": "Decided By",
+   "options": "User"
+  },
+  {
+   "fieldname": "decided_at",
+   "fieldtype": "Datetime",
+   "label": "Decided At"
+  },
+  {
+   "fieldname": "decision_note",
+   "fieldtype": "Small Text",
+   "label": "Decision Note"
+  },
+  {
+   "default": "0",
+   "description": "Set when the target changed between proposal and approval.",
+   "fieldname": "edited_before_approval",
+   "fieldtype": "Check",
+   "label": "Edited Before Approval"
+  },
+  {
+   "fieldname": "applied_doc",
+   "fieldtype": "Data",
+   "label": "Applied Doc"
+  },
+  {
+   "fieldname": "failure",
+   "fieldtype": "Small Text",
+   "label": "Failure"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Action",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "if_owner": 1,
+   "read": 1,
+   "role": "Agent User"
+  },
+  {
+   "read": 1,
+   "role": "Agent Approver"
+  },
+  {
+   "read": 1,
+   "role": "Agent Auditor"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
