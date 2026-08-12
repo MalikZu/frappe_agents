@@ -146,11 +146,15 @@ def median_latency(actions: list[dict]) -> int:
 	latencies = []
 
 	for action in actions:
-		decided_at = get_datetime(action.get("decided_at"))
-		created = get_datetime(action.get("creation"))
+		# Tested before parsing, never after: `get_datetime(None)` returns *now*, so
+		# an undecided action would report however long it has been waiting as though
+		# someone had decided it this second.
+		if not (action.get("decided_at") and action.get("creation")):
+			continue
 
-		if decided_at and created:
-			latencies.append((decided_at - created).total_seconds())
+		latencies.append(
+			(get_datetime(action["decided_at"]) - get_datetime(action["creation"])).total_seconds()
+		)
 
 	if not latencies:
 		return 0
