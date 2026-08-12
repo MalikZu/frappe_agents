@@ -88,7 +88,7 @@ def _execute(run: Any) -> None:
 	frappe.set_user(effective_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 	_update(run, {"status": "Running", "started_at": now_datetime()})
-	_publish(run, "status", status="Running")
+	publish_event(run, "status", status="Running")
 
 	messages = _build_messages(agent, run)
 	tool_schemas = get_tool_schemas(agent)
@@ -120,7 +120,7 @@ def _execute(run: Any) -> None:
 			)
 			for call in calls:
 				result = execute_tool(run, call.get("name"), call.get("args"))
-				_publish(
+				publish_event(
 					run,
 					"tool_call",
 					tool=call.get("name"),
@@ -155,7 +155,7 @@ def _execute(run: Any) -> None:
 			"steps_taken": steps,
 		},
 	)
-	_publish(run, "message", status="Completed", message=final_text)
+	publish_event(run, "message", status="Completed", message=final_text)
 	_touch_conversation(run)
 
 
@@ -282,10 +282,15 @@ def _fail(run: Any, message: str, status: str = "Failed") -> None:
 		_update(run, {"status": status, "error": error, "ended_at": now_datetime()})
 	except Exception:
 		frappe.logger("frappe_agents").error(f"could not record failure on run {run.name}", exc_info=True)
-	_publish(run, "error", status=status, error=error)
+	publish_event(run, "error", status=status, error=error)
 
 
-def _publish(run: Any, event_type: str, **payload: Any) -> None:
+def publish_event(run: Any, event_type: str, **payload: Any) -> None:
+	"""Push one run event to the user the run is acting for.
+
+	Tools publish through this too — a proposal is something the chat surface has to
+	show the moment it is made, not when the run ends.
+	"""
 	data = {
 		"run": run.name,
 		"conversation": run.conversation,
