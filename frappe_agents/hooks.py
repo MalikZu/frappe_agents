@@ -5,6 +5,15 @@ app_description = "Agent runtime for Frappe. Agents are records, not deployments
 app_email = "malikzu.sg@gmail.com"
 app_license = "mit"
 
+# Desk
+# ----
+
+app_include_js = ["frappe_agents.bundle.js"]
+
+# Puts the form-eligible agents on the boot payload so the Ask Agent button
+# can decide per form without a server call.
+extend_bootinfo = ["frappe_agents.boot.boot_form_agents"]
+
 # Setup
 # -----
 
