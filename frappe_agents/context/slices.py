@@ -523,16 +523,32 @@ def _links_down(doctype: str, name: str, limit: int) -> dict:
 	}
 
 
+def may_read(doctype: str, name: Any) -> bool:
+	"""Read permission on one document, per-row `has_permission` hooks included."""
+	if not name:
+		return False
+	try:
+		return bool(frappe.has_permission(doctype, "read", doc=name))
+	except Exception:
+		return False
+
+
+def has_row_permission_hook(doctype: str) -> bool:
+	"""True when a doctype registers a per-row `has_permission` hook.
+
+	`get_list` never runs those hooks, so on these doctypes — File, Communication,
+	ToDo, Note, Event, Contact, Address, User and a dozen more — a listed row is
+	not proof the user may read it. Whoever lists them re-checks them.
+	"""
+	try:
+		return bool((frappe.get_hooks("has_permission") or {}).get(doctype))
+	except Exception:
+		return False
+
+
 def _document_summary(doctype: str, name: Any) -> dict | None:
 	"""Name, title and status of one linked document — None when the user may not read it."""
-	if not name:
-		return None
-	try:
-		if not frappe.has_permission(doctype, "read", doc=name):
-			return None
-	except frappe.DoesNotExistError:
-		return None
-	except Exception:
+	if not may_read(doctype, name):
 		return None
 
 	fields = ["name", "docstatus"]
