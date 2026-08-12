@@ -150,10 +150,20 @@ WORKFLOW_ROLE = "System Manager"
 
 
 class AgentTestCase(IntegrationTestCase):
-	"""Base case: fixtures present, session on Administrator, kill switch on."""
+	"""Base case: fixtures present, session on Administrator, kill switch on.
+
+	Frappe's `IntegrationTestCase` rolls the database back once per *class*, not
+	once per test, so without the cleanup below a test reads every row its siblings
+	wrote. That is invisible for a test that looks up one document by name and fatal
+	for one that counts — the sweep and the review report both count. Rolling back
+	after each test also undoes the fixtures, which is why `ensure_fixtures` is
+	get-or-create and runs again in every `setUp`; the DocTypes themselves survive
+	because their DDL commits.
+	"""
 
 	def setUp(self) -> None:
 		super().setUp()
+		self.addCleanup(frappe.db.rollback)
 		frappe.set_user("Administrator")
 		ensure_fixtures()
 		self.addCleanup(frappe.set_user, "Administrator")
