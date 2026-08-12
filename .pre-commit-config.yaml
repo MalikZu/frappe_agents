@@ -1,0 +1,31 @@
+exclude: 'node_modules|.git'
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        files: "frappe_agents.*"
+        exclude: '.*\.(json|txt|csv|md|svg)$'
+      - id: check-merge-conflict
+      - id: check-ast
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: debug-statements
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.10
+    hooks:
+      - id: ruff
+        name: Run ruff linter and apply fixes
+        args: ["--fix"]
+      - id: ruff-format
+        name: Format Python code
+
+ci:
+  autoupdate_schedule: weekly
+  skip: []
+  submodules: false
