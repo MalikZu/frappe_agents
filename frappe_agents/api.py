@@ -44,7 +44,13 @@ def list_agents() -> list[dict]:
 
 
 @frappe.whitelist(methods=["POST"])
-def start_run(agent: str, message: str, conversation: str | None = None) -> dict:
+def start_run(
+	agent: str,
+	message: str,
+	conversation: str | None = None,
+	context_doctype: str | None = None,
+	context_name: str | None = None,
+) -> dict:
 	"""Queue one turn of a conversation with an agent. Returns the run and conversation."""
 	message = (message or "").strip()
 	if not message:
@@ -72,6 +78,8 @@ def start_run(agent: str, message: str, conversation: str | None = None) -> dict
 			_("Agent {0} runs as a service user and cannot be started from chat.").format(agent_doc.name)
 		)
 
+	context_doctype, context_name = _validate_context(context_doctype, context_name)
+
 	_check_budget(agent_doc, settings)
 
 	conversation_doc = _get_conversation(agent_doc, conversation, message)
@@ -87,6 +95,8 @@ def start_run(agent: str, message: str, conversation: str | None = None) -> dict
 			"status": "Queued",
 			"depth": 0,
 			"input_message": message,
+			"context_doctype": context_doctype,
+			"context_name": context_name,
 		}
 	)
 	run.flags.ignore_permissions = True
@@ -126,6 +136,30 @@ def get_conversation(conversation: str) -> dict:
 		"last_activity": doc.last_activity,
 		"runs": runs,
 	}
+
+
+def _validate_context(doctype: Any, name: Any) -> tuple[str | None, str | None]:
+	"""A run may only be opened on a document the user can already read.
+
+	The check happens here, before anything is written: a queued run seeded with a
+	document its user cannot read would hand that document to the agent under the
+	user's own identity.
+	"""
+	doctype = (doctype or "").strip() if isinstance(doctype, str) else ""
+	name = str(name).strip() if name not in (None, "") else ""
+
+	if not doctype and not name:
+		return None, None
+	if not doctype or not name:
+		frappe.throw(_("A run on a document needs both context_doctype and context_name."))
+
+	if not frappe.db.exists("DocType", doctype):
+		frappe.throw(_("No such DocType: {0}").format(doctype))
+	if not frappe.db.exists(doctype, name):
+		frappe.throw(_("No such document: {0} {1}").format(doctype, name))
+
+	frappe.has_permission(doctype, "read", doc=name, throw=True)
+	return doctype, name
 
 
 def _user_may_use(agent: Any, roles: set) -> bool:
