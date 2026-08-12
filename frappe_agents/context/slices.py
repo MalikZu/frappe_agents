@@ -337,7 +337,7 @@ def _version_entry(meta: Any, row: dict, doctype: str, name: str) -> dict:
 
 	try:
 		data = json.loads(row.get("data") or "{}")
-	except TypeError, ValueError:
+	except Exception:
 		data = {}
 	if not isinstance(data, dict):
 		data = {}
