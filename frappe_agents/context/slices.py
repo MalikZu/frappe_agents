@@ -552,9 +552,9 @@ def _document_summary(doctype: str, name: Any) -> dict | None:
 		return None
 
 	fields = ["name", "docstatus"]
-	title_field = _title_field(doctype)
-	if title_field and title_field not in fields:
-		fields.append(title_field)
+	title_df = _title_docfield(doctype)
+	if title_df and title_df.fieldname not in fields:
+		fields.append(title_df.fieldname)
 
 	try:
 		row = frappe.db.get_value(doctype, name, fields, as_dict=True)
@@ -568,12 +568,17 @@ def _document_summary(doctype: str, name: Any) -> dict | None:
 		"name": row.get("name"),
 		"status_word": status_word(row.get("docstatus")),
 	}
-	if title_field:
-		summary["title"] = _truncate(row.get(title_field), MAX_VALUE_CHARS)
+	if title_df:
+		# A title is usually a Data field, but nothing stops a doctype titling itself
+		# on a Small Text. Authored text is authored text wherever it turns up.
+		title = _truncate(row.get(title_df.fieldname), MAX_VALUE_CHARS)
+		if is_untrusted_fieldtype(title_df.fieldtype):
+			title = wrap(title, f"{doctype} {name} {title_df.fieldname}")
+		summary["title"] = title
 	return summary
 
 
-def _title_field(doctype: str) -> str | None:
+def _title_docfield(doctype: str) -> Any:
 	try:
 		meta = frappe.get_meta(doctype)
 	except Exception:
@@ -584,7 +589,7 @@ def _title_field(doctype: str) -> str | None:
 	df = meta.get_field(title_field)
 	if not df or cint(df.permlevel) not in meta.get_permlevel_access("read"):
 		return None
-	return title_field
+	return df
 
 
 def link_targets(doctype: str) -> list[tuple[str, dict]]:
