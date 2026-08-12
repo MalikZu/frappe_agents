@@ -10,10 +10,16 @@ spends it, and it has to come from someone other than the author.
 
 The assertion is always the built system prompt: that is the only place the
 distinction between an approved skill and a draft can be observed.
+
+Two layers refuse an approval, and a test that cannot tell them apart proves
+nothing about either: the framework refuses a user who may not write the skill at
+all, and the controller refuses a user who may write it but holds no Agent
+Manager role. Each has its own user.
 """
 
 import frappe
 
+from frappe_agents.frappe_agents.doctype.agent_skill.agent_skill import APPROVER_ROLE
 from frappe_agents.runner.run import SKILLS_HEADING, build_system_prompt
 from frappe_agents.tests.fixtures import (
 	OPEN_USER,
@@ -23,6 +29,7 @@ from frappe_agents.tests.fixtures import (
 	RESTRICTED_USER,
 	SKILL_APPROVER,
 	SKILL_AUTHOR,
+	SKILL_WRITER,
 	TICKET_ALPHA,
 	TICKET_DT,
 	AgentTestCase,
@@ -184,7 +191,34 @@ class TestAgentSkills(AgentTestCase):
 		frappe.clear_document_cache("Agent Skill", name)
 		self.assertEqual(frappe.db.get_value("Agent Skill", name, "status"), "Draft")
 
-	def test_a_user_without_the_manager_role_cannot_approve(self):
+	def test_a_user_who_may_write_a_skill_still_cannot_approve_it(self):
+		"""The controller's own check.
+
+		This user may save the skill — the save below proves it — so the denial on the
+		second save can only come from the role check in validate_approval, not from
+		the framework refusing the write.
+		"""
+		name = self.make_skill(APPROVED_BODY)
+
+		with as_user(SKILL_WRITER):
+			self.assertNotIn(APPROVER_ROLE, frappe.get_roles(SKILL_WRITER))
+
+			skill = frappe.get_doc("Agent Skill", name)
+			skill.notes = "A note from someone who is allowed to write this skill."
+			skill.save()
+
+			skill.status = "Approved"
+			with self.assertRaises(frappe.PermissionError) as raised:
+				skill.save()
+
+		self.assertIn(APPROVER_ROLE, str(raised.exception))
+		frappe.clear_document_cache("Agent Skill", name)
+		values = frappe.db.get_value("Agent Skill", name, ["status", "approved_by"], as_dict=True)
+		self.assertEqual(values.status, "Draft")
+		self.assertIsNone(values.approved_by)
+
+	def test_a_user_without_write_access_cannot_touch_a_skill(self):
+		"""The outer layer: a reader is stopped by the framework, before any controller runs."""
 		name = self.make_skill(APPROVED_BODY)
 
 		with self.assertRaises(frappe.PermissionError):
