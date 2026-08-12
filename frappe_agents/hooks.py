@@ -27,4 +27,16 @@ after_migrate = "frappe_agents.tools.registry.sync_tools"
 agent_tools = [
 	"frappe_agents.tools.read_tools",
 	"frappe_agents.tools.context_tools",
+	"frappe_agents.tools.draft_tools",
 ]
+
+# Scheduled jobs
+# --------------
+
+# A proposal nobody decided is not a decision. Sweep pending actions past the
+# expiry in Agent Settings so the agent has to make its case again.
+scheduler_events = {
+	"daily": [
+		"frappe_agents.actions.expire_stale_actions",
+	],
+}
