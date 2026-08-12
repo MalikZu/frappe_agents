@@ -30,6 +30,11 @@ docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench get-app fra
 ## Every run after a change on main
 
 ```bash
+# once per container — the mount is host-owned, git refuses it otherwise
+# (the failure is the misleading "correct access rights" message, and the
+# old clone keeps running silently: CHECK THE TEST COUNT went up)
+docker exec fa-bench bash -lc 'git config --global --add safe.directory /mnt/frappe_agents'
+
 docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench/apps/frappe_agents && git pull /mnt/frappe_agents main'
 docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site migrate && bench --site test_site run-tests --app frappe_agents'
 ```
@@ -38,4 +43,4 @@ Rules: run tests against committed main, not the working tree — get-app clones
 the mount. If redis dies (container restart), rerun the two redis-server lines.
 Tear down with `docker rm -f fa-db fa-bench` when done; nothing in it is precious.
 
-Last verified: 2026-08-13 — 99 tests green on Frappe v16 / Python 3.14.2.
+Last verified: 2026-08-13 — 106 tests green on Frappe v16 / Python 3.14.2.
