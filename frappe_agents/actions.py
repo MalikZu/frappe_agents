@@ -175,6 +175,55 @@ def reject_action(action: str, note: str) -> dict:
 	return {"action": doc_action.name, "status": STATUS_REJECTED}
 
 
+def pending_action_for(target_doctype: str, target_name: str, action_type: str) -> str | None:
+	"""The Pending proposal already covering this target and action, if there is one."""
+	return frappe.db.exists(
+		"Agent Action",
+		{
+			"target_doctype": target_doctype,
+			"target_name": target_name,
+			"action_type": action_type,
+			"status": STATUS_PENDING,
+		},
+	)
+
+
+def record_proposal(
+	run: Any,
+	action_type: str,
+	target_doctype: str,
+	target_name: str,
+	reason: str,
+	proposal_modified: Any,
+) -> Any:
+	"""Insert one Pending Agent Action for a proposal the tools have already checked.
+
+	The row is written with `ignore_permissions` because Agent Action grants create
+	to no role at all: proposals arrive through this function and leave through
+	`approve_action`, `reject_action` or the expiry sweep, and through nothing else.
+	It lives here rather than in the tools so that tool code stays free of it.
+	"""
+	action = frappe.get_doc(
+		{
+			"doctype": "Agent Action",
+			"run": run.name,
+			"agent": run.agent,
+			"requested_by": frappe.session.user,
+			"action_type": action_type,
+			"target_doctype": target_doctype,
+			"target_name": target_name,
+			"reason": reason,
+			# The lock and the review metric both hang off this one snapshot, so it is
+			# stored as a datetime — never a string, whose formatting is not stable.
+			"proposal_modified": get_datetime(proposal_modified),
+			"status": STATUS_PENDING,
+		}
+	)
+	action.flags.ignore_permissions = True
+	action.insert(ignore_permissions=True)
+	return action
+
+
 def expire_stale_actions() -> int:
 	"""Expire proposals nobody decided. Daily job, and safe to run by hand.
 

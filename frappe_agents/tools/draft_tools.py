@@ -21,6 +21,10 @@ Two refusals in here carry more weight than they look:
   timestamps, docstatus, or a child row's parent linkage. They are stripped and the
   stripped names are handed back, so the model learns the rule rather than silently
   losing the write.
+
+There is no `ignore_permissions` in this file. Writing the Agent Action row needs
+one — no role may create that doctype — so it lives in `frappe_agents.actions`,
+which owns a proposal from the moment it is recorded to the moment it is decided.
 """
 
 from typing import Any
@@ -28,8 +32,9 @@ from typing import Any
 import frappe
 from frappe.model import table_fields
 from frappe.model.workflow import get_workflow_name
-from frappe.utils import cint, get_datetime, strip_html
+from frappe.utils import cint, strip_html
 
+from frappe_agents.actions import pending_action_for, record_proposal
 from frappe_agents.runner.run import publish_event
 from frappe_agents.tools.base import CAPABILITY_DRAFT, ToolDenied, current_run
 
@@ -154,40 +159,21 @@ def _propose(payload: dict, action_type: str) -> dict:
 	reason = _require_reason(payload)
 	run = _require_run(action_type)
 
-	doc = _load(doctype, name)
-	if not frappe.has_permission(doctype, "read", doc=doc):
-		raise ToolDenied(f"You are not allowed to read {doctype} {name}.")
-
-	meta = frappe.get_meta(doctype)
+	meta = _meta(doctype)
 	if not cint(meta.is_submittable):
 		raise ToolDenied(
 			f"{doctype} is not a submittable doctype — it has no submit or cancel step to propose."
 		)
 
+	doc = _load(doctype, name)
+	if not frappe.has_permission(doctype, "read", doc=doc):
+		raise ToolDenied(f"You are not allowed to read {doctype} {name}.")
+
 	_check_target_state(doc, action_type)
 	_refuse_workflow(doctype)
 	_refuse_duplicate(doctype, name, action_type)
 
-	action = frappe.get_doc(
-		{
-			"doctype": "Agent Action",
-			"run": run.name,
-			"agent": run.agent,
-			"requested_by": frappe.session.user,
-			"action_type": action_type,
-			"target_doctype": doctype,
-			"target_name": name,
-			"reason": reason,
-			# The lock and the review metric both hang off this one snapshot, so it is
-			# stored as a datetime — never a string, whose formatting is not stable.
-			"proposal_modified": get_datetime(doc.modified),
-			"status": STATUS_PENDING,
-		}
-	)
-	# Agent Action grants create to nobody: rows move through this path and the
-	# whitelisted decision methods, never through a form.
-	action.flags.ignore_permissions = True
-	action.insert(ignore_permissions=True)
+	action = record_proposal(run, action_type, doctype, name, reason, doc.modified)
 
 	publish_event(
 		run,
@@ -243,15 +229,7 @@ def _refuse_workflow(doctype: str) -> None:
 
 
 def _refuse_duplicate(doctype: str, name: str, action_type: str) -> None:
-	existing = frappe.db.exists(
-		"Agent Action",
-		{
-			"target_doctype": doctype,
-			"target_name": name,
-			"action_type": action_type,
-			"status": STATUS_PENDING,
-		},
-	)
+	existing = pending_action_for(doctype, name, action_type)
 	if existing:
 		raise ToolDenied(
 			f"There is already a pending {action_type.lower()} proposal for {doctype} {name} "
@@ -340,11 +318,15 @@ def _strip_rows(df: Any, fieldname: str, value: Any) -> tuple[list, list[str]]:
 	return rows, stripped
 
 
-def _writable_meta(doctype: str) -> Any:
-	if not frappe.db.exists("DocType", doctype):
+def _meta(doctype: str) -> Any:
+	try:
+		return frappe.get_meta(doctype)
+	except frappe.DoesNotExistError:
 		raise ValueError(f"No such DocType: {doctype}")
 
-	meta = frappe.get_meta(doctype)
+
+def _writable_meta(doctype: str) -> Any:
+	meta = _meta(doctype)
 	if cint(meta.istable):
 		raise ToolDenied(f"{doctype} is a child table. Write its rows through the parent document instead.")
 	if cint(meta.issingle):
@@ -353,8 +335,7 @@ def _writable_meta(doctype: str) -> Any:
 
 
 def _load(doctype: str, name: str) -> Any:
-	if not frappe.db.exists("DocType", doctype):
-		raise ValueError(f"No such DocType: {doctype}")
+	"""The document, loaded before any permission check — callers do that themselves."""
 	try:
 		return frappe.get_doc(doctype, name)
 	except frappe.DoesNotExistError:
