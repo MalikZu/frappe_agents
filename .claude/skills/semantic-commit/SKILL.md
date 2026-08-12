@@ -24,3 +24,5 @@ Rules:
 - No plan text, no internal references, no issue-tracker prose.
 - No Co-Authored-By trailers.
 - Commit only what belongs in the open-source repo. `internal/` never.
+- Stage files by name: `git add <file> <file>`. Never `git add -A`,
+  `git add .`, or `git add --all` — you commit what you can list.
