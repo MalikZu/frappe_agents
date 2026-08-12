@@ -448,6 +448,11 @@ def active_workflow(doctype: str = ORDER_DT):
 	of the run.
 	"""
 	_ensure_workflow_masters()
+	# A Workflow insert creates a custom field, and that DDL commits whatever the
+	# test had written so far — so a crash inside the block can leave the row
+	# behind for the next run to trip over.
+	_drop_workflow(doctype)
+
 	workflow = frappe.get_doc(
 		{
 			"doctype": "Workflow",
@@ -483,15 +488,20 @@ def active_workflow(doctype: str = ORDER_DT):
 	try:
 		yield workflow
 	finally:
+		_drop_workflow(doctype)
+
+
+def _drop_workflow(doctype: str) -> None:
+	if frappe.db.exists("Workflow", WORKFLOW_NAME):
 		frappe.delete_doc(
 			"Workflow",
-			workflow.name,
+			WORKFLOW_NAME,
 			force=True,
 			ignore_permissions=True,
 			delete_permanently=True,
 		)
-		frappe.cache.hdel("workflow", doctype)
-		frappe.clear_cache(doctype=doctype)
+	frappe.cache.hdel("workflow", doctype)
+	frappe.clear_cache(doctype=doctype)
 
 
 def _ensure_workflow_masters() -> None:
