@@ -13,6 +13,7 @@ that was.
 import frappe
 
 from frappe_agents.api import apply_extraction, discard_extraction
+from frappe_agents.extraction import pipeline
 from frappe_agents.tests.fixtures import (
 	DRAFT_USER,
 	ORDER_DT,
@@ -20,6 +21,8 @@ from frappe_agents.tests.fixtures import (
 	SECOND_DRAFTER,
 	SKILL_WRITER,
 	VENDOR_ACME,
+	VENDOR_ACME_HOLDINGS,
+	VENDOR_DT,
 	AgentTestCase,
 	as_user,
 	extract_as,
@@ -182,3 +185,29 @@ class TestExtractionReview(AgentTestCase):
 			apply_extraction(doc.name, values=self.values(doc), confirmed=[])
 
 		self.assertIn("no longer a draft", str(caught.exception))
+
+
+class TestSiteDefaults(AgentTestCase):
+	"""A draft opens with the site context a form would have filled."""
+
+	def test_an_empty_link_takes_the_user_default(self):
+		from unittest.mock import patch
+
+		vendor = frappe.db.get_value(VENDOR_DT, {"vendor_name": VENDOR_ACME}, "name")
+
+		def fake_default(fieldname, *a, **k):
+			return vendor if fieldname == "vendor" else None
+
+		with patch.object(frappe.defaults, "get_user_default", side_effect=fake_default):
+			name = pipeline._create_draft(ORDER_DT, {"order_title": "Defaults Probe"})
+		self.assertEqual(frappe.db.get_value(ORDER_DT, name, "vendor"), vendor)
+
+	def test_an_extracted_value_is_never_overwritten(self):
+		from unittest.mock import patch
+
+		acme = frappe.db.get_value(VENDOR_DT, {"vendor_name": VENDOR_ACME}, "name")
+		holdings = frappe.db.get_value(VENDOR_DT, {"vendor_name": VENDOR_ACME_HOLDINGS}, "name")
+
+		with patch.object(frappe.defaults, "get_user_default", return_value=holdings):
+			name = pipeline._create_draft(ORDER_DT, {"order_title": "Keep Probe", "vendor": acme})
+		self.assertEqual(frappe.db.get_value(ORDER_DT, name, "vendor"), acme)

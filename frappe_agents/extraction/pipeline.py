@@ -473,9 +473,29 @@ def _create_draft(target_doctype: str, values: dict) -> str:
 	"""
 	doc = frappe.new_doc(target_doctype)
 	doc.update(values)
+	_apply_site_defaults(doc)
 	doc.flags.ignore_mandatory = True
 	doc.insert()
 	return doc.name
+
+
+def _apply_site_defaults(doc: Any) -> None:
+	"""Site context the document cannot state about itself.
+
+	A form fills company, cost centre and their kin from the user's defaults; a
+	server-side insert gets none of that, and a target doctype's validate logic
+	may refuse outright without them. For an empty Link field whose fieldname has
+	a user or global default naming a real record, take the default. An extracted
+	value is never overwritten — this fills holes the document could not speak to.
+	"""
+	for df in doc.meta.get("fields", {"fieldtype": "Link"}):
+		if doc.get(df.fieldname):
+			continue
+		default = frappe.defaults.get_user_default(df.fieldname) or frappe.defaults.get_global_default(
+			df.fieldname
+		)
+		if default and frappe.db.exists(df.options, default):
+			doc.set(df.fieldname, default)
 
 
 def _fail(doc: Any, message: str) -> None:
