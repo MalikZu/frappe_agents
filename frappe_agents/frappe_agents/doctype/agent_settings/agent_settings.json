@@ -10,7 +10,11 @@
   "max_depth",
   "default_daily_token_budget",
   "action_expiry_days",
-  "suppress_on_import"
+  "suppress_on_import",
+  "sensitive_fields",
+  "max_extraction_pages",
+  "max_extraction_file_mb",
+  "extractions_per_user_per_day"
  ],
  "fields": [
   {
@@ -46,6 +50,34 @@
    "fieldname": "suppress_on_import",
    "fieldtype": "Check",
    "label": "Suppress on Import"
+  },
+  {
+   "description": "Fields extraction may never write on its own. The extracted value waits on the extraction record until a reviewer confirms it field by field.",
+   "fieldname": "sensitive_fields",
+   "fieldtype": "Table",
+   "label": "Sensitive Fields",
+   "options": "Agent Sensitive Field"
+  },
+  {
+   "default": "20",
+   "description": "Pages of a document sent to the model. A longer document is refused.",
+   "fieldname": "max_extraction_pages",
+   "fieldtype": "Int",
+   "label": "Max Extraction Pages"
+  },
+  {
+   "default": "10",
+   "description": "Largest file extraction accepts, in MB.",
+   "fieldname": "max_extraction_file_mb",
+   "fieldtype": "Int",
+   "label": "Max Extraction File Size (MB)"
+  },
+  {
+   "default": "50",
+   "description": "Extractions one user may start in a day.",
+   "fieldname": "extractions_per_user_per_day",
+   "fieldtype": "Int",
+   "label": "Extractions per User per Day"
   }
  ],
  "index_web_pages_for_search": 0,

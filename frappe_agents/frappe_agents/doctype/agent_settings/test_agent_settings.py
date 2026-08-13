@@ -10,3 +10,14 @@ class TestAgentSettings(IntegrationTestCase):
 		meta = frappe.get_meta("Agent Settings")
 		self.assertTrue(meta.issingle)
 		self.assertEqual(meta.get_field("global_enabled").default, "1")
+
+	def test_no_field_is_sensitive_until_a_site_says_so(self):
+		field = frappe.get_meta("Agent Settings").get_field("sensitive_fields")
+		self.assertEqual(field.options, "Agent Sensitive Field")
+		self.assertFalse(frappe.get_single("Agent Settings").sensitive_fields)
+
+	def test_extraction_caps_have_defaults(self):
+		meta = frappe.get_meta("Agent Settings")
+		self.assertEqual(meta.get_field("max_extraction_pages").default, "20")
+		self.assertEqual(meta.get_field("max_extraction_file_mb").default, "10")
+		self.assertEqual(meta.get_field("extractions_per_user_per_day").default, "50")
