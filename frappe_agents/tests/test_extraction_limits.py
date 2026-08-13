@@ -151,11 +151,15 @@ class TestExtractionLimits(AgentTestCase):
 		self.assertIn("MB", str(error))
 
 	def test_a_file_that_is_not_a_document_is_refused(self):
-		"""Type comes from the bytes. A .pdf name proves nothing."""
+		"""The type is sniffed from the bytes, so an unreadable one is named as such.
+
+		Not with a `.pdf` extension over text: frappe's own File validation opens a
+		file called PDF with pypdf and rejects it before extraction ever sees it.
+		"""
 		file = frappe.get_doc(
 			{
 				"doctype": "File",
-				"file_name": "fa-not-really.pdf",
+				"file_name": "fa-not-a-document.txt",
 				"attached_to_doctype": ORDER_DT,
 				"attached_to_name": ORDER_LIVE,
 				"is_private": 1,

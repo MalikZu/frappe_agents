@@ -149,6 +149,7 @@ DRAFT_TOOL_NAMES = (
 	"update_draft",
 	"propose_submit",
 	"propose_cancel",
+	"extract_document",
 )
 # Every agent fixture is granted every tool: what a Suggest agent may actually
 # *call* is decided by the capability gate, not by the agent's tool list, and the
@@ -938,7 +939,17 @@ def _ensure_extraction_fields() -> None:
 	)
 	_append_fields(
 		ORDER_ITEM_DT,
-		[{"fieldname": IBAN_FIELD, "fieldtype": "Data", "label": "IBAN"}],
+		[
+			{"fieldname": IBAN_FIELD, "fieldtype": "Data", "label": "IBAN"},
+			# A Link inside a row: resolution keys those by `table[index].fieldname`,
+			# and two rows have to be able to disagree about their vendor.
+			{
+				"fieldname": "row_vendor",
+				"fieldtype": "Link",
+				"label": "Row Vendor",
+				"options": VENDOR_DT,
+			},
+		],
 	)
 
 
