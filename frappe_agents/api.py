@@ -139,17 +139,26 @@ def start_run(
 
 @frappe.whitelist()
 def get_conversation(conversation: str) -> dict:
-	"""A conversation and its runs, as the session user is permitted to see them."""
+	"""A conversation and its runs, as the session user is permitted to see them.
+
+	Each run carries its `event_log` parsed into a list of events, oldest first.
+	That is what the chat surface redraws a proposal card from after a reload —
+	the card is published while the run is going, and a reload has nothing else
+	to learn it from. No extra permission is involved: the log belongs to a run
+	of this conversation, which the caller has just been checked for.
+	"""
 	frappe.has_permission("Agent Conversation", "read", doc=conversation, throw=True)
 	doc = frappe.get_doc("Agent Conversation", conversation)
 
 	runs = frappe.get_list(
 		"Agent Run",
 		filters={"conversation": doc.name},
-		fields=["name", "status", "input_message", "output_message", "error", "creation"],
+		fields=["name", "status", "input_message", "output_message", "error", "creation", "event_log"],
 		order_by="creation asc",
 		limit_page_length=0,
 	)
+	for run in runs:
+		run["event_log"] = _run_events(run.get("event_log"))
 
 	return {
 		"name": doc.name,
@@ -158,6 +167,25 @@ def get_conversation(conversation: str) -> dict:
 		"last_activity": doc.last_activity,
 		"runs": runs,
 	}
+
+
+def _run_events(log: Any) -> list[dict]:
+	"""The events a run recorded, as a list.
+
+	The column is JSON written by the runner. A log that is missing, empty or
+	unreadable replays as nothing — a conversation must still open when one of
+	its runs wrote a log nobody can parse.
+	"""
+	if not log:
+		return []
+	try:
+		parsed = frappe.parse_json(log)
+	except Exception:
+		return []
+	events = parsed.get("events") if isinstance(parsed, dict) else None
+	if not isinstance(events, list):
+		return []
+	return [event for event in events if isinstance(event, dict)]
 
 
 @frappe.whitelist()
