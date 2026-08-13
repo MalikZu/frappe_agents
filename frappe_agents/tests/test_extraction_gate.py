@@ -127,6 +127,26 @@ class TestExtractionGate(AgentTestCase):
 
 		self.assertEqual(self.flags(doc)[IBAN_FIELD]["mismatch"], 0)
 
+	def test_an_iban_that_matches_the_master_is_still_withheld(self):
+		"""A clean comparison is not a confirmation. Only a person is."""
+		doc, _ = self.extract(**{IBAN_FIELD: VENDOR_IBAN})
+
+		draft = frappe.get_doc(ORDER_DT, doc.created_doc)
+		self.assertFalse(draft.get(IBAN_FIELD))
+		self.assertEqual(self.flags(doc)[IBAN_FIELD]["confirmed"], 0)
+
+	def test_a_confidence_of_one_is_not_a_confirmation_either(self):
+		"""Confidence is the model's own claim about its own work. It buys nothing."""
+		file = make_pdf_attachment()
+		reply = extraction_reply(
+			self.fields(**{IBAN_FIELD: ALTERED_IBAN}),
+			[{"fieldname": IBAN_FIELD, "confidence": 1.0, "page": 1}],
+		)
+		doc, _ = extract_as(DRAFT_USER, file.name, reply)
+
+		self.assertEqual(extraction_json(doc, "field_confidence")[IBAN_FIELD]["confidence"], 1.0)
+		self.assertFalse(frappe.db.get_value(ORDER_DT, doc.created_doc, IBAN_FIELD))
+
 	def test_the_comparison_is_on_the_characters_not_the_typography(self):
 		"""An IBAN is printed in groups and stored in one run. That is not an attack."""
 		doc, _ = self.extract(**{IBAN_FIELD: VENDOR_IBAN.replace(" ", "").lower()})
