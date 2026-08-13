@@ -50,10 +50,11 @@ const STYLES = `
 	.agent-chat-pop-opt { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border-radius: 6px; font-size: var(--text-sm); }
 	.agent-chat-pop-opt.is-clickable { cursor: pointer; }
 	.agent-chat-pop-opt.is-clickable:hover { background: var(--highlight-color); }
-	.agent-chat-pop-sub { display: block; color: var(--text-muted); font-size: var(--text-xs); }
+	.agent-chat-pop-text { min-width: 0; }
+	.agent-chat-pop-sub { display: block; color: var(--text-muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.agent-chat-pop-tick { color: var(--text-on-green); font-weight: 600; }
 	.agent-chat-pop-note { font-size: var(--text-xs); color: var(--text-muted); padding: 6px 10px; margin-top: 4px; border-top: 1px solid var(--border-color); }
-	.agent-chat-cap { flex: none; font-size: var(--text-xs); font-weight: 600; border-radius: 4px; padding: 1px 6px; background: var(--control-bg); color: var(--text-muted); }
+	.agent-chat-cap { flex: none; font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; border-radius: 4px; padding: 1px 6px; background: var(--control-bg); color: var(--text-muted); }
 	.agent-chat-cap.is-read { background: var(--bg-blue); color: var(--text-on-blue); }
 	.agent-chat-cap.is-draft { background: var(--bg-green); color: var(--text-on-green); }
 	.agent-chat-cap.is-write, .agent-chat-cap.is-submit { background: var(--bg-orange); color: var(--text-on-orange); }
@@ -271,11 +272,12 @@ frappe_agents.ChatUI = class ChatUI {
 			}
 		});
 
-		// A chip popover closes on anything that is not itself or a chip. Held on
-		// the instance so destroy() takes this listener off the document with it.
+		// A chip popover closes on anything outside it — a chip with a menu of its
+		// own stops the click before it gets here. Held on the instance so destroy()
+		// takes this listener off the document with it.
 		this.pop_dismiss_handler = (e) => {
 			if (!this.pop_owner) return;
-			if ($(e.target).closest(".agent-chat-pop, .agent-chat-chip").length) return;
+			if ($(e.target).closest(".agent-chat-pop").length) return;
 			this.close_pop();
 		};
 		this.pop_escape_handler = (e) => {
@@ -401,7 +403,7 @@ frappe_agents.ChatUI = class ChatUI {
 		const $chip = this.make_chip("", info.agent_name || info.name, many)
 			.attr("title", info.description || __("The agent you are talking to"))
 			.appendTo(this.$chips);
-		if (many) $chip.on("click", () => this.toggle_pop("agent", $chip, () => this.build_agent_pop()));
+		if (many) $chip.on("click", (e) => this.toggle_pop("agent", $chip, () => this.build_agent_pop(), e));
 	}
 
 	build_agent_pop() {
@@ -461,7 +463,7 @@ frappe_agents.ChatUI = class ChatUI {
 		const many = choices.length > 1;
 		const $chip = this.make_chip(__("model"), current, many).appendTo(this.$chips);
 		if (many) {
-			$chip.on("click", () => this.toggle_pop("model", $chip, () => this.build_model_pop(info)));
+			$chip.on("click", (e) => this.toggle_pop("model", $chip, () => this.build_model_pop(info), e));
 		} else {
 			$chip.attr("title", __("The model this agent runs on"));
 		}
@@ -525,7 +527,7 @@ frappe_agents.ChatUI = class ChatUI {
 		const tools = info.tools || [];
 		if (!tools.length) return;
 		const $chip = this.make_chip(__("tools"), String(tools.length), true).appendTo(this.$chips);
-		$chip.on("click", () => this.toggle_pop("tools", $chip, () => this.build_tools_pop(info)));
+		$chip.on("click", (e) => this.toggle_pop("tools", $chip, () => this.build_tools_pop(info), e));
 	}
 
 	build_tools_pop(info) {
@@ -559,7 +561,10 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	/** One popover, reused: opening another closes the one before it. */
-	toggle_pop(owner, $anchor, build) {
+	toggle_pop(owner, $anchor, build, event) {
+		// The document listener closes the popover on every other click, and this
+		// click is the one that opens it.
+		if (event) event.stopPropagation();
 		if (this.pop_owner === owner) {
 			this.close_pop();
 			return;
@@ -580,11 +585,14 @@ frappe_agents.ChatUI = class ChatUI {
 		$("<div class='agent-chat-pop-label'></div>").text(text).appendTo(this.$pop);
 	}
 
+	/** One row of a popover. The sub line is kept to one line, in full on hover. */
 	pop_option(label, sub) {
 		const $opt = $("<div class='agent-chat-pop-opt'></div>");
-		const $text = $("<span></span>").appendTo($opt);
+		const $text = $("<span class='agent-chat-pop-text'></span>").appendTo($opt);
 		$("<span></span>").text(label).appendTo($text);
-		if (sub) $("<span class='agent-chat-pop-sub'></span>").text(sub).appendTo($text);
+		if (sub) {
+			$("<span class='agent-chat-pop-sub'></span>").text(sub).attr("title", sub).appendTo($text);
+		}
 		return $opt.appendTo(this.$pop);
 	}
 
