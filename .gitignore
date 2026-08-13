@@ -1,5 +1,4 @@
-# internal working documents — never committed (no trailing slash:
-# in lane worktrees `internal` is a symlink to the main checkout's internal/)
+# internal working documents — never committed
 internal
 
 # python
