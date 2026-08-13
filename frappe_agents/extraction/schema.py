@@ -486,5 +486,5 @@ def _coerce(meta: dict, value: Any) -> Any:
 def _number(value: Any) -> float:
 	try:
 		return float(value)
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return 0.0
