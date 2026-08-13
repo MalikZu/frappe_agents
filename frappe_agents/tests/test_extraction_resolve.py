@@ -115,6 +115,23 @@ class TestExtractionResolve(AgentTestCase):
 		self.assertIn("items[1].row_vendor", self.candidates(doc))
 		self.assertNotIn("items[0].row_vendor", self.candidates(doc))
 
+	def test_a_child_link_matching_nothing_is_dropped_from_the_row(self):
+		"""An unresolvable child-row Link never reaches the draft verbatim.
+
+		Writing it through hands the target doctype's validate a value that can
+		never save, and the whole draft fails with it.
+		"""
+		rows = [{"item": "FA Widget", "qty": 1, "row_vendor": "FA Ghost Vendor LLC"}]
+		doc, _ = self.extract(items=rows)
+
+		self.assertEqual(doc.status, "Needs Review")
+		draft = frappe.get_doc(ORDER_DT, doc.created_doc)
+		self.assertFalse(draft.items[0].row_vendor)
+
+		candidate = self.candidates(doc)["items[0].row_vendor"]
+		self.assertEqual(candidate["options"], [])
+		self.assertIn("No FA Test Vendor matched", candidate["note"])
+
 	def test_the_unresolved_text_stays_on_the_extraction_for_the_reviewer(self):
 		"""Dropping the field is not the same as dropping the evidence."""
 		doc, _ = self.extract(vendor="FA Nobody Ltd")
