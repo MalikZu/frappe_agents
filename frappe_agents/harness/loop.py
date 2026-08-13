@@ -106,6 +106,20 @@ async def run_agent_loop(
                 yield MessageEndEvent(message=message)
             pending = ()
 
+            # frappe_agents patch: upstream only checks the cancellation signal
+            # around tool calls, so a cancel between model calls was not seen
+            # until the next tool ran. Check it at the top of every turn and end
+            # the run cleanly.
+            if signal is not None and signal.is_cancelled():
+                error = _error_message(model, "Operation aborted")
+                messages.append(error)
+                new_messages.append(error)
+                yield MessageStartEvent(message=error)
+                yield MessageEndEvent(message=error)
+                yield TurnEndEvent(message=error)
+                yield AgentEndEvent(messages=new_messages)
+                return
+
             if max_turns is not None and turn > max_turns:
                 error = _error_message(model, f"Agent stopped after max_turns={max_turns}")
                 messages.append(error)
