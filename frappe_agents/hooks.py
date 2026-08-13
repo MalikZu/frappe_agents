@@ -40,6 +40,7 @@ agent_tools = [
 	"frappe_agents.tools.read_tools",
 	"frappe_agents.tools.context_tools",
 	"frappe_agents.tools.draft_tools",
+	"frappe_agents.tools.extraction_tools",
 ]
 
 # Scheduled jobs
