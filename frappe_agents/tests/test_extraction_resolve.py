@@ -58,15 +58,18 @@ class TestExtractionResolve(AgentTestCase):
 
 	def test_an_ambiguous_name_leaves_the_field_empty_and_ships_the_candidates(self):
 		"""Two records could be this vendor. Picking one is the reviewer's job."""
-		doc, _ = self.extract(vendor="FA Acme Trading H")
+		doc, _ = self.extract(vendor="FA Acme")
 
 		draft = frappe.get_doc(ORDER_DT, doc.created_doc)
 		self.assertFalse(draft.vendor)
 
 		candidate = self.candidates(doc)["vendor"]
 		self.assertEqual(candidate["doctype"], VENDOR_DT)
-		self.assertEqual(candidate["text"], "FA Acme Trading H")
-		self.assertIn(VENDOR_ACME_HOLDINGS, [option["name"] for option in candidate["options"]])
+		self.assertEqual(candidate["text"], "FA Acme")
+		names = [option["name"] for option in candidate["options"]]
+		self.assertIn(VENDOR_ACME, names)
+		self.assertIn(VENDOR_ACME_HOLDINGS, names)
+		self.assertIn("Pick one", candidate["note"])
 
 	def test_a_name_that_matches_nothing_is_never_written_through_as_text(self):
 		"""An unresolved link written as raw text fails validation and takes the draft with it."""
@@ -102,7 +105,7 @@ class TestExtractionResolve(AgentTestCase):
 		"""The row index is part of the key, or two rows would answer for each other."""
 		rows = [
 			{"item": "FA Widget", "qty": 1, "row_vendor": VENDOR_ACME},
-			{"item": "FA Widget", "qty": 2, "row_vendor": "FA Acme Trading H"},
+			{"item": "FA Widget", "qty": 2, "row_vendor": "FA Acme"},
 		]
 		doc, _ = self.extract(items=rows)
 

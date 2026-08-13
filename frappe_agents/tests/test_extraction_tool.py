@@ -92,6 +92,10 @@ class TestExtractionTool(AgentTestCase):
 		)
 		file.flags.ignore_permissions = True
 		file.insert(ignore_permissions=True)
+		# Readable — they uploaded it. The tool still refuses it: readable is not the
+		# same as accountable, and a loose private file has no provenance to check.
+		frappe.db.set_value("File", file.name, "owner", DRAFT_USER, update_modified=False)
+		frappe.clear_document_cache("File", file.name)
 
 		payload, _ = self.extract(file=file.name)
 
