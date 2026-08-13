@@ -38,7 +38,7 @@ const RAIL_STYLES = `
 		flex: none; opacity: 0; font: inherit; font-size: var(--text-xs); color: var(--text-muted);
 		border: none; background: none; padding: 0; cursor: pointer;
 	}
-	.agent-chat-convo.is-active:hover .agent-chat-rename,
+	.agent-chat-convo:hover .agent-chat-rename,
 	.agent-chat-rename:focus { opacity: 1; }
 	.agent-chat-pane { min-width: 0; padding-left: 14px; }
 	@media (max-width: 720px) {
