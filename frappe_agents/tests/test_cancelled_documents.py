@@ -32,8 +32,19 @@ class TestCancelledDocuments(AgentTestCase):
 		self.assertTrue(self.amendment, "the cancelled order has no amendment")
 
 	def search(self, **args) -> dict:
+		# Scoped to this test's own family: other tests' fixtures ride implicit
+		# DDL commits and survive rollback, so an unscoped exact-set assertion
+		# is order-dependent — it fails whenever the suite runs in a new order.
+		family = ["in", [ORDER_LIVE, ORDER_CANCELLED, self.amendment]]
 		with as_user(RESTRICTED_USER):
-			return search_documents({"doctype": ORDER_DT, "fields": ["name", "order_title"], **args})
+			return search_documents(
+				{
+					"doctype": ORDER_DT,
+					"fields": ["name", "order_title"],
+					"filters": {"name": family},
+					**args,
+				}
+			)
 
 	def names(self, result: dict) -> set:
 		return {row["name"] for row in result["rows"]}
