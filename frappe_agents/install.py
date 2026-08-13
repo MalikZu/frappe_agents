@@ -15,6 +15,7 @@ AGENT_ROLES = (
 
 def after_install() -> None:
 	create_roles()
+	build_workspace_sidebar()
 
 
 def create_roles() -> None:
@@ -27,3 +28,48 @@ def create_roles() -> None:
 		role.role_name = role_name
 		role.desk_access = 1
 		role.insert(ignore_permissions=True)
+
+
+SIDEBAR = (
+	("Link", "Home", "Workspace", "Frappe Agents", "home", 0),
+	("Link", "Agent Chat", "Page", "agent-chat", "messages-square", 0),
+	("Section Break", "Review", None, None, "check-check", 0),
+	("Link", "Pending Actions", "DocType", "Agent Action", None, 1),
+	("Link", "Needs Review", "DocType", "Document Extraction", None, 1),
+	("Link", "Review Quality", "Report", "Agent Action Review Quality", None, 1),
+	("Section Break", "Build", None, None, "bot", 0),
+	("Link", "Agents", "DocType", "Agent", None, 1),
+	("Link", "Skills", "DocType", "Agent Skill", None, 1),
+	("Link", "Tools", "DocType", "Agent Tool", None, 1),
+	("Link", "Settings", "DocType", "Agent Settings", None, 1),
+	("Section Break", "Models", None, None, "plug", 0),
+	("Link", "LLM Providers", "DocType", "LLM Provider", None, 1),
+	("Link", "Model Profiles", "DocType", "LLM Model Profile", None, 1),
+	("Section Break", "Activity", None, None, "activity", 0),
+	("Link", "Conversations", "DocType", "Agent Conversation", None, 1),
+	("Link", "Runs", "DocType", "Agent Run", None, 1),
+)
+
+
+def build_workspace_sidebar():
+	"""The app's sidebar, in the desk's own section pattern.
+
+	Only when none exists yet: the flat auto-seeded sidebar appears the first
+	time someone opens the workspace, so building here, at install time, wins
+	the race — and an existing sidebar is the user's to keep, never stomped.
+	"""
+	if frappe.db.exists("Workspace Sidebar", "Frappe Agents"):
+		return
+	doc = frappe.new_doc("Workspace Sidebar")
+	doc.name = "Frappe Agents"
+	for type_, label, link_type, link_to, icon, child in SIDEBAR:
+		row = {"type": type_, "label": label, "child": child, "collapsible": 1}
+		if type_ == "Section Break":
+			row.update({"icon": icon, "indent": 1})
+		else:
+			row.update({"link_type": link_type, "link_to": link_to})
+			if icon:
+				row["icon"] = icon
+		doc.append("items", row)
+	doc.flags.ignore_permissions = True
+	doc.insert(ignore_permissions=True, set_name="Frappe Agents")
