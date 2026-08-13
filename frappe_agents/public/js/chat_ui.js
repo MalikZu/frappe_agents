@@ -7,7 +7,19 @@ const STYLE_ID = "frappe-agents-chat-styles";
 const STYLES = `
 	.agent-chat { display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 320px; }
 	.agent-chat.agent-chat-compact { height: 55vh; min-height: 260px; }
-	.agent-chat-context { font-size: var(--text-sm); color: var(--text-muted); padding-bottom: 6px; }
+	.agent-chat-head { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border-color); }
+	.agent-chat-title { font-weight: 600; }
+	.agent-chat-context { display: inline-flex; }
+	.agent-chat-doc {
+		display: inline-flex; align-items: center; gap: 6px; max-width: 320px;
+		background: var(--bg-blue); border: 1px solid var(--blue-300, var(--border-color));
+		color: var(--text-on-blue); border-radius: 999px; padding: 2px 10px;
+		font-size: var(--text-sm); text-decoration: none;
+	}
+	.agent-chat-doc:hover { color: var(--text-on-blue); text-decoration: none; }
+	.agent-chat-doc.is-restricted { background: var(--control-bg); border-color: var(--border-color); color: var(--text-muted); }
+	.agent-chat-doc-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.agent-chat-doc svg { flex: none; }
 	.agent-chat-log { flex: 1; overflow-y: auto; padding: 8px 0; }
 	.agent-chat-composer { display: flex; gap: 8px; align-items: flex-end; padding-top: 8px; border-top: 1px solid var(--border-color); }
 	.agent-chat-input { resize: vertical; }
@@ -94,6 +106,15 @@ function proposal_from_event(event) {
 	return result && result.action ? result : null;
 }
 
+/** The little document mark on the context chip. */
+function doc_icon() {
+	return $(
+		`<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+			<path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/>
+		</svg>`
+	);
+}
+
 /** Extraction status as a line a person can read. */
 function extraction_title(status) {
 	switch (status) {
@@ -127,12 +148,16 @@ frappe_agents.ChatUI = class ChatUI {
 		opts = opts || {};
 		this.parent = $(opts.parent);
 		this.agent = opts.agent || null;
+		this.agent_label = opts.agent_label || null;
 		this.conversation = opts.conversation || null;
 		this.context_doctype = opts.context_doctype || null;
 		this.context_name = opts.context_name || null;
 		this.compact = Boolean(opts.compact);
 		this.placeholder = opts.placeholder || __("Send a message to start.");
 		this.on_conversation = opts.on_conversation || null;
+		// The document this conversation is about: seeded from the form panel, and
+		// on a reload told to us by the server, which asks the read permission again.
+		this.context = this.seed_context();
 		this.clear_state();
 
 		this.make();
@@ -164,7 +189,10 @@ frappe_agents.ChatUI = class ChatUI {
 
 		this.$body = $(`
 			<div class="agent-chat">
-				<div class="agent-chat-context"></div>
+				<div class="agent-chat-head">
+					<span class="agent-chat-title"></span>
+					<span class="agent-chat-context"></span>
+				</div>
 				<div class="agent-chat-log"></div>
 				<div class="agent-chat-composer">
 					<textarea class="form-control agent-chat-input" rows="2"></textarea>
@@ -175,6 +203,8 @@ frappe_agents.ChatUI = class ChatUI {
 
 		if (this.compact) this.$body.addClass("agent-chat-compact");
 
+		this.$head = this.$body.find(".agent-chat-head");
+		this.$title = this.$body.find(".agent-chat-title");
 		this.$context = this.$body.find(".agent-chat-context");
 		this.$log = this.$body.find(".agent-chat-log");
 		this.$input = this.$body.find(".agent-chat-input");
@@ -182,7 +212,7 @@ frappe_agents.ChatUI = class ChatUI {
 
 		this.$input.attr("placeholder", __("Ask the agent something…"));
 		this.$send.text(__("Send"));
-		this.render_context();
+		this.render_head();
 	}
 
 	bind() {
@@ -218,18 +248,68 @@ frappe_agents.ChatUI = class ChatUI {
 		if (this.$body) this.$body.remove();
 	}
 
+	/** The document this chat was opened on, before the server has said anything. */
+	seed_context() {
+		if (!this.context_doctype || !this.context_name) return null;
+		return { doctype: this.context_doctype, name: this.context_name, title: this.context_name };
+	}
+
+	/** Who you are talking to, and which document about. */
+	render_head() {
+		const title = this.agent_label || this.agent || "";
+		this.$title.text(title);
+		this.render_context();
+		this.$head.toggle(Boolean(title || this.context));
+	}
+
+	/**
+	 * The chip for the document this conversation is about.
+	 *
+	 * Drawn from whatever `this.context` holds, which on a reload is the server's
+	 * answer rather than anything the surface remembered. A conversation the user
+	 * may no longer read says only that there is a document: no doctype, no name.
+	 */
 	render_context() {
-		if (!this.context_doctype || !this.context_name) {
+		this.$context.empty();
+		if (!this.context) {
 			this.$context.hide();
 			return;
 		}
-		this.$context.text(__("About {0}: {1}", [__(this.context_doctype), this.context_name])).show();
+		this.$context.show();
+
+		if (this.context.restricted) {
+			$("<span class='agent-chat-doc is-restricted'></span>")
+				.attr("title", __("This conversation was started on a document you can no longer open."))
+				.append(doc_icon())
+				.append(
+					$("<span class='agent-chat-doc-label'></span>").text(__("a document you can no longer see"))
+				)
+				.appendTo(this.$context);
+			return;
+		}
+
+		const doctype = this.context.doctype;
+		const name = this.context.name;
+		$("<a class='agent-chat-doc'></a>")
+			.attr("href", `/app/${frappe.router.slug(doctype)}/${encodeURIComponent(name)}`)
+			.attr("title", __("This conversation is about this document"))
+			.append(doc_icon())
+			.append(
+				$("<span class='agent-chat-doc-label'></span>").text(
+					`${__(doctype)}: ${this.context.title || name}`
+				)
+			)
+			// Mounted in the form panel the route changes behind the dialog, so step
+			// out of the way and let the router carry on.
+			.on("click", () => this.$body.closest(".modal").modal("hide"))
+			.appendTo(this.$context);
 	}
 
 	set_agent(agent) {
 		agent = agent || null;
 		if (agent === this.agent) return;
 		this.agent = agent;
+		this.agent_label = null;
 		this.reset();
 	}
 
@@ -237,6 +317,10 @@ frappe_agents.ChatUI = class ChatUI {
 		this.conversation = null;
 		this.clear_state();
 		this.$log.empty();
+		// A new conversation is about whatever this surface was opened on, and
+		// nothing else: the last conversation's document does not follow it.
+		this.context = this.seed_context();
+		this.render_head();
 		this.refresh_composer();
 		this.show_empty(this.agent ? this.placeholder : __("Select an agent to start."));
 	}
@@ -252,6 +336,10 @@ frappe_agents.ChatUI = class ChatUI {
 		this.conversation = conversation;
 		this.clear_state();
 		this.$log.empty();
+		// Whatever the last conversation was about is not this one's business until
+		// the server says so.
+		this.context = this.seed_context();
+		this.render_head();
 		this.show_empty(__("Loading conversation…"));
 
 		frappe.call({
@@ -277,6 +365,11 @@ frappe_agents.ChatUI = class ChatUI {
 			return;
 		}
 		if (data.agent) this.agent = data.agent;
+		this.agent_label = data.agent_name || this.agent_label;
+		// The server has just re-checked who may see this document, so its answer
+		// replaces whatever this surface was carrying.
+		this.context = data.context || this.seed_context();
+		this.render_head();
 		this.refresh_composer();
 
 		const runs = data.runs || [];
