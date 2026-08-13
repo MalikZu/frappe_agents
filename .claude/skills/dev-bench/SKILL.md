@@ -38,6 +38,8 @@ docker exec fa-bench bash -lc "git config --global --replace-all safe.directory 
 
 # fetch+reset, not pull — a pull after any in-container commit (or against a
 # rebased main) leaves merge commits that diverge the clone forever
+# name the branch you are verifying, not always main: a lane worktree's branch is
+# reachable from the mount because a worktree shares the main clone's object store
 docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench/apps/frappe_agents && git fetch /mnt/frappe_agents main && git reset --hard FETCH_HEAD'
 docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site migrate && bench --site test_site run-tests --app frappe_agents'
 ```
@@ -46,4 +48,4 @@ Rules: run tests against committed main, not the working tree — get-app clones
 the mount. If redis dies (container restart), rerun the two redis-server lines.
 Tear down with `docker rm -f fa-db fa-bench` when done; nothing in it is precious.
 
-Last verified: 2026-08-13 — 106 tests green on Frappe v16 / Python 3.14.2.
+Last verified: 2026-08-13 — 277 tests green on Frappe v16 / Python 3.14.2.
