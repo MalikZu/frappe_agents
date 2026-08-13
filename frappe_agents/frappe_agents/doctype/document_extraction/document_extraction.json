@@ -1,0 +1,171 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-13 00:00:00.000000",
+ "description": "What a model read out of one document, and what a person decided about it. Rows move only through the extraction methods: no role may edit one by hand.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "source_file",
+  "target_doctype",
+  "status",
+  "model_profile",
+  "parser_engine",
+  "extracted_json",
+  "field_confidence",
+  "sensitive_flags",
+  "duplicate_flags",
+  "link_candidates",
+  "created_doc",
+  "reviewed_by",
+  "tokens_in",
+  "tokens_out",
+  "pages_capped",
+  "error"
+ ],
+ "fields": [
+  {
+   "fieldname": "source_file",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Source File",
+   "options": "File",
+   "reqd": 1
+  },
+  {
+   "fieldname": "target_doctype",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Target Doctype",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Pending\nRunning\nNeeds Review\nAccepted\nDiscarded\nFailed"
+  },
+  {
+   "fieldname": "model_profile",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Model Profile",
+   "options": "LLM Model Profile"
+  },
+  {
+   "description": "How the document reached the model. native forwards the file untouched; any other engine parsed it to text first, so the model read a layer the reviewer never sees.",
+   "fieldname": "parser_engine",
+   "fieldtype": "Data",
+   "label": "Parser Engine"
+  },
+  {
+   "description": "The values the model read, before review.",
+   "fieldname": "extracted_json",
+   "fieldtype": "Code",
+   "label": "Extracted JSON",
+   "options": "JSON"
+  },
+  {
+   "description": "The model's own claim about each field: confidence and page. Not ground truth.",
+   "fieldname": "field_confidence",
+   "fieldtype": "Code",
+   "label": "Field Confidence",
+   "options": "JSON"
+  },
+  {
+   "description": "Sensitive values, held here and never written to the draft until a person confirms each one.",
+   "fieldname": "sensitive_flags",
+   "fieldtype": "Code",
+   "label": "Sensitive Flags",
+   "options": "JSON"
+  },
+  {
+   "description": "Signs this document was already extracted, or collides with an existing record.",
+   "fieldname": "duplicate_flags",
+   "fieldtype": "Code",
+   "label": "Duplicate Flags",
+   "options": "JSON"
+  },
+  {
+   "description": "Records a link field could point at. The reviewer picks; extraction never creates a master.",
+   "fieldname": "link_candidates",
+   "fieldtype": "Code",
+   "label": "Link Candidates",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "created_doc",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Created Doc",
+   "options": "target_doctype"
+  },
+  {
+   "fieldname": "reviewed_by",
+   "fieldtype": "Link",
+   "label": "Reviewed By",
+   "options": "User"
+  },
+  {
+   "default": "0",
+   "fieldname": "tokens_in",
+   "fieldtype": "Int",
+   "label": "Tokens In"
+  },
+  {
+   "default": "0",
+   "fieldname": "tokens_out",
+   "fieldtype": "Int",
+   "label": "Tokens Out"
+  },
+  {
+   "default": "0",
+   "description": "Set when the document has more pages than the cap in Agent Settings, so the model saw only the first ones.",
+   "fieldname": "pages_capped",
+   "fieldtype": "Check",
+   "label": "Pages Capped"
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Document Extraction",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "if_owner": 1,
+   "read": 1,
+   "role": "Agent User"
+  },
+  {
+   "read": 1,
+   "role": "Agent Auditor"
+  },
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
