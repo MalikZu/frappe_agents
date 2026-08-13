@@ -309,7 +309,13 @@ def _tables(meta: Any, permitted: set) -> list:
 	for df in meta.get_table_fields():
 		if df.fieldtype != "Table":
 			continue
-		if df.fieldname not in permitted or cint(df.hidden) or cint(df.read_only):
+		# Not `permitted`: "Table" is one of frappe's no-value fieldtypes, so
+		# `get_permitted_fieldnames` never lists a child table and testing for
+		# membership dropped every one of them from every schema. The rows are
+		# permission-checked where the permissions actually are — in
+		# `_child_schema`, against the child's own permitted fieldnames. A table
+		# above permlevel 0 is skipped rather than reasoned about.
+		if cint(df.hidden) or cint(df.read_only) or cint(df.permlevel):
 			continue
 		rows.append(df)
 		if len(rows) >= MAX_CHILD_TABLES:
