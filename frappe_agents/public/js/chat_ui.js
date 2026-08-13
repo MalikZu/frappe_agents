@@ -28,6 +28,7 @@ const STYLES = `
 	.agent-chat-input.form-control { border: none; background: transparent; resize: none; padding: 10px 12px 2px; }
 	.agent-chat-input.form-control:focus { box-shadow: none; }
 	.agent-chat-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
+	.agent-chat-chips { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 	.agent-chat-send { margin-left: auto; }
 	.agent-chat-chip {
 		display: inline-flex; align-items: center; gap: 5px; max-width: 260px;
