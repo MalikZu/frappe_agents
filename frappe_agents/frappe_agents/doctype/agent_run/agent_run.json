@@ -25,7 +25,8 @@
   "ended_at",
   "tokens_in",
   "tokens_out",
-  "steps_taken"
+  "steps_taken",
+  "event_log"
  ],
  "fields": [
   {
@@ -141,11 +142,19 @@
    "fieldname": "steps_taken",
    "fieldtype": "Int",
    "label": "Steps Taken"
+  },
+  {
+   "description": "Everything the agent loop emitted, oldest first. Long runs keep the start and the end.",
+   "fieldname": "event_log",
+   "fieldtype": "Code",
+   "label": "Event Log",
+   "options": "JSON",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 12:40:00.000000",
+ "modified": "2026-08-13 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Run",
