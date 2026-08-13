@@ -1,0 +1,19 @@
+{
+ "app": "frappe_agents",
+ "creation": "2026-08-13 11:33:02.952122",
+ "docstatus": 0,
+ "doctype": "Desktop Icon",
+ "hidden": 0,
+ "icon_type": "App",
+ "idx": 0,
+ "label": "Frappe Agents",
+ "link": "/desk/frappe-agents",
+ "link_type": "External",
+ "logo_url": "/assets/frappe_agents/images/logo.svg",
+ "modified": "2026-08-13 11:33:02.952122",
+ "modified_by": "Administrator",
+ "name": "Frappe Agents",
+ "owner": "Administrator",
+ "roles": [],
+ "standard": 1
+}
