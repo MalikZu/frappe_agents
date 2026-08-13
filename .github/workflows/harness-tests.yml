@@ -1,0 +1,29 @@
+name: Harness tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    name: Vendored harness
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      # Only pydantic and pytest: the vendored harness must not need anything else.
+      - name: Install pydantic and pytest
+        run: pip install pydantic pytest
+
+      - name: Run harness tests
+        run: python -m pytest frappe_agents/harness/tests -q
