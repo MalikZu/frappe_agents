@@ -164,6 +164,10 @@ class AgentTestCase(IntegrationTestCase):
 	def setUp(self) -> None:
 		super().setUp()
 		self.addCleanup(frappe.db.rollback)
+		# A committed Workflow row from any earlier crashed or half-rolled-back
+		# fixture poisons every proposal test that follows. Purge with a commit —
+		# safe here and only here, because setUp holds no uncommitted test writes.
+		_drop_workflow(ORDER_DT, commit=True)
 		frappe.set_user("Administrator")
 		ensure_fixtures()
 		self.addCleanup(frappe.set_user, "Administrator")
@@ -509,7 +513,17 @@ def active_workflow(doctype: str = ORDER_DT):
 		_drop_workflow(doctype)
 
 
-def _drop_workflow(doctype: str) -> None:
+def _drop_workflow(doctype: str, commit: bool = False) -> None:
+	"""Delete the fixture Workflow and drop its cached name.
+
+	The Workflow's insert is committed implicitly by its Custom Field DDL, so a
+	plain in-transaction delete resurrects on the per-test rollback. But committing
+	here is only safe when the session holds no other uncommitted writes — a commit
+	from the context manager's finally would leak the calling test's rows into the
+	database for good. So: commit=True ONLY from setUp, where the transaction is
+	clean; the in-test teardown deletes uncommitted and relies on the next setUp's
+	committed purge to make it stick.
+	"""
 	if frappe.db.exists("Workflow", WORKFLOW_NAME):
 		frappe.delete_doc(
 			"Workflow",
@@ -518,6 +532,8 @@ def _drop_workflow(doctype: str) -> None:
 			ignore_permissions=True,
 			delete_permanently=True,
 		)
+		if commit:
+			frappe.db.commit()
 	frappe.cache.hdel("workflow", doctype)
 	frappe.clear_cache(doctype=doctype)
 
