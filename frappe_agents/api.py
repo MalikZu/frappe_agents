@@ -38,6 +38,11 @@ DESCRIPTION_CHARS = 200
 DEFAULT_PENDING_LIMIT = 50
 MAX_PENDING_LIMIT = 200
 
+AGENT_USER = "Agent User"
+# One rail's worth of conversations. Older ones are reachable from the Agent
+# Conversation list, which is a list view with paging and filters already.
+CONVERSATION_LIMIT = 50
+
 
 @frappe.whitelist()
 def list_agents() -> list[dict]:
@@ -65,6 +70,65 @@ def list_agents() -> list[dict]:
 			}
 		)
 	return allowed
+
+
+@frappe.whitelist()
+def list_conversations() -> list[dict]:
+	"""The session user's own conversations, most recently active first.
+
+	Nothing a run produced reaches this payload. A rail row is a name and a time:
+	the snippet is the conversation's title when it has one and the first thing
+	the user typed when it does not, so no tool call, no tool result and no model
+	answer is ever summarised here.
+	"""
+	_require_agent_user()
+
+	rows = frappe.get_list(
+		"Agent Conversation",
+		filters={"user": frappe.session.user},
+		fields=["name", "agent", "title", "last_activity", "modified"],
+		order_by="last_activity desc, modified desc",
+		limit_page_length=CONVERSATION_LIMIT,
+	)
+
+	openers = _first_messages([row.name for row in rows if not row.get("title")])
+	for row in rows:
+		row["agent_name"] = _agent_name(row.get("agent"))
+		row["snippet"] = (row.get("title") or openers.get(row["name"]) or "")[:TITLE_CHARS]
+	return rows
+
+
+def _first_messages(conversations: list[str]) -> dict[str, str]:
+	"""The first thing the user typed in each of these conversations.
+
+	One query for the lot. The rows come newest first and the dict is written in
+	that order, so the value left standing for a conversation is its oldest run.
+	"""
+	if not conversations:
+		return {}
+
+	rows = frappe.get_list(
+		"Agent Run",
+		filters={"conversation": ("in", conversations)},
+		fields=["conversation", "input_message"],
+		order_by="creation desc",
+		limit_page_length=0,
+	)
+	return {row.conversation: row.input_message or "" for row in rows}
+
+
+def _agent_name(name: str | None) -> str:
+	if not name:
+		return ""
+	try:
+		return frappe.get_cached_doc("Agent", name).agent_name or name
+	except frappe.DoesNotExistError:
+		return name
+
+
+def _require_agent_user() -> None:
+	if AGENT_USER not in set(frappe.get_roles()):
+		raise frappe.PermissionError(_("You need the {0} role to use agent chat.").format(AGENT_USER))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -177,6 +241,7 @@ def get_conversation(conversation: str) -> dict:
 	return {
 		"name": doc.name,
 		"agent": doc.agent,
+		"agent_name": _agent_name(doc.agent),
 		"title": doc.title,
 		"model_profile": doc.model_profile,
 		"last_activity": doc.last_activity,
