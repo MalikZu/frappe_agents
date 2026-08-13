@@ -95,7 +95,16 @@ class ProviderError(Exception):
 
 
 class ExtractionRefused(ProviderError):
-	"""The model declined to extract this document. Never retried."""
+	"""The model declined to extract this document. Never retried.
+
+	Carries the tokens the refusal cost: it was billed like any other answer, and a
+	cost that is not recorded is a cost nobody can see.
+	"""
+
+	def __init__(self, message: str, tokens_in: int = 0, tokens_out: int = 0):
+		super().__init__(message)
+		self.tokens_in = tokens_in
+		self.tokens_out = tokens_out
 
 
 def call_model(profile: Any, messages: list[dict], tool_schemas: list[dict] | None = None) -> dict:
@@ -473,7 +482,11 @@ def _extract_anthropic(
 
 	# A refusal arrives as a perfectly successful HTTP 200.
 	if stop_reason == "refusal":
-		raise ExtractionRefused(_refusal_message(profile, text))
+		raise ExtractionRefused(
+			_refusal_message(profile, text),
+			cint(usage.get("input_tokens")),
+			cint(usage.get("output_tokens")),
+		)
 
 	return {
 		"text": text,
@@ -546,16 +559,19 @@ def _extract_openai(
 	finish_reason = choice.get("finish_reason")
 	usage = data.get("usage") or {}
 
+	tokens_in = cint(usage.get("prompt_tokens"))
+	tokens_out = cint(usage.get("completion_tokens"))
+
 	if message.get("refusal"):
-		raise ExtractionRefused(_refusal_message(profile, str(message["refusal"])))
+		raise ExtractionRefused(_refusal_message(profile, str(message["refusal"])), tokens_in, tokens_out)
 	if finish_reason == "content_filter":
-		raise ExtractionRefused(_refusal_message(profile, ""))
+		raise ExtractionRefused(_refusal_message(profile, ""), tokens_in, tokens_out)
 
 	return {
 		"text": message.get("content") or "",
 		"stop_reason": "max_tokens" if finish_reason == "length" else finish_reason,
-		"tokens_in": cint(usage.get("prompt_tokens")),
-		"tokens_out": cint(usage.get("completion_tokens")),
+		"tokens_in": tokens_in,
+		"tokens_out": tokens_out,
 		"annotations": message.get("annotations") or None,
 	}
 

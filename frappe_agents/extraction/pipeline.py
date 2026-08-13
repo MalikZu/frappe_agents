@@ -252,6 +252,8 @@ def _run(doc: Any) -> None:
 		file_doc = readable_file(doc.source_file)
 		target_doctype = validate_target(doc.target_doctype)
 		source = read_source(file_doc, settings, doc)
+		if not doc.model_profile:
+			record_fields(doc, {"model_profile": pick_profile(None)})
 	except Exception as exc:
 		return _fail(doc, _text(exc))
 
@@ -262,7 +264,15 @@ def _run(doc: Any) -> None:
 		reply = _ask(doc, spec, source, file_doc, instructions)
 	except ExtractionRefused as exc:
 		# A refusal is an answer. It is recorded in the model's own words and never
-		# re-asked: the second no costs the same as the first.
+		# re-asked: the second no costs the same as the first. It was billed, so its
+		# tokens are added to the row like any other call's.
+		record_fields(
+			doc,
+			{
+				"tokens_in": cint(doc.tokens_in) + cint(getattr(exc, "tokens_in", 0)),
+				"tokens_out": cint(doc.tokens_out) + cint(getattr(exc, "tokens_out", 0)),
+			},
+		)
 		return _fail(doc, _text(exc))
 	except ProviderError as exc:
 		return _fail(doc, _text(exc))
