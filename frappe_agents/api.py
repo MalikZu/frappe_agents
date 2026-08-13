@@ -224,6 +224,10 @@ def get_conversation(conversation: str) -> dict:
 	the card is published while the run is going, and a reload has nothing else
 	to learn it from. No extra permission is involved: the log belongs to a run
 	of this conversation, which the caller has just been checked for.
+
+	`context` is the document the conversation is about, for the same reason: the
+	chip beside the header is drawn from it, and a reload had nothing to draw it
+	from. That one IS a permission question, and it is asked again here.
 	"""
 	frappe.has_permission("Agent Conversation", "read", doc=conversation, throw=True)
 	doc = frappe.get_doc("Agent Conversation", conversation)
@@ -244,9 +248,52 @@ def get_conversation(conversation: str) -> dict:
 		"agent_name": _agent_name(doc.agent),
 		"title": doc.title,
 		"model_profile": doc.model_profile,
+		"context": _conversation_context(doc),
 		"last_activity": doc.last_activity,
 		"runs": runs,
 	}
+
+
+def _conversation_context(doc: Any) -> dict | None:
+	"""The document this conversation is about, as this caller may see it now.
+
+	The context lives on the runs, so the first run that carried one is what the
+	conversation is about. The read permission is asked again on every call: the
+	user could read the document when they opened the conversation and may not
+	today, and in that case the answer says only that there is something — no
+	doctype, no name, no title. "A document you can no longer see" is the whole
+	of what a person is entitled to.
+	"""
+	rows = frappe.get_list(
+		"Agent Run",
+		filters={"conversation": doc.name, "context_doctype": ("is", "set")},
+		fields=["context_doctype", "context_name"],
+		order_by="creation asc",
+		limit_page_length=1,
+	)
+	if not rows:
+		return None
+
+	doctype, name = rows[0].context_doctype, rows[0].context_name
+	if not doctype or not name or not frappe.db.exists(doctype, name):
+		return None
+	if not frappe.has_permission(doctype, "read", doc=name):
+		return {"restricted": 1}
+
+	return {
+		"restricted": 0,
+		"doctype": doctype,
+		"name": name,
+		"title": _document_title(doctype, name),
+	}
+
+
+def _document_title(doctype: str, name: str) -> str:
+	"""What the document calls itself. Only ever called after a read check."""
+	title_field = frappe.get_meta(doctype).get_title_field()
+	if title_field == "name":
+		return name
+	return frappe.db.get_value(doctype, name, title_field) or name
 
 
 def _run_events(log: Any) -> list[dict]:
