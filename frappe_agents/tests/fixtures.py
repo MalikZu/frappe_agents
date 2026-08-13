@@ -41,15 +41,24 @@ have to come from different people:
 None of them is Administrator, deliberately: `frappe.get_roles("Administrator")`
 returns every role on the site and `has_permission` short-circuits to True for
 it, so a separation-of-duties test run as Administrator proves nothing.
+
+The extraction cast is one more doctype and one more user. `FA Test Vendor` is
+the master record an invoice claims to be from: it carries an IBAN-shaped field,
+and that field is **masked**, because the mismatch comparison has to survive a
+reader who is not allowed to see the stored value unmasked. `BLIND_DRAFTER` may
+create orders and may not read a vendor, which is the only way to prove link
+resolution leaves a field empty rather than guessing.
 """
 
 from contextlib import contextmanager
 from typing import Any
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import cint, now_datetime
 
+from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction, run_extraction
 from frappe_agents.tools.base import execute_tool
 
 MODULE = "Frappe Agents"
@@ -58,6 +67,7 @@ READER_ROLE = "FA Test Reader"
 PERMLEVEL_ROLE = "FA Test Permlevel Reader"
 DRAFTER_ROLE = "FA Test Drafter"
 SUBMITTER_ROLE = "FA Test Submitter"
+VENDOR_ROLE = "FA Test Vendor Reader"
 
 PROJECT_DT = "FA Test Project"
 TICKET_DT = "FA Test Ticket"
@@ -65,6 +75,7 @@ VAULT_DT = "FA Test Vault"
 ORDER_DT = "FA Test Order"
 ORDER_ITEM_DT = "FA Test Order Item"
 BUNDLE_DT = "FA Test Bundle"
+VENDOR_DT = "FA Test Vendor"
 
 PROJECT_ALPHA = "FA Alpha"
 PROJECT_BETA = "FA Beta"
@@ -80,6 +91,19 @@ ORDER_CANCELLED = "FA Order Cancelled"
 ORDER_AMENDMENT_TITLE = "FA Order Amendment"
 ORDER_RATE = "rate-nine-percent"
 ORDER_UNIT_COST = "unit-cost-seventy-seven"
+
+VENDOR_ACME = "FA Acme Trading"
+VENDOR_ACME_HOLDINGS = "FA Acme Trading Holdings"
+# The fieldname the site marks sensitive. Core knows nothing about it: it is
+# sensitive here because `Agent Settings.sensitive_fields` says so, on the parent
+# and on the child row, which is the same attack with more steps.
+IBAN_FIELD = "iban"
+# What the master record says, and what a redirected invoice would print instead.
+# They differ in the account digits alone — the difference a reviewer cannot see
+# by reading and a comparison catches every time.
+VENDOR_IBAN = "AE07 0331 2345 6789 0123 456"
+ALTERED_IBAN = "AE07 0331 9999 8888 7777 666"
+SENSITIVE_FIELDS = ((ORDER_DT, IBAN_FIELD), (ORDER_ITEM_DT, IBAN_FIELD))
 
 # Text that tries to talk to the model, and to close the wrapper it arrives in.
 INJECTION = (
@@ -98,6 +122,7 @@ SECOND_DRAFTER = "fa-drafter-two@example.com"
 APPROVER_USER = "fa-order-approver@example.com"
 WEAK_APPROVER = "fa-weak-approver@example.com"
 AUDITOR_USER = "fa-auditor@example.com"
+BLIND_DRAFTER = "fa-blind-drafter@example.com"
 
 MANAGER_ROLE = "Agent Manager"
 APPROVER_ROLE = "Agent Approver"
@@ -105,6 +130,9 @@ AUDITOR_ROLE = "Agent Auditor"
 
 PROVIDER = "FA Test Provider"
 PROFILE = "FA Test Profile"
+# A generic OpenAI-compatible endpoint says nothing about what it can read, so
+# extraction fails closed unless the admin declares it. This one is declared.
+EXTRACT_PROFILE = "FA Test Extract Profile"
 AGENT = "FA Test Agent"
 DRAFT_AGENT = "FA Draft Agent"
 OWNED_AGENT = "FA Owned Agent"
@@ -190,6 +218,7 @@ def ensure_fixtures() -> None:
 	_ensure_doctypes()
 	_ensure_read_only_roles()
 	_ensure_order_permissions()
+	_ensure_extraction_fields()
 	_ensure_users()
 	_ensure_records()
 	_ensure_user_permission()
@@ -197,6 +226,7 @@ def ensure_fixtures() -> None:
 	_ensure_provider()
 	_ensure_agent()
 	_ensure_draft_agents()
+	_ensure_sensitive_fields()
 	set_kill_switch(1)
 
 
@@ -212,6 +242,30 @@ def set_kill_switch(enabled: int) -> None:
 		settings.global_enabled = cint(enabled)
 		settings.flags.ignore_permissions = True
 		settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Agent Settings", "Agent Settings")
+
+
+@contextmanager
+def extraction_settings(**values: Any):
+	"""Hold Agent Settings at these values for the block, then put them back.
+
+	The caps are settings, so a cap test has to move one. The restore matters more
+	than it looks: `Agent Settings` is read through `get_cached_doc`, and a value
+	left behind in redis outlives the rollback that removed it from the database.
+	"""
+	before = {key: frappe.get_doc("Agent Settings").get(key) for key in values}
+	_write_settings(values)
+	try:
+		yield
+	finally:
+		_write_settings(before)
+
+
+def _write_settings(values: dict) -> None:
+	settings = frappe.get_doc("Agent Settings")
+	settings.update(values)
+	settings.flags.ignore_permissions = True
+	settings.save(ignore_permissions=True)
 	frappe.clear_document_cache("Agent Settings", "Agent Settings")
 
 
@@ -294,6 +348,143 @@ def make_attachment(doctype: str, name: str, file_name: str) -> str:
 	file.flags.ignore_permissions = True
 	file.insert(ignore_permissions=True)
 	return file.name
+
+
+def make_pdf(text: str = "FA test invoice", pages: int = 1, pad: int = 0) -> bytes:
+	"""A real, minimal PDF — correct xref table and all.
+
+	The caps read the file with pypdf and sniff its type with filetype, so a stub
+	with the right extension proves nothing: it has to parse. `text` goes into a
+	comment, which is how two fixtures get different content hashes — or, when it
+	is the same, deliberately identical ones. `pad` inflates the file for the size
+	cap without inflating the number of pages.
+	"""
+	objects = [
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		f"<< /Type /Pages /Kids [{' '.join(f'{index} 0 R' for index in range(3, 3 + pages))}] /Count {pages} >>",
+	]
+	objects += ["<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] >>"] * pages
+
+	body = bytearray(b"%PDF-1.4\n")
+	body += f"%{text}\n".encode()
+	if pad:
+		body += b"%" + b"F" * pad + b"\n"
+
+	offsets = []
+	for number, obj in enumerate(objects, start=1):
+		offsets.append(len(body))
+		body += f"{number} 0 obj\n{obj}\nendobj\n".encode()
+
+	start_xref = len(body)
+	body += f"xref\n0 {len(objects) + 1}\n".encode()
+	body += b"0000000000 65535 f \n"
+	for offset in offsets:
+		body += f"{offset:010d} 00000 n \n".encode()
+	body += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{start_xref}\n%%EOF\n".encode()
+	return bytes(body)
+
+
+def make_pdf_attachment(
+	doctype: str = ORDER_DT,
+	name: str = ORDER_LIVE,
+	file_name: str | None = None,
+	content: bytes | None = None,
+) -> Any:
+	"""One private PDF File attached to a document. Returns the File doc.
+
+	Not get-or-create: several tests want two File rows over the same bytes, which
+	is what frappe does anyway — it dedupes the blob and reuses `file_url`, so two
+	rows legitimately share one `content_hash`. That is exactly the duplicate the
+	gate looks for.
+	"""
+	file = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name or f"fa-invoice-{frappe.generate_hash(length=8)}.pdf",
+			"attached_to_doctype": doctype,
+			"attached_to_name": name,
+			"is_private": 1,
+			"content": content if content is not None else make_pdf(),
+		}
+	)
+	file.flags.ignore_permissions = True
+	file.insert(ignore_permissions=True)
+	return file
+
+
+def extraction_reply(fields: dict, notes: list[dict] | None = None, **overrides: Any) -> dict:
+	"""One canned `call_model_extract` return value, in the engine's own shape.
+
+	Doctype values sit under `fields`; confidence and page come back as a
+	`field_notes` array of `{fieldname, confidence, page}`, because they are the
+	model's self-report and travel next to the values rather than inside them.
+	"""
+	reply = {
+		"data": {"fields": fields, "field_notes": notes or []},
+		"raw_text": frappe.as_json({"fields": fields}),
+		"parse_error": None,
+		"tokens_in": 1200,
+		"tokens_out": 340,
+		"stop_reason": "end_turn",
+		"engine": "native",
+		"attempts": 1,
+	}
+	reply.update(overrides)
+	return reply
+
+
+def unusable_reply(parse_error: str = "The reply was not valid JSON: line 1 column 1") -> dict:
+	"""What the provider returns when the model answered with something unparseable."""
+	return {
+		"data": None,
+		"raw_text": "Here is the invoice you asked about.",
+		"parse_error": parse_error,
+		"tokens_in": 900,
+		"tokens_out": 120,
+		"stop_reason": "end_turn",
+		"engine": "native",
+		"attempts": 1,
+	}
+
+
+def queue_extraction_as(
+	user: str,
+	file_name: str,
+	target_doctype: str = ORDER_DT,
+	profile: str | None = EXTRACT_PROFILE,
+) -> str:
+	"""Request one extraction as `user`. The RQ hand-off is patched out."""
+	with as_user(user), patch("frappe.enqueue"):
+		return queue_extraction(file_name, target_doctype, model_profile=profile)
+
+
+def run_extraction_with(extraction: str, reply: Any = None, side_effect: Any = None) -> tuple[Any, Any]:
+	"""Run the job with the model call mocked. Returns the reloaded row and the mock."""
+	with patch("frappe_agents.extraction.pipeline.call_model_extract") as call:
+		if side_effect is not None:
+			call.side_effect = side_effect
+		else:
+			call.return_value = reply
+		run_extraction(extraction)
+	return frappe.get_doc(EXTRACTION, extraction), call
+
+
+def extract_as(
+	user: str,
+	file_name: str,
+	reply: Any = None,
+	target_doctype: str = ORDER_DT,
+	side_effect: Any = None,
+	profile: str | None = EXTRACT_PROFILE,
+) -> tuple[Any, Any]:
+	"""Queue and run one extraction as `user`, with no model behind it."""
+	extraction = queue_extraction_as(user, file_name, target_doctype, profile=profile)
+	return run_extraction_with(extraction, reply=reply, side_effect=side_effect)
+
+
+def extraction_json(doc: Any, fieldname: str) -> dict:
+	"""One of the extraction row's JSON fields, parsed."""
+	return frappe.parse_json(doc.get(fieldname)) or {}
 
 
 def write_raw(doctype: str, name: str, fieldname: str, value: str) -> None:
@@ -556,7 +747,7 @@ def _ensure_roles() -> None:
 	from frappe_agents.install import create_roles
 
 	create_roles()
-	for role_name in (READER_ROLE, PERMLEVEL_ROLE, DRAFTER_ROLE, SUBMITTER_ROLE):
+	for role_name in (READER_ROLE, PERMLEVEL_ROLE, DRAFTER_ROLE, SUBMITTER_ROLE, VENDOR_ROLE):
 		if frappe.db.exists("Role", role_name):
 			continue
 		role = frappe.new_doc("Role")
@@ -681,6 +872,102 @@ def _ensure_doctypes() -> None:
 	)
 
 	_ensure_order_doctypes()
+	_ensure_vendor_doctype()
+
+
+def _ensure_vendor_doctype() -> None:
+	"""The master record an invoice claims to come from.
+
+	`iban` is masked deliberately. v16 hands a masked field back from the query
+	layer as "XXXXXXXX", so a gate that compared the document against
+	`db.get_value` would call every extraction a mismatch — and an alert that is
+	always on is an alert nobody reads. The fixture is the only way to notice.
+	"""
+	_make_doctype(
+		VENDOR_DT,
+		"vendor_name",
+		fields=[
+			{
+				"fieldname": "vendor_name",
+				"fieldtype": "Data",
+				"label": "Vendor Name",
+				"reqd": 1,
+				"unique": 1,
+				"in_list_view": 1,
+			},
+			{
+				"fieldname": IBAN_FIELD,
+				"fieldtype": "Data",
+				"label": "IBAN",
+				"mask": 1,
+			},
+		],
+		permissions=[
+			{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1},
+			# No `mask` right: a holder of this role reads the vendor and still gets
+			# XXXXXXXX for the IBAN.
+			{"role": VENDOR_ROLE, "read": 1, "write": 1, "create": 1},
+		],
+	)
+
+
+def _ensure_extraction_fields() -> None:
+	"""Add the extraction fields to the order family, on a doctype that already exists.
+
+	Same reason as `_ensure_order_permissions`: the DocTypes survive from an earlier
+	run of the suite, so new fields have to arrive as an append rather than as part
+	of the create.
+	"""
+	_append_fields(
+		ORDER_DT,
+		[
+			{
+				"fieldname": "vendor",
+				"fieldtype": "Link",
+				"label": "Vendor",
+				"options": VENDOR_DT,
+			},
+			{"fieldname": IBAN_FIELD, "fieldtype": "Data", "label": "IBAN"},
+		],
+	)
+	_append_fields(
+		ORDER_ITEM_DT,
+		[{"fieldname": IBAN_FIELD, "fieldtype": "Data", "label": "IBAN"}],
+	)
+
+
+def _append_fields(doctype: str, fields: list[dict]) -> None:
+	doc = frappe.get_doc("DocType", doctype)
+	present = {df.fieldname for df in doc.fields}
+	missing = [field for field in fields if field["fieldname"] not in present]
+	if not missing:
+		return
+
+	for field in missing:
+		doc.append("fields", field)
+	doc.flags.ignore_permissions = True
+	doc.save(ignore_permissions=True)
+	frappe.clear_cache(doctype=doctype)
+
+
+def _ensure_sensitive_fields() -> None:
+	"""Mark the IBAN fields sensitive in Agent Settings, parent and child row alike.
+
+	Sensitivity lives in settings and nowhere else, so this is what turns the gate
+	on. It runs after the doctypes exist: the child controller refuses a fieldname
+	the doctype does not have.
+	"""
+	settings = frappe.get_doc("Agent Settings")
+	present = {(row.document_type, row.fieldname) for row in settings.get("sensitive_fields") or []}
+	missing = [pair for pair in SENSITIVE_FIELDS if pair not in present]
+	if not missing:
+		return
+
+	for document_type, fieldname in missing:
+		settings.append("sensitive_fields", {"document_type": document_type, "fieldname": fieldname})
+	settings.flags.ignore_permissions = True
+	settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Agent Settings", "Agent Settings")
 
 
 def _ensure_order_doctypes() -> None:
@@ -866,8 +1153,11 @@ def _ensure_users() -> None:
 	# user deliberately holds only the first.
 	_make_user(SKILL_WRITER, "Writer", ["Agent User", "System Manager"])
 
-	_make_user(DRAFT_USER, "Drafter", ["Agent User", READER_ROLE, DRAFTER_ROLE])
+	_make_user(DRAFT_USER, "Drafter", ["Agent User", READER_ROLE, DRAFTER_ROLE, VENDOR_ROLE])
 	_make_user(SECOND_DRAFTER, "Second Drafter", ["Agent User", READER_ROLE, DRAFTER_ROLE])
+	# May create an order, may not read a vendor. Link resolution has to leave the
+	# field empty for this user instead of proposing a record they cannot see.
+	_make_user(BLIND_DRAFTER, "Blind Drafter", ["Agent User", DRAFTER_ROLE])
 	_make_user(APPROVER_USER, "Order Approver", ["Agent User", APPROVER_ROLE, READER_ROLE, SUBMITTER_ROLE])
 	# Agent Approver, and read on the order — nothing more. Being allowed to decide
 	# a proposal is not being allowed to submit the document it is about.
@@ -877,6 +1167,10 @@ def _ensure_users() -> None:
 
 def _make_user(email: str, first_name: str, roles: list[str], enabled: int = 1) -> None:
 	if frappe.db.exists("User", email):
+		# The user outlives the transaction — a DocType insert commits whatever is
+		# pending — so a role added to the cast later has to reach the users an
+		# earlier run already created.
+		_add_missing_roles(email, roles)
 		return
 	user = frappe.get_doc(
 		{
@@ -891,6 +1185,20 @@ def _make_user(email: str, first_name: str, roles: list[str], enabled: int = 1) 
 	)
 	user.flags.ignore_permissions = True
 	user.insert(ignore_permissions=True)
+	frappe.clear_cache(user=email)
+
+
+def _add_missing_roles(email: str, roles: list[str]) -> None:
+	user = frappe.get_doc("User", email)
+	present = {row.role for row in user.get("roles") or []}
+	missing = [role for role in roles if role not in present]
+	if not missing:
+		return
+
+	for role in missing:
+		user.append("roles", {"role": role})
+	user.flags.ignore_permissions = True
+	user.save(ignore_permissions=True)
 	frappe.clear_cache(user=email)
 
 
@@ -925,7 +1233,19 @@ def _ensure_records() -> None:
 			}
 		).insert(ignore_permissions=True)
 
+	_ensure_vendors()
 	_ensure_orders()
+
+
+def _ensure_vendors() -> None:
+	"""One vendor with a stored IBAN, and a near-namesake so a search can be ambiguous."""
+	vendors = ((VENDOR_ACME, VENDOR_IBAN), (VENDOR_ACME_HOLDINGS, ""))
+	for vendor_name, iban in vendors:
+		if frappe.db.exists(VENDOR_DT, vendor_name):
+			continue
+		frappe.get_doc({"doctype": VENDOR_DT, "vendor_name": vendor_name, IBAN_FIELD: iban}).insert(
+			ignore_permissions=True
+		)
 
 
 def _ensure_orders() -> None:
@@ -1013,6 +1333,19 @@ def _ensure_provider() -> None:
 				"provider": PROVIDER,
 				"model_id": "fa-test-model",
 				"enabled": 1,
+			}
+		).insert(ignore_permissions=True)
+
+	if not frappe.db.exists("LLM Model Profile", EXTRACT_PROFILE):
+		frappe.get_doc(
+			{
+				"doctype": "LLM Model Profile",
+				"profile_name": EXTRACT_PROFILE,
+				"provider": PROVIDER,
+				"model_id": "fa-test-vision-model",
+				"enabled": 1,
+				"supports_pdf": 1,
+				"supports_images": 1,
 			}
 		).insert(ignore_permissions=True)
 
