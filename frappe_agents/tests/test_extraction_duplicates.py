@@ -1,0 +1,135 @@
+# Copyright (c) 2026, Malik AlZubaidi and contributors
+# For license information, please see LICENSE
+
+"""The two duplicate checks that need no knowledge of any particular doctype.
+
+The same file extracted into the same doctype twice, and an extracted value that
+collides with a `unique` field. Both are flags for a human: a supplier really can
+send the same invoice twice, and the reviewer is the one who knows whether this
+is that.
+
+`content_hash` is the right key precisely because frappe dedupes blobs — two File
+rows over the same bytes legitimately share one hash and one `file_url`, which is
+what the second upload of the same invoice looks like.
+"""
+
+import frappe
+
+from frappe_agents.api import discard_extraction
+from frappe_agents.tests.fixtures import (
+	DRAFT_USER,
+	ORDER_DT,
+	PROJECT_ALPHA,
+	VENDOR_ACME,
+	VENDOR_DT,
+	AgentTestCase,
+	as_user,
+	extract_as,
+	extraction_json,
+	extraction_reply,
+	make_pdf,
+	make_pdf_attachment,
+)
+
+
+class TestExtractionDuplicates(AgentTestCase):
+	def setUp(self) -> None:
+		super().setUp()
+		self.content = make_pdf("duplicate invoice")
+
+	def extract(self, file, **extra):
+		values = {
+			"order_title": f"FA Extracted {frappe.generate_hash(length=8)}",
+			"project": PROJECT_ALPHA,
+			"vendor": VENDOR_ACME,
+			"amount": 400,
+		}
+		values.update(extra)
+		return extract_as(DRAFT_USER, file.name, extraction_reply(values))
+
+	def duplicates(self, doc) -> dict:
+		return extraction_json(doc, "duplicate_flags")
+
+	def test_the_same_bytes_extracted_twice_are_flagged_the_second_time(self):
+		first_file = make_pdf_attachment(content=self.content)
+		first, _ = self.extract(first_file)
+
+		second_file = make_pdf_attachment(content=self.content)
+		self.assertEqual(second_file.content_hash, first_file.content_hash)
+
+		second, _ = self.extract(second_file)
+
+		same_file = self.duplicates(second)["same_file"]
+		self.assertEqual([row["name"] for row in same_file], [first.name])
+		self.assertEqual(same_file[0]["created_doc"], first.created_doc)
+
+	def test_the_first_extraction_is_not_a_duplicate_of_itself(self):
+		first, _ = self.extract(make_pdf_attachment(content=self.content))
+
+		self.assertEqual(self.duplicates(first)["same_file"], [])
+
+	def test_a_discarded_extraction_of_the_same_file_is_a_retry_not_a_duplicate(self):
+		first_file = make_pdf_attachment(content=self.content)
+		first, _ = self.extract(first_file)
+
+		with as_user(DRAFT_USER):
+			discard_extraction(first.name)
+
+		second, _ = self.extract(make_pdf_attachment(content=self.content))
+
+		self.assertEqual(self.duplicates(second)["same_file"], [])
+
+	def test_the_same_file_into_a_different_doctype_is_not_a_duplicate(self):
+		file = make_pdf_attachment(content=self.content)
+		self.extract(file)
+
+		second, _ = extract_as(
+			DRAFT_USER,
+			make_pdf_attachment(content=self.content).name,
+			extraction_reply({"vendor_name": f"FA Vendor {frappe.generate_hash(length=6)}"}),
+			target_doctype=VENDOR_DT,
+		)
+
+		self.assertEqual(self.duplicates(second)["same_file"], [])
+
+	def test_a_value_that_collides_with_a_unique_field_is_flagged(self):
+		"""The collision is recorded even though the database then refuses the draft.
+
+		Which is the honest state of it: the flag is a banner for a reviewer, and the
+		unique index is a wall. The extraction ends Failed with the collision on the
+		row, rather than as a draft nobody can save.
+		"""
+		doc, _ = extract_as(
+			DRAFT_USER,
+			make_pdf_attachment(content=self.content).name,
+			extraction_reply({"vendor_name": VENDOR_ACME}),
+			target_doctype=VENDOR_DT,
+		)
+
+		collisions = self.duplicates(doc)["unique_collisions"]
+		self.assertEqual(len(collisions), 1)
+		self.assertEqual(collisions[0]["fieldname"], "vendor_name")
+		self.assertEqual(collisions[0]["name"], VENDOR_ACME)
+
+		self.assertEqual(doc.status, "Failed")
+		self.assertFalse(doc.created_doc)
+
+	def test_a_value_that_collides_with_nothing_is_not_flagged(self):
+		doc, _ = extract_as(
+			DRAFT_USER,
+			make_pdf_attachment(content=self.content).name,
+			extraction_reply({"vendor_name": f"FA Vendor {frappe.generate_hash(length=6)}"}),
+			target_doctype=VENDOR_DT,
+		)
+
+		self.assertEqual(self.duplicates(doc)["unique_collisions"], [])
+		self.assertEqual(doc.status, "Needs Review")
+
+	def test_a_duplicate_is_a_flag_and_never_a_refusal(self):
+		"""A supplier can send the same invoice twice. That is the reviewer's call."""
+		self.extract(make_pdf_attachment(content=self.content))
+		second, _ = self.extract(make_pdf_attachment(content=self.content))
+
+		self.assertEqual(second.status, "Needs Review")
+		self.assertTrue(second.created_doc)
+		self.assertEqual(frappe.db.get_value(ORDER_DT, second.created_doc, "docstatus"), 0)
