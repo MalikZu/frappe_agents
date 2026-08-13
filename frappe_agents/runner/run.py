@@ -380,18 +380,18 @@ def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict
 
 	async def execute(tool_call_id: str, arguments: Any, signal: Any = None, on_update: Any = None):
 		args = dict(arguments or {})
-		logged = False
 		try:
 			result, content = _call_tool(run, cancellation, name, args)
-			logged = True
 			outcomes[tool_call_id] = bool(result.get("ok"))
 			return AgentToolResult(content=[TextContent(text=content)])
-		finally:
-			# A cancelled call is torn down here and the loop re-raises before it
-			# would tell us anything, so the row it never got to write is written
-			# now. Every other path already wrote one inside `execute_tool`.
-			if not logged:
-				log_interrupted_call(run, name, args)
+		except asyncio.CancelledError:
+			# The one path `execute_tool` cannot write its own row on: the call is
+			# torn down and the loop re-raises before it would tell us anything.
+			# Named rather than caught as anything that went wrong, because a
+			# tool that ran and was then failed by something after it already has
+			# its row, and a second one would say it never finished.
+			log_interrupted_call(run, name, args)
+			raise
 
 	return execute
 
