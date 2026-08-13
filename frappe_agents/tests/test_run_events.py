@@ -105,6 +105,30 @@ class TestRunEvents(AgentTestCase):
 		self.assertEqual(harness[-1]["event"]["type"], "agent_end")
 		self.assertEqual(harness[0]["run"], run.name)
 
+	def test_the_last_event_does_not_repeat_the_transcript(self):
+		"""`agent_end` is a marker, not a second copy of the conversation.
+
+		The loop signs off by handing back every message it produced. The
+		surface was told about each of them as it happened, and the log kept
+		them one by one, so neither needs the list again — it is the largest
+		payload a run publishes and nothing reads it.
+		"""
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		events = self.published(run.name)
+
+		published = [
+			event["event"]
+			for event in events
+			if event["type"] == "harness_event" and event["event"]["type"] == "agent_end"
+		]
+		self.assertEqual(len(published), 1)
+		self.assertNotIn("messages", published[0])
+
+		stored = [event for event in run_events(run.name) if event["type"] == "agent_end"]
+		self.assertEqual(len(stored), 1)
+		self.assertNotIn("messages", stored[0])
+
 	def test_a_tool_is_announced_before_it_runs(self):
 		"""What the port is for: the surface hears about a tool while it works.
 
