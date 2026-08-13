@@ -1,0 +1,16 @@
+{
+ "app": "frappe_agents",
+ "doctype": "Desktop Icon",
+ "hidden": 0,
+ "icon_type": "App",
+ "idx": 0,
+ "label": "Frappe Agents",
+ "link_to": "Frappe Agents",
+ "link_type": "Workspace Sidebar",
+ "logo_url": "/assets/frappe_agents/images/logo.svg",
+ "modified": "2026-08-13 12:20:00.000000",
+ "name": "Frappe Agents",
+ "restrict_removal": 0,
+ "roles": [],
+ "standard": 1
+}
