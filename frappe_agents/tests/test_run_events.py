@@ -28,11 +28,15 @@ from frappe_agents.runner.run import (
 )
 from frappe_agents.tests.fixtures import (
 	AGENT,
+	DRAFT_AGENT,
+	DRAFT_USER,
+	ORDER_DT,
 	RESTRICTED_USER,
 	TICKET_DT,
 	AgentTestCase,
 	as_user,
 	event_types,
+	make_order_draft,
 	make_run,
 	model_calls,
 	model_says,
@@ -43,6 +47,7 @@ from frappe_agents.tests.fixtures import (
 
 SEARCH = model_calls(tool_request("search_documents", {"doctype": TICKET_DT, "fields": ["name"]}))
 ANSWER = model_says("One ticket is open.", tokens_in=10, tokens_out=5)
+REASON = "The quantities match the signed quotation."
 
 
 class TestRunEvents(AgentTestCase):
@@ -165,6 +170,38 @@ class TestRunEvents(AgentTestCase):
 		self.assertEqual(event_types(replayed), event_types(run_events(name)))
 		started = [event for event in replayed if event["type"] == "tool_execution_start"]
 		self.assertEqual(started[0]["toolName"], "search_documents")
+
+	def test_a_proposal_can_be_redrawn_from_the_log(self):
+		"""The reload the log exists for.
+
+		A proposal card is published while the run is going. After a reload the
+		only trace of it is the run's own events, so the tool call that made the
+		proposal has to be in there with the arguments the card is drawn from.
+		"""
+		order = make_order_draft(DRAFT_USER)
+		run = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
+
+		with patch("frappe.publish_realtime") as publish:
+			run_with_model(
+				run.name,
+				[
+					model_calls(
+						tool_request(
+							"propose_submit",
+							{"doctype": ORDER_DT, "name": order.name, "reason": REASON},
+						)
+					),
+					model_says("I proposed it. An approver has to decide."),
+				],
+			)
+
+		live = [call.args[1] for call in publish.call_args_list if call.args[0] == EVENT]
+		self.assertIn("action_proposed", [event["type"] for event in live])
+
+		started = [event for event in run_events(run.name) if event["type"] == "tool_execution_start"]
+		self.assertEqual(started[0]["toolName"], "propose_submit")
+		self.assertEqual(started[0]["args"]["name"], order.name)
+		self.assertEqual(started[0]["args"]["reason"], REASON)
 
 	# --- the caps ------------------------------------------------------------
 

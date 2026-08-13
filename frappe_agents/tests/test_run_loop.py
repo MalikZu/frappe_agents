@@ -18,6 +18,8 @@ import frappe
 from frappe_agents.runner.providers import ProviderError
 from frappe_agents.tests.fixtures import (
 	AGENT,
+	DRAFT_USER,
+	ORDER_DT,
 	RESTRICTED_USER,
 	TICKET_ALPHA,
 	TICKET_DT,
@@ -181,3 +183,30 @@ class TestRunLoop(AgentTestCase):
 		offered = provider.tool_names()
 		self.assertIn("search_documents", offered)
 		self.assertNotIn("delete_everything", offered)
+
+	def test_the_autonomy_ceiling_holds_when_the_model_asks_for_a_write(self):
+		"""A Suggest agent holds create_draft and still may not call it.
+
+		The gate is in the executor, so it does not matter who asks or how. The
+		model asking directly is the case the loop could have made a way around.
+		"""
+		run = make_run(effective_user=DRAFT_USER, agent=AGENT)
+		before = frappe.db.count(ORDER_DT)
+
+		run_with_model(
+			run.name,
+			[
+				model_calls(
+					tool_request(
+						"create_draft",
+						{"doctype": ORDER_DT, "values": {"order_title": "FA Loop Draft"}},
+					)
+				),
+				ANSWER,
+			],
+		)
+
+		calls = tool_calls_for(run.name)
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(calls[0].outcome, "Denied")
+		self.assertEqual(frappe.db.count(ORDER_DT), before)
