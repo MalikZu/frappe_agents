@@ -105,6 +105,10 @@ class ExtractionRefused(ProviderError):
 		super().__init__(message)
 		self.tokens_in = tokens_in
 		self.tokens_out = tokens_out
+		# Which engine parsed the document before the model declined. OCR ran and
+		# was billed, so the refusal must carry the same security fact a success
+		# does. Set at the dispatch point, where the engine is decided.
+		self.engine: str | None = None
 
 
 def call_model(profile: Any, messages: list[dict], tool_schemas: list[dict] | None = None) -> dict:
@@ -388,26 +392,30 @@ def call_model_extract(
 
 	while True:
 		attempts += 1
-		if anthropic:
-			result = _extract_anthropic(
-				provider, profile, api_key, encoded, media_type, filename, schema, instructions, budget
-			)
-		else:
-			result = _extract_openai(
-				provider,
-				profile,
-				api_key,
-				encoded,
-				media_type,
-				filename,
-				schema,
-				schema_name,
-				instructions,
-				budget,
-				openrouter,
-				engine,
-				annotations,
-			)
+		try:
+			if anthropic:
+				result = _extract_anthropic(
+					provider, profile, api_key, encoded, media_type, filename, schema, instructions, budget
+				)
+			else:
+				result = _extract_openai(
+					provider,
+					profile,
+					api_key,
+					encoded,
+					media_type,
+					filename,
+					schema,
+					schema_name,
+					instructions,
+					budget,
+					openrouter,
+					engine,
+					annotations,
+				)
+		except ExtractionRefused as exc:
+			exc.engine = engine
+			raise
 
 		tokens_in += cint(result.get("tokens_in"))
 		tokens_out += cint(result.get("tokens_out"))
