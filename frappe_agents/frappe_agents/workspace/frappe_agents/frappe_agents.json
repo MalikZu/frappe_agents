@@ -1,7 +1,7 @@
 {
  "app": "frappe_agents",
  "charts": [],
- "content": "[{\"id\":\"fa-sc-chat\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Agent Chat\",\"col\":3}},{\"id\":\"fa-sc-pending\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Pending Actions\",\"col\":3}},{\"id\":\"fa-sc-agents\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Agents\",\"col\":3}},{\"id\":\"fa-sc-skills\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Skills\",\"col\":3}},{\"id\":\"fa-sc-convs\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Conversations\",\"col\":3}},{\"id\":\"fa-sc-providers\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"LLM Providers\",\"col\":3}},{\"id\":\"fa-sc-profiles\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Model Profiles\",\"col\":3}},{\"id\":\"fa-sc-review\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Review Quality\",\"col\":3}},{\"id\":\"fa-spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"fa-header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Masters &amp; Reports</b></span>\",\"col\":12}},{\"id\":\"fa-card-setup\",\"type\":\"card\",\"data\":{\"card_name\":\"Agent Setup\",\"col\":4}},{\"id\":\"fa-card-models\",\"type\":\"card\",\"data\":{\"card_name\":\"Models\",\"col\":4}},{\"id\":\"fa-card-activity\",\"type\":\"card\",\"data\":{\"card_name\":\"Activity\",\"col\":4}},{\"id\":\"fa-card-reports\",\"type\":\"card\",\"data\":{\"card_name\":\"Reports\",\"col\":4}}]",
+ "content": "[{\"id\":\"fa-sc-chat\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Agent Chat\",\"col\":3}},{\"id\":\"fa-sc-pending\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Pending Actions\",\"col\":3}},{\"id\":\"fa-sc-extractions\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Needs Review\",\"col\":3}},{\"id\":\"fa-sc-agents\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Agents\",\"col\":3}},{\"id\":\"fa-sc-skills\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Skills\",\"col\":3}},{\"id\":\"fa-sc-convs\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Conversations\",\"col\":3}},{\"id\":\"fa-sc-providers\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"LLM Providers\",\"col\":3}},{\"id\":\"fa-sc-profiles\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Model Profiles\",\"col\":3}},{\"id\":\"fa-sc-review\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Review Quality\",\"col\":3}},{\"id\":\"fa-spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"fa-header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Masters &amp; Reports</b></span>\",\"col\":12}},{\"id\":\"fa-card-setup\",\"type\":\"card\",\"data\":{\"card_name\":\"Agent Setup\",\"col\":4}},{\"id\":\"fa-card-models\",\"type\":\"card\",\"data\":{\"card_name\":\"Models\",\"col\":4}},{\"id\":\"fa-card-activity\",\"type\":\"card\",\"data\":{\"card_name\":\"Activity\",\"col\":4}},{\"id\":\"fa-card-reports\",\"type\":\"card\",\"data\":{\"card_name\":\"Reports\",\"col\":4}}]",
  "creation": "2026-08-13 00:00:00.000000",
  "custom_blocks": [],
  "docstatus": 0,
@@ -93,7 +93,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Activity",
-   "link_count": 3,
+   "link_count": 4,
    "onboard": 0,
    "type": "Card Break"
   },
@@ -123,6 +123,16 @@
    "label": "Agent Action",
    "link_count": 0,
    "link_to": "Agent Action",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Document Extraction",
+   "link_count": 0,
+   "link_to": "Document Extraction",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -170,6 +180,15 @@
    "label": "Pending Actions",
    "link_to": "Agent Action",
    "stats_filter": "{\"status\": \"Pending\"}",
+   "type": "DocType"
+  },
+  {
+   "color": "Orange",
+   "doc_view": "List",
+   "format": "{} Needs Review",
+   "label": "Needs Review",
+   "link_to": "Document Extraction",
+   "stats_filter": "{\"status\": \"Needs Review\"}",
    "type": "DocType"
   },
   {
