@@ -41,6 +41,12 @@ Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
 Agent Auditor) and registers the built-in read tools. Then, in the Desk:
 create an LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
 
+## Docs
+
+- [Agent Chat](docs/chat.md) — the chat page: conversations, the composer
+  chips, and the document a conversation is about.
+- [The agent harness](docs/harness.md) — the vendored run loop.
+
 ## License
 
 MIT
