@@ -21,8 +21,42 @@ const STYLES = `
 	.agent-chat-doc-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.agent-chat-doc svg { flex: none; }
 	.agent-chat-log { flex: 1; overflow-y: auto; padding: 8px 0; }
-	.agent-chat-composer { display: flex; gap: 8px; align-items: flex-end; padding-top: 8px; border-top: 1px solid var(--border-color); }
-	.agent-chat-input { resize: vertical; }
+	.agent-chat-composer {
+		position: relative; margin-top: 8px; background: var(--card-bg, var(--control-bg));
+		border: 1px solid var(--border-color); border-radius: var(--border-radius-lg);
+	}
+	.agent-chat-input.form-control { border: none; background: transparent; resize: none; padding: 10px 12px 2px; }
+	.agent-chat-input.form-control:focus { box-shadow: none; }
+	.agent-chat-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
+	.agent-chat-send { margin-left: auto; }
+	.agent-chat-chip {
+		display: inline-flex; align-items: center; gap: 5px; max-width: 260px;
+		border: 1px solid var(--border-color); background: var(--control-bg); border-radius: 999px;
+		padding: 2px 10px; font-size: var(--text-sm); color: var(--text-color); cursor: pointer;
+	}
+	.agent-chat-chip:hover { background: var(--highlight-color); }
+	.agent-chat-chip.is-static, .agent-chat-chip.is-static:hover { cursor: default; background: var(--control-bg); }
+	.agent-chat-chip-key { color: var(--text-muted); }
+	.agent-chat-chip-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.agent-chat-chip-caret { color: var(--text-light, var(--text-muted)); font-size: 9px; }
+	.agent-chat-pop {
+		display: none; position: absolute; bottom: calc(100% + 6px); z-index: 10;
+		min-width: 250px; max-width: 340px; max-height: 300px; overflow-y: auto; padding: 6px;
+		background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color);
+		border-radius: var(--border-radius-lg); box-shadow: var(--shadow-lg);
+	}
+	.agent-chat-pop.is-open { display: block; }
+	.agent-chat-pop-label { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); padding: 6px 10px 4px; }
+	.agent-chat-pop-opt { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border-radius: 6px; font-size: var(--text-sm); }
+	.agent-chat-pop-opt.is-clickable { cursor: pointer; }
+	.agent-chat-pop-opt.is-clickable:hover { background: var(--highlight-color); }
+	.agent-chat-pop-sub { display: block; color: var(--text-muted); font-size: var(--text-xs); }
+	.agent-chat-pop-tick { color: var(--text-on-green); font-weight: 600; }
+	.agent-chat-pop-note { font-size: var(--text-xs); color: var(--text-muted); padding: 6px 10px; margin-top: 4px; border-top: 1px solid var(--border-color); }
+	.agent-chat-cap { flex: none; font-size: var(--text-xs); font-weight: 600; border-radius: 4px; padding: 1px 6px; background: var(--control-bg); color: var(--text-muted); }
+	.agent-chat-cap.is-read { background: var(--bg-blue); color: var(--text-on-blue); }
+	.agent-chat-cap.is-draft { background: var(--bg-green); color: var(--text-on-green); }
+	.agent-chat-cap.is-write, .agent-chat-cap.is-submit { background: var(--bg-orange); color: var(--text-on-orange); }
 	.agent-chat-row { margin-bottom: 10px; display: flex; }
 	.agent-chat-row.is-user { justify-content: flex-end; }
 	.agent-chat-bubble { max-width: 78%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; background: var(--control-bg); }
@@ -155,6 +189,12 @@ frappe_agents.ChatUI = class ChatUI {
 		this.compact = Boolean(opts.compact);
 		this.placeholder = opts.placeholder || __("Send a message to start.");
 		this.on_conversation = opts.on_conversation || null;
+		this.on_agent_change = opts.on_agent_change || null;
+		// What the composer chips are drawn from: one list_agents row per agent,
+		// carrying the tools it may call and the models this user may pick for it.
+		// A surface that passes none gets a composer with no chips.
+		this.agents = opts.agents || [];
+		this.model_profile = opts.model_profile || null;
 		// The document this conversation is about: seeded from the form panel, and
 		// on a reload told to us by the server, which asks the read permission again.
 		this.context = this.seed_context();
@@ -195,8 +235,12 @@ frappe_agents.ChatUI = class ChatUI {
 				</div>
 				<div class="agent-chat-log"></div>
 				<div class="agent-chat-composer">
+					<div class="agent-chat-pop"></div>
 					<textarea class="form-control agent-chat-input" rows="2"></textarea>
-					<button class="btn btn-primary btn-sm agent-chat-send"></button>
+					<div class="agent-chat-bar">
+						<span class="agent-chat-chips"></span>
+						<button class="btn btn-primary btn-sm agent-chat-send"></button>
+					</div>
 				</div>
 			</div>
 		`).appendTo(this.parent);
@@ -208,11 +252,14 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$context = this.$body.find(".agent-chat-context");
 		this.$log = this.$body.find(".agent-chat-log");
 		this.$input = this.$body.find(".agent-chat-input");
+		this.$chips = this.$body.find(".agent-chat-chips");
+		this.$pop = this.$body.find(".agent-chat-pop");
 		this.$send = this.$body.find(".agent-chat-send");
 
 		this.$input.attr("placeholder", __("Ask the agent something…"));
 		this.$send.text(__("Send"));
 		this.render_head();
+		this.render_chips();
 	}
 
 	bind() {
@@ -223,6 +270,19 @@ frappe_agents.ChatUI = class ChatUI {
 				this.send();
 			}
 		});
+
+		// A chip popover closes on anything that is not itself or a chip. Held on
+		// the instance so destroy() takes this listener off the document with it.
+		this.pop_dismiss_handler = (e) => {
+			if (!this.pop_owner) return;
+			if ($(e.target).closest(".agent-chat-pop, .agent-chat-chip").length) return;
+			this.close_pop();
+		};
+		this.pop_escape_handler = (e) => {
+			if (e.key === "Escape") this.close_pop();
+		};
+		$(document).on("click", this.pop_dismiss_handler);
+		$(document).on("keydown", this.pop_escape_handler);
 
 		// Kept on the instance so destroy() can unbind exactly this listener —
 		// otherwise every panel open leaves another one rendering into a dead log.
@@ -243,6 +303,12 @@ frappe_agents.ChatUI = class ChatUI {
 		if (this.extraction_update_handler) {
 			frappe.realtime.off(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler);
 			this.extraction_update_handler = null;
+		}
+		if (this.pop_dismiss_handler) {
+			$(document).off("click", this.pop_dismiss_handler);
+			$(document).off("keydown", this.pop_escape_handler);
+			this.pop_dismiss_handler = null;
+			this.pop_escape_handler = null;
 		}
 		this.clear_state();
 		if (this.$body) this.$body.remove();
@@ -305,11 +371,235 @@ frappe_agents.ChatUI = class ChatUI {
 			.appendTo(this.$context);
 	}
 
+	/** The list_agents row for the agent in hand, when the surface gave us one. */
+	agent_info() {
+		return this.agents.find((agent) => agent.name === this.agent) || null;
+	}
+
+	/** Take a fresh list_agents payload: what an agent may do can change under us. */
+	set_agents(agents) {
+		this.agents = agents || [];
+		const info = this.agent_info();
+		if (info) this.agent_label = info.agent_name || info.name;
+		this.render_head();
+		this.render_chips();
+	}
+
+	/** The chips beside the message box: who, on which model, with which tools. */
+	render_chips() {
+		this.close_pop();
+		this.$chips.empty();
+		const info = this.agent_info();
+		if (!info) return;
+		this.render_agent_chip(info);
+		this.render_model_chip(info);
+		this.render_tools_chip(info);
+	}
+
+	render_agent_chip(info) {
+		const many = this.agents.length > 1;
+		const $chip = this.make_chip("", info.agent_name || info.name, many)
+			.attr("title", info.description || __("The agent you are talking to"))
+			.appendTo(this.$chips);
+		if (many) $chip.on("click", () => this.toggle_pop("agent", $chip, () => this.build_agent_pop()));
+	}
+
+	build_agent_pop() {
+		this.pop_label(__("Talk to"));
+		this.agents.forEach((agent) => {
+			const $opt = this.pop_option(agent.agent_name || agent.name, agent.description);
+			if (agent.name === this.agent) {
+				$("<span class='agent-chat-pop-tick'>✓</span>").appendTo($opt);
+			} else {
+				$opt.addClass("is-clickable").on("click", () => {
+					this.close_pop();
+					this.choose_agent(agent.name);
+				});
+			}
+		});
+		this.pop_note(__("A conversation belongs to one agent, so switching starts a new one."));
+	}
+
+	/**
+	 * Switch agents. A conversation is audited against one agent's grants, so this
+	 * never continues the current one — it starts a new conversation, and says so
+	 * before throwing away what is on screen.
+	 */
+	choose_agent(name) {
+		if (!name || name === this.agent) return;
+		const chosen = this.agents.find((agent) => agent.name === name);
+		const label = chosen ? chosen.agent_name || chosen.name : name;
+		if (!this.has_messages()) {
+			this.switch_agent(name);
+			return;
+		}
+		frappe.confirm(__("Start a new conversation with {0}? This one stays in your list.", [label]), () =>
+			this.switch_agent(name)
+		);
+	}
+
+	switch_agent(name) {
+		this.set_agent(name);
+		if (this.on_agent_change) this.on_agent_change(this.agent);
+		this.focus();
+	}
+
+	has_messages() {
+		return Boolean(this.conversation) || this.$log.find(".agent-chat-row").length > 0;
+	}
+
+	/**
+	 * The model this conversation runs on. Label only when the agent's owner has
+	 * configured no alternate this user may pick — there is nothing to choose from,
+	 * and a menu of one is a promise the governance does not make.
+	 */
+	render_model_chip(info) {
+		const choices = info.model_choices || [];
+		const current = this.current_profile(info);
+		if (!current) return;
+
+		const many = choices.length > 1;
+		const $chip = this.make_chip(__("model"), current, many).appendTo(this.$chips);
+		if (many) {
+			$chip.on("click", () => this.toggle_pop("model", $chip, () => this.build_model_pop(info)));
+		} else {
+			$chip.attr("title", __("The model this agent runs on"));
+		}
+	}
+
+	current_profile(info) {
+		const choices = info.model_choices || [];
+		const first = choices.length ? choices[0].name : "";
+		return this.model_profile || info.model_profile || first || "";
+	}
+
+	build_model_pop(info) {
+		const current = this.current_profile(info);
+		this.pop_label(__("Model for this conversation"));
+		(info.model_choices || []).forEach((choice) => {
+			const sub = [choice.default ? __("default") : __("alternate"), choice.model_id]
+				.filter(Boolean)
+				.join(" · ");
+			const $opt = this.pop_option(choice.name, sub);
+			if (choice.name === current) {
+				$("<span class='agent-chat-pop-tick'>✓</span>").appendTo($opt);
+			} else {
+				$opt.addClass("is-clickable").on("click", () => {
+					this.close_pop();
+					this.choose_model(choice.name);
+				});
+			}
+		});
+		this.pop_note(
+			__(
+				"Only models this agent's owner allows, filtered by your role. Every run records the model that actually ran."
+			)
+		);
+	}
+
+	/**
+	 * Pin this conversation to a model. A conversation that does not exist yet is
+	 * pinned by the first message instead; either way the server checks the choice
+	 * against the agent's list and this user's roles, and a refusal changes nothing.
+	 */
+	choose_model(profile) {
+		if (!profile) return;
+		if (!this.conversation) {
+			this.model_profile = profile;
+			this.render_chips();
+			return;
+		}
+		frappe.call({
+			method: "frappe_agents.api.set_conversation_model",
+			args: { conversation: this.conversation, model_profile: profile },
+			callback: (r) => {
+				if (!r.message) return;
+				this.model_profile = r.message.model_profile || null;
+				this.render_chips();
+			},
+		});
+	}
+
+	/** What the agent can do, as a count you can open. Read-only, always. */
+	render_tools_chip(info) {
+		const tools = info.tools || [];
+		if (!tools.length) return;
+		const $chip = this.make_chip(__("tools"), String(tools.length), true).appendTo(this.$chips);
+		$chip.on("click", () => this.toggle_pop("tools", $chip, () => this.build_tools_pop(info)));
+	}
+
+	build_tools_pop(info) {
+		const tools = info.tools || [];
+		this.pop_label(
+			__("{0} can use — {1} tools", [info.agent_name || info.name, tools.length])
+		);
+		tools.forEach((tool) => {
+			const $opt = this.pop_option(tool.tool_name, tool.description);
+			if (!tool.capability) return;
+			$("<span class='agent-chat-cap'></span>")
+				.addClass(`is-${tool.capability.toLowerCase()}`)
+				.text(__(tool.capability))
+				.appendTo($opt);
+		});
+		this.pop_note(
+			__("Read-only. Granting and scoping happen on the Agent form, where changes are versioned.")
+		);
+	}
+
+	make_chip(key, value, has_menu) {
+		const $chip = $("<span class='agent-chat-chip'></span>");
+		if (key) $("<span class='agent-chat-chip-key'></span>").text(key).appendTo($chip);
+		$("<span class='agent-chat-chip-value'></span>").text(value).appendTo($chip);
+		if (has_menu) {
+			$("<span class='agent-chat-chip-caret'>▾</span>").appendTo($chip);
+		} else {
+			$chip.addClass("is-static");
+		}
+		return $chip;
+	}
+
+	/** One popover, reused: opening another closes the one before it. */
+	toggle_pop(owner, $anchor, build) {
+		if (this.pop_owner === owner) {
+			this.close_pop();
+			return;
+		}
+		this.close_pop();
+		this.pop_owner = owner;
+		this.$pop.addClass("is-open").css("left", Math.max(0, $anchor.position().left));
+		build();
+	}
+
+	close_pop() {
+		if (!this.$pop) return;
+		this.pop_owner = null;
+		this.$pop.removeClass("is-open").empty();
+	}
+
+	pop_label(text) {
+		$("<div class='agent-chat-pop-label'></div>").text(text).appendTo(this.$pop);
+	}
+
+	pop_option(label, sub) {
+		const $opt = $("<div class='agent-chat-pop-opt'></div>");
+		const $text = $("<span></span>").appendTo($opt);
+		$("<span></span>").text(label).appendTo($text);
+		if (sub) $("<span class='agent-chat-pop-sub'></span>").text(sub).appendTo($text);
+		return $opt.appendTo(this.$pop);
+	}
+
+	pop_note(text) {
+		$("<div class='agent-chat-pop-note'></div>").text(text).appendTo(this.$pop);
+	}
+
 	set_agent(agent) {
 		agent = agent || null;
 		if (agent === this.agent) return;
 		this.agent = agent;
-		this.agent_label = null;
+		const info = this.agent_info();
+		this.agent_label = info ? info.agent_name || info.name : null;
+		// A model chosen for one agent means nothing to the next one.
+		this.model_profile = null;
 		this.reset();
 	}
 
@@ -321,6 +611,7 @@ frappe_agents.ChatUI = class ChatUI {
 		// nothing else: the last conversation's document does not follow it.
 		this.context = this.seed_context();
 		this.render_head();
+		this.render_chips();
 		this.refresh_composer();
 		this.show_empty(this.agent ? this.placeholder : __("Select an agent to start."));
 	}
@@ -366,10 +657,12 @@ frappe_agents.ChatUI = class ChatUI {
 		}
 		if (data.agent) this.agent = data.agent;
 		this.agent_label = data.agent_name || this.agent_label;
+		this.model_profile = data.model_profile || null;
 		// The server has just re-checked who may see this document, so its answer
 		// replaces whatever this surface was carrying.
 		this.context = data.context || this.seed_context();
 		this.render_head();
+		this.render_chips();
 		this.refresh_composer();
 
 		const runs = data.runs || [];
@@ -469,6 +762,9 @@ frappe_agents.ChatUI = class ChatUI {
 
 		const args = { agent: this.agent, message: message };
 		if (this.conversation) args.conversation = this.conversation;
+		// Carried on every turn, not only the first: the server checks the choice
+		// again each time, because an agent's alternates and a user's roles move.
+		if (this.model_profile) args.model_profile = this.model_profile;
 		if (this.context_doctype && this.context_name) {
 			args.context_doctype = this.context_doctype;
 			args.context_name = this.context_name;
