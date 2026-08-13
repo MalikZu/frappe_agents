@@ -671,6 +671,11 @@ def make_conversation(user: str, agent: str = AGENT, title: str = "FA test conve
 	)
 	conversation.flags.ignore_permissions = True
 	conversation.insert(ignore_permissions=True)
+	if conversation.owner != user:
+		# The doctype grants write to the owner alone, and the fixture inserts as
+		# the test session. Without this the conversation belongs to nobody who
+		# could rename it, which is not a state the chat can produce.
+		conversation.db_set("owner", user, update_modified=False)
 	return conversation
 
 

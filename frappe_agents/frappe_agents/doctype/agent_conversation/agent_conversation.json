@@ -10,6 +10,7 @@
   "agent",
   "user",
   "title",
+  "model_profile",
   "last_activity"
  ],
  "fields": [
@@ -38,6 +39,14 @@
    "label": "Title"
   },
   {
+   "description": "Run this conversation on one of the agent's alternate profiles instead of its default. Empty means the agent's default.",
+   "fieldname": "model_profile",
+   "fieldtype": "Link",
+   "label": "Model Profile",
+   "options": "LLM Model Profile",
+   "read_only": 1
+  },
+  {
    "fieldname": "last_activity",
    "fieldtype": "Datetime",
    "label": "Last Activity"
@@ -45,7 +54,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 12:40:00.000000",
+ "modified": "2026-08-13 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Conversation",

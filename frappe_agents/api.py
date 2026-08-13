@@ -27,6 +27,7 @@ from frappe_agents.extraction.pipeline import (
 	record_fields,
 )
 from frappe_agents.extraction.schema import build_extraction_schema
+from frappe_agents.model_profiles import check_profile
 from frappe_agents.tools.base import runtime_enabled
 from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
 
@@ -73,8 +74,14 @@ def start_run(
 	conversation: str | None = None,
 	context_doctype: str | None = None,
 	context_name: str | None = None,
+	model_profile: str | None = None,
 ) -> dict:
-	"""Queue one turn of a conversation with an agent. Returns the run and conversation."""
+	"""Queue one turn of a conversation with an agent. Returns the run and conversation.
+
+	`model_profile` names the model to run this conversation on from now on. It is
+	only accepted if the agent offers it and this user's roles pass it; a refusal
+	writes nothing, like every other refusal at this door.
+	"""
 	message = (message or "").strip()
 	if not message:
 		frappe.throw(_("Message cannot be empty."))
@@ -104,9 +111,13 @@ def start_run(
 
 	context_doctype, context_name = _validate_context(context_doctype, context_name)
 
+	requested = (model_profile or "").strip()
+	requested = check_profile(agent_doc, requested) if requested else None
+
 	_check_budget(agent_doc, settings)
 
-	conversation_doc = _get_conversation(agent_doc, conversation, message)
+	conversation_doc = _get_conversation(agent_doc, conversation, message, requested)
+	run_profile = _turn_profile(agent_doc, conversation_doc, requested)
 
 	run = frappe.get_doc(
 		{
@@ -121,6 +132,7 @@ def start_run(
 			"input_message": message,
 			"context_doctype": context_doctype,
 			"context_name": context_name,
+			"model_profile": run_profile,
 		}
 	)
 	run.flags.ignore_permissions = True
@@ -166,6 +178,7 @@ def get_conversation(conversation: str) -> dict:
 		"name": doc.name,
 		"agent": doc.agent,
 		"title": doc.title,
+		"model_profile": doc.model_profile,
 		"last_activity": doc.last_activity,
 		"runs": runs,
 	}
@@ -188,6 +201,19 @@ def _run_events(log: Any) -> list[dict]:
 	if not isinstance(events, list):
 		return []
 	return [event for event in events if isinstance(event, dict)]
+
+
+@frappe.whitelist(methods=["POST"])
+def set_conversation_model(conversation: str, model_profile: str | None = None) -> dict:
+	"""Pin this conversation to one of its agent's model profiles, or unpin it.
+
+	The choice is checked on the document, so this endpoint decides one thing
+	only: whether the conversation is yours to change.
+	"""
+	doc = _own_conversation(conversation)
+	doc.model_profile = (model_profile or "").strip() or None
+	doc.save()
+	return {"conversation": doc.name, "model_profile": doc.model_profile}
 
 
 @frappe.whitelist()
@@ -318,14 +344,15 @@ def _check_budget(agent: Any, settings: Any) -> None:
 		)
 
 
-def _get_conversation(agent: Any, conversation: str | None, message: str) -> Any:
+def _get_conversation(agent: Any, conversation: str | None, message: str, profile: str | None) -> Any:
 	if conversation:
-		frappe.has_permission("Agent Conversation", "write", doc=conversation, throw=True)
-		doc = frappe.get_doc("Agent Conversation", conversation)
-		if doc.user != frappe.session.user:
-			raise frappe.PermissionError(_("This conversation belongs to another user."))
+		doc = _own_conversation(conversation)
 		if doc.agent != agent.name:
 			frappe.throw(_("This conversation belongs to agent {0}.").format(doc.agent))
+		if profile and doc.model_profile != profile:
+			# Already checked against this agent and this user's roles.
+			doc.flags.ignore_permissions = True
+			doc.db_set("model_profile", profile, update_modified=False)
 		return doc
 
 	doc = frappe.get_doc(
@@ -334,11 +361,35 @@ def _get_conversation(agent: Any, conversation: str | None, message: str) -> Any
 			"agent": agent.name,
 			"user": frappe.session.user,
 			"title": message[:TITLE_CHARS],
+			"model_profile": profile,
 			"last_activity": now_datetime(),
 		}
 	)
 	doc.insert()
 	return doc
+
+
+def _own_conversation(name: str) -> Any:
+	"""A conversation the session user owns, or a refusal."""
+	frappe.has_permission("Agent Conversation", "write", doc=name, throw=True)
+	doc = frappe.get_doc("Agent Conversation", name)
+	if doc.user != frappe.session.user:
+		raise frappe.PermissionError(_("This conversation belongs to another user."))
+	return doc
+
+
+def _turn_profile(agent: Any, conversation: Any, requested: str | None) -> str | None:
+	"""The profile this turn runs on: what was just chosen, or what was chosen before.
+
+	A profile pinned earlier is checked again rather than trusted. An agent's
+	alternates and a user's roles both move, and neither change reaches a
+	conversation that has already chosen — so the stored choice is a request like
+	any other, and it is refused in words rather than quietly falling back.
+	"""
+	if requested:
+		return requested
+	stored = conversation.model_profile
+	return check_profile(agent, stored) if stored else None
 
 
 # --- Document extraction ----------------------------------------------------
