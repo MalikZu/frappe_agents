@@ -40,6 +40,60 @@ function add_styles() {
 frappe_agents.RUN_UPDATE_EVENT = "frappe_agents:run_update";
 frappe_agents.EXTRACTION_UPDATE_EVENT = "frappe_agents:extraction_update";
 
+// Tools whose result is a proposal waiting for a person. Their finished event is
+// what a reopened conversation redraws its approval cards from.
+const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel"];
+
+/** Tool arguments as pretty JSON, whatever shape they arrived in. */
+function pretty_args(args) {
+	try {
+		return JSON.stringify(typeof args === "string" ? JSON.parse(args) : args || {}, null, 2);
+	} catch (e) {
+		return String(args || "");
+	}
+}
+
+/** Those arguments on one line, for the collapsed tool line. */
+function args_summary(pretty) {
+	const flat = pretty
+		.replace(/\s+/g, " ")
+		.replace(/^\{\s*|\s*\}$/g, "")
+		.trim();
+	return flat.length > 60 ? flat.slice(0, 60) + "…" : flat;
+}
+
+/** How one tool call reads in the log, running or finished. */
+function tool_line_text(tool, pretty, running) {
+	return `→ ${tool}(${args_summary(pretty)})${running ? " …" : ""}`;
+}
+
+/** Tool lines are held per run, so a second run cannot resolve the first one's line. */
+function tool_line_key(run, id) {
+	return `${run}::${id}`;
+}
+
+/** The text a harness tool result carried. */
+function result_text(result) {
+	const content = (result && result.content) || [];
+	return content
+		.filter((block) => block && block.type === "text")
+		.map((block) => block.text || "")
+		.join("");
+}
+
+/** The proposal a finished tool call produced, or null if it made none. */
+function proposal_from_event(event) {
+	if (!PROPOSAL_TOOLS.includes(event.toolName) || event.isError) return null;
+	let payload = null;
+	try {
+		payload = JSON.parse(result_text(event.result));
+	} catch (e) {
+		return null;
+	}
+	const result = payload && payload.ok ? payload.result : null;
+	return result && result.action ? result : null;
+}
+
 /** Extraction status as a line a person can read. */
 function extraction_title(status) {
 	switch (status) {
@@ -79,9 +133,7 @@ frappe_agents.ChatUI = class ChatUI {
 		this.compact = Boolean(opts.compact);
 		this.placeholder = opts.placeholder || __("Send a message to start.");
 		this.on_conversation = opts.on_conversation || null;
-		this.pending = {};
-		// One card per extraction, redrawn in place as its status moves.
-		this.extractions = {};
+		this.clear_state();
 
 		this.make();
 		this.bind();
@@ -92,6 +144,19 @@ frappe_agents.ChatUI = class ChatUI {
 		} else {
 			this.show_empty(this.agent ? this.placeholder : __("Select an agent to start."));
 		}
+	}
+
+	/** Forget everything drawn for a conversation. Called wherever the log is emptied. */
+	clear_state() {
+		this.pending = {};
+		// One card per extraction, redrawn in place as its status moves.
+		this.extractions = {};
+		// One card per proposal, so replaying a log cannot draw a second one.
+		this.actions = {};
+		// Tool lines drawn when the tool started, keyed by run and tool call id,
+		// plus the queue the finished event finds them by.
+		this.tool_lines = {};
+		this.tool_waiting = {};
 	}
 
 	make() {
@@ -149,8 +214,7 @@ frappe_agents.ChatUI = class ChatUI {
 			frappe.realtime.off(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler);
 			this.extraction_update_handler = null;
 		}
-		this.pending = {};
-		this.extractions = {};
+		this.clear_state();
 		if (this.$body) this.$body.remove();
 	}
 
@@ -171,8 +235,7 @@ frappe_agents.ChatUI = class ChatUI {
 
 	reset() {
 		this.conversation = null;
-		this.pending = {};
-		this.extractions = {};
+		this.clear_state();
 		this.$log.empty();
 		this.refresh_composer();
 		this.show_empty(this.agent ? this.placeholder : __("Select an agent to start."));
@@ -187,8 +250,7 @@ frappe_agents.ChatUI = class ChatUI {
 	load_conversation(conversation) {
 		if (!conversation) return;
 		this.conversation = conversation;
-		this.pending = {};
-		this.extractions = {};
+		this.clear_state();
 		this.$log.empty();
 		this.show_empty(__("Loading conversation…"));
 
@@ -232,6 +294,7 @@ frappe_agents.ChatUI = class ChatUI {
 		if (run.input_message) {
 			this.$log.append(this.make_bubble(run.input_message, "is-user"));
 		}
+		this.replay_run_events(run);
 		if (run.output_message) {
 			this.$log.append(this.make_bubble(run.output_message, ""));
 			return;
@@ -248,6 +311,40 @@ frappe_agents.ChatUI = class ChatUI {
 			this.$log.append($pending);
 			this.pending[run.name] = $pending;
 		}
+	}
+
+	/**
+	 * Redraw what a finished run left behind that its own row does not hold.
+	 *
+	 * A proposal card is published while the run is going. Reopening the
+	 * conversation used to lose it, so a person came back to a chat that never
+	 * mentioned the thing waiting for their approval. The run's event log has it.
+	 */
+	replay_run_events(run) {
+		const events = Array.isArray(run.event_log) ? run.event_log : [];
+		// The reason the agent gave is an argument of the call, not part of its
+		// result, so it is picked up when the call starts.
+		const reasons = {};
+
+		events.forEach((event) => {
+			if (!event || !event.type) return;
+			if (event.type === "tool_execution_start") {
+				reasons[event.toolCallId] = (event.args || {}).reason;
+				return;
+			}
+			if (event.type !== "tool_execution_end") return;
+
+			const proposal = proposal_from_event(event);
+			if (!proposal) return;
+			this.render_action_proposed({
+				run: run.name,
+				action: proposal.action,
+				action_type: proposal.action_type,
+				target_doctype: proposal.target_doctype,
+				target_name: proposal.target_name,
+				reason: reasons[event.toolCallId] || "",
+			});
+		});
 	}
 
 	show_empty(text) {
@@ -314,6 +411,9 @@ frappe_agents.ChatUI = class ChatUI {
 		if (!data.conversation && !this.pending[data.run]) return;
 
 		switch (data.type) {
+			case "harness_event":
+				this.on_harness_event(data);
+				break;
 			case "tool_call":
 				this.render_tool_call(data);
 				break;
@@ -351,27 +451,85 @@ frappe_agents.ChatUI = class ChatUI {
 		}
 	}
 
+	/**
+	 * The loop's own events. Only the tool lifecycle is drawn from them: the
+	 * legacy tool_call event is published once a tool has already returned, so
+	 * the started event is the only thing that can show a tool while it runs.
+	 */
+	on_harness_event(data) {
+		const event = data.event || {};
+		if (event.type === "tool_execution_start") {
+			this.render_tool_started(data.run, event);
+		} else if (event.type === "tool_execution_end") {
+			// Usually already finished by the legacy event just before this one.
+			// Not always: a tool the kill switch refused publishes no legacy event.
+			this.finish_tool_line(this.tool_lines[tool_line_key(data.run, event.toolCallId)]);
+		}
+	}
+
+	/** Draw a tool the agent has just started calling. It resolves in place when it returns. */
+	render_tool_started(run, event) {
+		const id = event.toolCallId;
+		const key = tool_line_key(run, id);
+		if (!id || this.tool_lines[key]) return;
+
+		const line = this.make_tool_line(event.toolName || "tool", event.args || {}, true);
+		this.insert_before_pending(run, line.$line);
+		this.insert_before_pending(run, line.$args);
+
+		this.tool_lines[key] = line;
+		const waiting = tool_line_key(run, line.tool);
+		this.tool_waiting[waiting] = this.tool_waiting[waiting] || [];
+		this.tool_waiting[waiting].push(key);
+	}
+
 	render_tool_call(data) {
 		const tool = data.tool || data.name || "tool";
 		const args = data.args !== undefined ? data.args : data.args_json;
-		let pretty = "";
-		try {
-			pretty = JSON.stringify(typeof args === "string" ? JSON.parse(args) : args || {}, null, 2);
-		} catch (e) {
-			pretty = String(args || "");
-		}
-		const flat = pretty
-			.replace(/\s+/g, " ")
-			.replace(/^\{\s*|\s*\}$/g, "")
-			.trim();
-		const summary = flat.length > 60 ? flat.slice(0, 60) + "…" : flat;
 
-		const $line = $("<div class='agent-chat-tool'></div>").text(`→ ${tool}(${summary})`);
+		// This call may already be on screen as a started line. Finish that one
+		// rather than drawing the same call a second time.
+		const started = this.take_started(data.run, tool);
+		if (started) {
+			this.finish_tool_line(started, args);
+			return;
+		}
+
+		const line = this.make_tool_line(tool, args, false);
+		this.insert_before_pending(data.run, line.$line);
+		this.insert_before_pending(data.run, line.$args);
+	}
+
+	/** One tool line: the call, and its full arguments behind a click. */
+	make_tool_line(tool, args, running) {
+		const pretty = pretty_args(args);
+		const $line = $("<div class='agent-chat-tool'></div>").text(tool_line_text(tool, pretty, running));
 		const $args = $("<pre class='agent-chat-tool-args'></pre>").text(pretty);
 		$line.on("click", () => $args.toggle());
+		return { $line: $line, $args: $args, tool: tool, args: args, done: !running };
+	}
 
-		this.insert_before_pending(data.run, $line);
-		this.insert_before_pending(data.run, $args);
+	/** The oldest started line for this tool on this run that has not finished yet. */
+	take_started(run, tool) {
+		const queue = this.tool_waiting[tool_line_key(run, tool)] || [];
+		while (queue.length) {
+			const line = this.tool_lines[queue.shift()];
+			if (line && !line.done) return line;
+		}
+		return null;
+	}
+
+	/** Resolve a started line into the finished one, with the arguments it ran with. */
+	finish_tool_line(line, args) {
+		if (!line || line.done) return;
+		line.done = true;
+		if (args !== undefined) {
+			const pretty = pretty_args(args);
+			line.$line.text(tool_line_text(line.tool, pretty, false));
+			line.$args.text(pretty);
+			return;
+		}
+		line.$line.text(tool_line_text(line.tool, pretty_args(line.args), false));
 	}
 
 	/**
@@ -381,6 +539,9 @@ frappe_agents.ChatUI = class ChatUI {
 	 */
 	render_action_proposed(data) {
 		if (!data.action) return;
+		// The same proposal reaches here twice when a run that is still going is
+		// also replayed from its log. One proposal is one card.
+		if (this.actions[data.action]) return;
 		this.clear_empty();
 
 		const verb = data.action_type === "Cancel" ? __("Cancel") : __("Submit");
@@ -409,6 +570,7 @@ frappe_agents.ChatUI = class ChatUI {
 			.appendTo($card);
 
 		this.insert_before_pending(data.run, $card);
+		this.actions[data.action] = $card;
 	}
 
 	/**
