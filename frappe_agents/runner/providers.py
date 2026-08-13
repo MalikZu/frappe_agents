@@ -545,9 +545,7 @@ def _extract_openai(
 	# OpenAI itself retired max_tokens on current models in favour of
 	# max_completion_tokens; OpenRouter and other compatible endpoints still
 	# speak max_tokens and may not know the newer key. Pick by host.
-	budget_key = (
-		"max_completion_tokens" if "api.openai.com" in (provider.base_url or "") else "max_tokens"
-	)
+	budget_key = "max_completion_tokens" if "api.openai.com" in (provider.base_url or "") else "max_tokens"
 	payload: dict[str, Any] = {
 		"model": profile.model_id,
 		"messages": messages,
