@@ -166,6 +166,31 @@ class TestRunLoop(AgentTestCase):
 		self.assertEqual(calls[0].tool, "search_documents")
 		self.assertEqual(calls[0].error, INTERRUPTED)
 
+	def test_a_tool_that_finished_is_not_also_audited_as_interrupted(self):
+		"""Something failing after the tool must not rewrite what the tool did.
+
+		Publishing the result to the browser happens once the tool has already
+		run and already written its row. If that push throws, the call is still
+		a call that finished: one row, Success, and no second row claiming it
+		never got there.
+		"""
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		def refuse_to_publish(run_doc, event_type, **payload):
+			if event_type == "tool_call":
+				raise RuntimeError("the browser is unreachable")
+
+		with patch("frappe_agents.runner.run.publish_event", side_effect=refuse_to_publish):
+			run_with_model(
+				run.name,
+				[model_calls(tool_request("search_documents", {"doctype": TICKET_DT})), ANSWER],
+			)
+
+		calls = tool_calls_for(run.name)
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(calls[0].outcome, "Success")
+		self.assertNotEqual(calls[0].error, INTERRUPTED)
+
 	def test_a_provider_that_raises_fails_the_run_in_its_own_words(self):
 		run = make_run(effective_user=RESTRICTED_USER)
 
