@@ -928,6 +928,12 @@ def _ensure_extraction_fields() -> None:
 				"options": VENDOR_DT,
 			},
 			{"fieldname": IBAN_FIELD, "fieldtype": "Data", "label": "IBAN"},
+			{
+				"fieldname": "payment_terms",
+				"fieldtype": "Select",
+				"label": "Payment Terms",
+				"options": "\nNet 30\nNet 60",
+			},
 		],
 	)
 	_append_fields(
