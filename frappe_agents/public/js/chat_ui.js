@@ -25,6 +25,11 @@ const STYLES = `
 	.agent-chat-action-target { font-size: var(--text-sm); color: var(--text-muted); }
 	.agent-chat-action-reason { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 	.agent-chat-action-link { display: inline-block; margin-top: 6px; font-size: var(--text-sm); }
+	.agent-chat-action.is-extraction { border-left-color: var(--blue-500, var(--border-color)); }
+	.agent-chat-action.is-extraction.is-review { border-left-color: var(--orange-500, var(--border-color)); }
+	.agent-chat-action.is-extraction.is-failed { border-left-color: var(--red-500, var(--border-color)); }
+	.agent-chat-action-line { font-size: var(--text-sm); margin-top: 2px; }
+	.agent-chat-action-line.is-alarm { color: var(--text-on-red, var(--text-color)); background: var(--bg-red, var(--control-bg)); border-radius: 6px; padding: 4px 6px; margin-top: 4px; }
 `;
 
 function add_styles() {
@@ -33,6 +38,25 @@ function add_styles() {
 }
 
 frappe_agents.RUN_UPDATE_EVENT = "frappe_agents:run_update";
+frappe_agents.EXTRACTION_UPDATE_EVENT = "frappe_agents:extraction_update";
+
+/** Extraction status as a line a person can read. */
+function extraction_title(status) {
+	switch (status) {
+		case "Needs Review":
+			return __("A document is extracted and waiting for your review");
+		case "Accepted":
+			return __("Extraction accepted");
+		case "Discarded":
+			return __("Extraction discarded");
+		case "Failed":
+			return __("Extraction failed");
+		case "Running":
+			return __("Reading the document…");
+		default:
+			return __("Document queued for extraction");
+	}
+}
 
 frappe_agents.ChatUI = class ChatUI {
 	/**
@@ -56,6 +80,8 @@ frappe_agents.ChatUI = class ChatUI {
 		this.placeholder = opts.placeholder || __("Send a message to start.");
 		this.on_conversation = opts.on_conversation || null;
 		this.pending = {};
+		// One card per extraction, redrawn in place as its status moves.
+		this.extractions = {};
 
 		this.make();
 		this.bind();
@@ -107,6 +133,11 @@ frappe_agents.ChatUI = class ChatUI {
 		// otherwise every panel open leaves another one rendering into a dead log.
 		this.run_update_handler = (data) => this.on_run_update(data);
 		frappe.realtime.on(frappe_agents.RUN_UPDATE_EVENT, this.run_update_handler);
+
+		// Extraction runs as its own job, so its progress arrives on its own event
+		// and usually after the run that asked for it has already finished.
+		this.extraction_update_handler = (data) => this.on_extraction_update(data);
+		frappe.realtime.on(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler);
 	}
 
 	destroy() {
@@ -114,7 +145,12 @@ frappe_agents.ChatUI = class ChatUI {
 			frappe.realtime.off(frappe_agents.RUN_UPDATE_EVENT, this.run_update_handler);
 			this.run_update_handler = null;
 		}
+		if (this.extraction_update_handler) {
+			frappe.realtime.off(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler);
+			this.extraction_update_handler = null;
+		}
 		this.pending = {};
+		this.extractions = {};
 		if (this.$body) this.$body.remove();
 	}
 
@@ -136,6 +172,7 @@ frappe_agents.ChatUI = class ChatUI {
 	reset() {
 		this.conversation = null;
 		this.pending = {};
+		this.extractions = {};
 		this.$log.empty();
 		this.refresh_composer();
 		this.show_empty(this.agent ? this.placeholder : __("Select an agent to start."));
@@ -151,6 +188,7 @@ frappe_agents.ChatUI = class ChatUI {
 		if (!conversation) return;
 		this.conversation = conversation;
 		this.pending = {};
+		this.extractions = {};
 		this.$log.empty();
 		this.show_empty(__("Loading conversation…"));
 
@@ -371,6 +409,93 @@ frappe_agents.ChatUI = class ChatUI {
 			.appendTo($card);
 
 		this.insert_before_pending(data.run, $card);
+	}
+
+	/**
+	 * An extraction moved. It belongs in the log when this conversation asked for
+	 * it, or when it carries no attribution at all — realtime is delivered to one
+	 * user, so an unattributed update is this user's own document.
+	 */
+	on_extraction_update(data) {
+		if (!data) return;
+		const name = data.extraction || data.name;
+		if (!name) return;
+		if (data.conversation) {
+			if (data.conversation !== this.conversation) return;
+		} else if (data.run) {
+			if (!this.pending[data.run] && !this.extractions[name]) return;
+		} else if (!this.conversation && !this.extractions[name]) {
+			return;
+		}
+
+		this.render_extraction_update(name, data);
+		this.scroll_to_bottom();
+	}
+
+	/**
+	 * Everything on this card came out of the document or out of the model, so it
+	 * is written with .text(). The card says what is waiting for a person; the
+	 * values themselves are for the review form, next to the source file.
+	 */
+	render_extraction_update(name, data) {
+		this.clear_empty();
+
+		const status = data.status || "";
+		const $card = $("<div class='agent-chat-action is-extraction'></div>");
+		if (status === "Needs Review") $card.addClass("is-review");
+		if (status === "Failed") $card.addClass("is-failed");
+
+		$("<div class='agent-chat-action-title'></div>").text(extraction_title(status)).appendTo($card);
+
+		if (data.target_doctype) {
+			$("<div class='agent-chat-action-target'></div>")
+				.text(data.file_name ? `${__(data.target_doctype)} — ${data.file_name}` : __(data.target_doctype))
+				.appendTo($card);
+		} else if (data.file_name) {
+			$("<div class='agent-chat-action-target'></div>").text(data.file_name).appendTo($card);
+		}
+
+		const sensitive = Array.isArray(data.sensitive_fields)
+			? data.sensitive_fields.length
+			: cint(data.sensitive_count);
+		if (sensitive) {
+			$("<div class='agent-chat-action-line'></div>")
+				.text(__("{0} values are held back until you confirm them one by one.", [sensitive]))
+				.appendTo($card);
+		}
+
+		const mismatches = Array.isArray(data.mismatched_fields) ? data.mismatched_fields.length : cint(data.mismatches);
+		if (mismatches) {
+			$("<div class='agent-chat-action-line is-alarm'></div>")
+				.text(__("{0} of them disagree with the record on file. Check before you confirm anything.", [mismatches]))
+				.appendTo($card);
+		}
+
+		if (data.duplicate || cint(data.duplicate_count)) {
+			$("<div class='agent-chat-action-line'></div>")
+				.text(__("This looks like a document that was already extracted."))
+				.appendTo($card);
+		}
+
+		if (data.error) {
+			$("<div class='agent-chat-action-reason'></div>").text(data.error).appendTo($card);
+		}
+
+		$("<a class='agent-chat-action-link'></a>")
+			.attr("href", `/app/document-extraction/${encodeURIComponent(name)}`)
+			.text(status === "Needs Review" ? __("Review the extraction") : __("Open the extraction"))
+			// In the form panel the route changes behind the dialog, so step aside
+			// and let the router carry on.
+			.on("click", () => this.$body.closest(".modal").modal("hide"))
+			.appendTo($card);
+
+		const $previous = this.extractions[name];
+		if ($previous && $previous.parent().length) {
+			$previous.replaceWith($card);
+		} else {
+			this.insert_before_pending(data.run, $card);
+		}
+		this.extractions[name] = $card;
 	}
 
 	render_message(data) {
