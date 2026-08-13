@@ -1,0 +1,36 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-08-13 00:00:00.000000",
+ "description": "One model profile a conversation with this agent may switch to.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "model_profile"
+ ],
+ "fields": [
+  {
+   "fieldname": "model_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Model Profile",
+   "options": "LLM Model Profile",
+   "reqd": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Alternate Profile",
+ "owner": "Administrator",
+ "permissions": [],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
