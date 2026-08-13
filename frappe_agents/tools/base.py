@@ -21,6 +21,8 @@ OUTCOME_ERROR = "Error"
 
 RUN_FLAG = "agent_current_run"
 
+INTERRUPTED = "The tool call was interrupted before it finished."
+
 ARGS_JSON_LIMIT = 10_000
 RESULT_SUMMARY_LIMIT = 500
 DOCS_TOUCHED_LIMIT = 500
@@ -102,6 +104,17 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 	)
 
 	return {"ok": outcome == OUTCOME_SUCCESS, "result": result, "error": error}
+
+
+def log_interrupted_call(run: Any, tool_name: str, args: dict | None = None) -> None:
+	"""Audit a tool call that was killed before `execute_tool` could log it.
+
+	`execute_tool` always writes its own row, so this is only reached when the
+	call itself was torn down — the run was cancelled while the tool was in
+	flight. The row exists so that an auditor sees the attempt rather than a gap.
+	"""
+	run_name = run if isinstance(run, str) else run.name
+	_log_call(run_name, tool_name, args or {}, OUTCOME_ERROR, 0, error=INTERRUPTED)
 
 
 def current_run() -> Any:
