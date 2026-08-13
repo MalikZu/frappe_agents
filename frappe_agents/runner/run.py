@@ -33,6 +33,7 @@ from frappe_agents.harness.messages import (
 	UserMessage,
 )
 from frappe_agents.harness.tools import AgentTool, AgentToolResult
+from frappe_agents.model_profiles import check_profile
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
@@ -143,10 +144,15 @@ def _execute(run: Any) -> None:
 	# effective user, and the finally block above restores the worker's identity.
 	frappe.set_user(effective_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
-	_update(run, {"status": "Running", "started_at": now_datetime()})
+	try:
+		profile = resolve_run_profile(agent, run)
+	except (frappe.PermissionError, frappe.ValidationError) as exc:
+		return _fail(run, str(exc))
+
+	_update(run, {"status": "Running", "started_at": now_datetime(), "model_profile": profile})
 	publish_event(run, "status", status="Running")
 
-	provider = ModelProfileProvider(agent.model_profile)
+	provider = ModelProfileProvider(profile)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
 	max_turns = cint(agent.max_steps) or DEFAULT_MAX_STEPS
@@ -156,6 +162,7 @@ def _execute(run: Any) -> None:
 			_drive(
 				run=run,
 				agent=agent,
+				profile=profile,
 				provider=provider,
 				cancellation=cancellation,
 				events=events,
@@ -197,6 +204,7 @@ async def _drive(
 	*,
 	run: Any,
 	agent: Any,
+	profile: str,
 	provider: ModelProfileProvider,
 	cancellation: "RunCancellation",
 	events: "RunEvents",
@@ -233,9 +241,9 @@ async def _drive(
 
 	async for event in run_agent_loop(
 		provider=provider,
-		model=agent.model_profile,
+		model=profile,
 		system=build_system_prompt(agent, run),
-		messages=_build_messages(agent, run),
+		messages=_build_messages(profile, run),
 		tools=tools,
 		max_turns=max_turns,
 		signal=cancellation,
@@ -243,6 +251,25 @@ async def _drive(
 		after_tool_call=after_tool_call,
 	):
 		events.handle(event)
+
+
+def resolve_run_profile(agent: Any, run: Any) -> str:
+	"""The model profile this run will actually use.
+
+	A run with nothing on it runs the agent's default, exactly as it always has,
+	and so does a run whose profile IS the default — an owner's own choice is not
+	something the user it runs for has to be entitled to.
+
+	Anything else is an override, and it is checked here as well as at the door
+	that wrote it. This is the last read before the provider is built, it happens
+	after the effective user is bound, and the check is against that user's roles:
+	a run row is a queued instruction, and hours can pass between writing one and
+	executing it.
+	"""
+	override = run.get("model_profile")
+	if not override or override == agent.model_profile:
+		return agent.model_profile
+	return check_profile(agent, override)
 
 
 class RunCancellation:
@@ -497,7 +524,7 @@ def _focal_document(run: Any) -> str:
 	)
 
 
-def _build_messages(agent: Any, run: Any) -> list[AgentMessage]:
+def _build_messages(profile: str, run: Any) -> list[AgentMessage]:
 	"""The transcript the model reads: this conversation, oldest turn first.
 
 	The system prompt is not in here. It is passed to the loop separately and put
@@ -509,7 +536,7 @@ def _build_messages(agent: Any, run: Any) -> list[AgentMessage]:
 		if prior.get("input_message"):
 			messages.append(UserMessage(content=prior["input_message"]))
 		if prior.get("output_message"):
-			messages.append(AssistantMessage(model=agent.model_profile, content=prior["output_message"]))
+			messages.append(AssistantMessage(model=profile, content=prior["output_message"]))
 	messages.append(UserMessage(content=run.input_message or ""))
 	return messages
 

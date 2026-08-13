@@ -147,6 +147,12 @@ PROFILE = "FA Test Profile"
 # A generic OpenAI-compatible endpoint says nothing about what it can read, so
 # extraction fails closed unless the admin declares it. This one is declared.
 EXTRACT_PROFILE = "FA Test Extract Profile"
+# The model-choice cast. `AGENT` offers both as alternates: `ALT_PROFILE` is open
+# to anyone, `GATED_PROFILE` is gated on a role only `OPEN_USER` holds. Anything
+# else — `EXTRACT_PROFILE`, say — is a profile the agent was never told about,
+# which is the other half of the wall.
+ALT_PROFILE = "FA Test Alt Profile"
+GATED_PROFILE = "FA Test Gated Profile"
 AGENT = "FA Test Agent"
 DRAFT_AGENT = "FA Draft Agent"
 OWNED_AGENT = "FA Owned Agent"
@@ -298,6 +304,7 @@ def make_run(
 	depth: int = 0,
 	context_doctype: str | None = None,
 	context_name: str | None = None,
+	model_profile: str | None = None,
 ) -> Any:
 	"""Insert one Agent Run. The doctype has no create permission by design."""
 	run = frappe.get_doc(
@@ -313,6 +320,7 @@ def make_run(
 			"input_message": message,
 			"context_doctype": context_doctype,
 			"context_name": context_name,
+			"model_profile": model_profile,
 		}
 	)
 	run.flags.ignore_permissions = True
@@ -1513,9 +1521,45 @@ def _ensure_provider() -> None:
 			}
 		).insert(ignore_permissions=True)
 
+	if not frappe.db.exists("LLM Model Profile", ALT_PROFILE):
+		frappe.get_doc(
+			{
+				"doctype": "LLM Model Profile",
+				"profile_name": ALT_PROFILE,
+				"provider": PROVIDER,
+				"model_id": "fa-test-alt-model",
+				"enabled": 1,
+			}
+		).insert(ignore_permissions=True)
+
+	if not frappe.db.exists("LLM Model Profile", GATED_PROFILE):
+		frappe.get_doc(
+			{
+				"doctype": "LLM Model Profile",
+				"profile_name": GATED_PROFILE,
+				"provider": PROVIDER,
+				"model_id": "fa-test-gated-model",
+				"enabled": 1,
+				"allowed_roles": [{"role": PERMLEVEL_ROLE}],
+			}
+		).insert(ignore_permissions=True)
+
 
 def _ensure_agent() -> None:
 	_ensure_agent_record(AGENT, "Suggest", "Answer questions about tickets.")
+	_ensure_alternates(AGENT, [ALT_PROFILE, GATED_PROFILE])
+
+
+def _ensure_alternates(name: str, profiles: list[str]) -> None:
+	"""Offer these profiles as alternates on an agent. Get-or-set, like everything here."""
+	agent = frappe.get_doc("Agent", name)
+	if [row.model_profile for row in agent.get("alternate_profiles") or []] == profiles:
+		return
+
+	agent.set("alternate_profiles", [{"model_profile": profile} for profile in profiles])
+	agent.flags.ignore_permissions = True
+	agent.save(ignore_permissions=True)
+	frappe.clear_document_cache("Agent", name)
 
 
 def _ensure_draft_agents() -> None:
