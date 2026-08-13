@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import frappe
 
-from frappe_agents.api import get_conversation
+from frappe_agents.api import get_conversation, start_run
 from frappe_agents.runner.providers import ProviderError
 from frappe_agents.runner.run import (
 	EVENT,
@@ -27,12 +27,12 @@ from frappe_agents.runner.run import (
 	_event_log,
 )
 from frappe_agents.tests.fixtures import (
+	AGENT,
 	RESTRICTED_USER,
 	TICKET_DT,
 	AgentTestCase,
 	as_user,
 	event_types,
-	make_conversation,
 	make_run,
 	model_calls,
 	model_says,
@@ -147,12 +147,19 @@ class TestRunEvents(AgentTestCase):
 		self.assertEqual(event_types(run_events(name)), ["agent_start", "turn_start"])
 
 	def test_a_conversation_replays_the_run_it_stored(self):
-		"""The rehydrate path end to end: the log comes back through the API."""
-		conversation = make_conversation(RESTRICTED_USER)
-		name = self.run_once(conversation=conversation.name)
+		"""The rehydrate path end to end: the log comes back through the API.
+
+		Started and read as the user, because both ends of a replay belong to
+		them: the conversation is theirs to open and the run is theirs to see.
+		"""
+		with as_user(RESTRICTED_USER), patch("frappe.enqueue"):
+			started = start_run(agent=AGENT, message="How many tickets are open?")
+
+		name = started["run"]
+		run_with_model(name, [SEARCH, ANSWER])
 
 		with as_user(RESTRICTED_USER):
-			runs = get_conversation(conversation.name)["runs"]
+			runs = get_conversation(started["conversation"])["runs"]
 
 		replayed = next(run for run in runs if run["name"] == name)["event_log"]
 		self.assertEqual(event_types(replayed), event_types(run_events(name)))
