@@ -16,6 +16,8 @@ import asyncio
 import threading
 from unittest.mock import patch
 
+from frappe_agents.harness.events import AgentEndEvent
+from frappe_agents.harness.loop import run_agent_loop
 from frappe_agents.harness.messages import (
 	AssistantMessage,
 	TextContent,
@@ -277,3 +279,38 @@ class TestStreamAdapter(AgentTestCase):
 			call_model.side_effect = ProviderError("Model request to http://localhost:1 failed.")
 			with self.assertRaises(ProviderError):
 				self.stream(provider)
+
+	# --- against the real loop -----------------------------------------------
+
+	def test_the_loop_drives_the_adapter_through_a_tool_call_and_an_answer(self):
+		"""The contract that matters: the loop accepts what the adapter yields."""
+		provider = ModelProfileProvider(PROFILE)
+
+		async def drive():
+			return [
+				event
+				async for event in run_agent_loop(
+					provider=provider,
+					model=PROFILE,
+					system=SYSTEM,
+					messages=[UserMessage(content="How many?")],
+					tools=[SEARCH_TOOL],
+					max_turns=5,
+				)
+			]
+
+		with patch("frappe_agents.runner.stream_adapter.call_model") as call_model:
+			call_model.side_effect = [call_reply({"doctype": "FA Test Ticket"}), text_reply()]
+			events = asyncio.run(drive())
+
+		self.assertEqual(call_model.call_count, 2)
+		# The tool result went back to the model as the next turn of the transcript.
+		second = call_model.call_args_list[1].args[1]
+		self.assertEqual(second[-1]["role"], "tool")
+		self.assertEqual(second[-1]["tool_call_id"], "call_1")
+		self.assertEqual(second[-2]["tool_calls"][0]["name"], "search_documents")
+
+		self.assertIsInstance(events[-1], AgentEndEvent)
+		self.assertEqual(events[-1].messages[-1].text, "Three tickets are open.")
+		self.assertEqual(provider.tokens_in, 320)
+		self.assertEqual(provider.tokens_out, 100)
