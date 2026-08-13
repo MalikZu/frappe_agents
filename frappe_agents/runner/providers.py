@@ -542,10 +542,16 @@ def _extract_openai(
 	# of Anthropic's advice, and each is following its own vendor's documentation.
 	messages.append({"role": "user", "content": [{"type": "text", "text": instructions}, part]})
 
+	# OpenAI itself retired max_tokens on current models in favour of
+	# max_completion_tokens; OpenRouter and other compatible endpoints still
+	# speak max_tokens and may not know the newer key. Pick by host.
+	budget_key = (
+		"max_completion_tokens" if "api.openai.com" in (provider.base_url or "") else "max_tokens"
+	)
 	payload: dict[str, Any] = {
 		"model": profile.model_id,
 		"messages": messages,
-		"max_tokens": max_tokens,
+		budget_key: max_tokens,
 		"response_format": {
 			"type": "json_schema",
 			"json_schema": {"name": _schema_name(schema_name), "strict": True, "schema": schema},
