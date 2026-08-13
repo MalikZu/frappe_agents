@@ -245,8 +245,8 @@ def _run(doc: Any) -> None:
 	# From here on every check runs as the person who asked, not as the worker.
 	frappe.set_user(user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
-	_set(doc, {"status": STATUS_RUNNING, "error": None})
-	_publish(doc, status=STATUS_RUNNING)
+	record_fields(doc, {"status": STATUS_RUNNING, "error": None})
+	publish_extraction(doc, status=STATUS_RUNNING)
 
 	try:
 		file_doc = readable_file(doc.source_file)
@@ -287,7 +287,7 @@ def _run(doc: Any) -> None:
 		target_doctype, file_doc.content_hash, draft_values, spec, exclude=doc.name
 	)
 
-	_set(
+	record_fields(
 		doc,
 		{
 			"extracted_json": frappe.as_json(draft_values),
@@ -306,8 +306,8 @@ def _run(doc: Any) -> None:
 		# so the reviewer can see what the document said and why it would not save.
 		return _fail(doc, _("Could not create the draft: {0}").format(_text(exc)))
 
-	_set(doc, {"created_doc": created, "status": STATUS_NEEDS_REVIEW})
-	_publish(
+	record_fields(doc, {"created_doc": created, "status": STATUS_NEEDS_REVIEW})
+	publish_extraction(
 		doc,
 		status=STATUS_NEEDS_REVIEW,
 		created_doc=created,
@@ -345,7 +345,7 @@ def _ask(doc: Any, spec: dict, source: dict, file_doc: Any, instructions: str) -
 		tokens_out += cint(reply.get("tokens_out"))
 		# Tokens are recorded whether or not the answer was usable — a failed
 		# extraction still cost money and still belongs in the budget.
-		_set(doc, {"tokens_in": tokens_in, "tokens_out": tokens_out})
+		record_fields(doc, {"tokens_in": tokens_in, "tokens_out": tokens_out})
 
 		if reply.get("data") is not None:
 			break
@@ -390,7 +390,7 @@ def read_source(file_doc: Any, settings: Any, doc: Any | None = None) -> dict:
 		max_pages = cint(settings.get("max_extraction_pages")) or DEFAULT_MAX_PAGES
 		if pages > max_pages:
 			if doc is not None:
-				_set(doc, {"pages_capped": 1})
+				record_fields(doc, {"pages_capped": 1})
 			frappe.throw(
 				_("This PDF has {0} pages and extraction is limited to {1}.").format(pages, max_pages)
 			)
@@ -464,11 +464,11 @@ def _create_draft(target_doctype: str, values: dict) -> str:
 
 
 def _fail(doc: Any, message: str) -> None:
-	_set(doc, {"status": STATUS_FAILED, "error": (message or "")[:ERROR_CHARS]})
-	_publish(doc, status=STATUS_FAILED, error=(message or "")[:ERROR_CHARS])
+	record_fields(doc, {"status": STATUS_FAILED, "error": (message or "")[:ERROR_CHARS]})
+	publish_extraction(doc, status=STATUS_FAILED, error=(message or "")[:ERROR_CHARS])
 
 
-def _set(doc: Any, values: dict) -> None:
+def record_fields(doc: Any, values: dict) -> None:
 	"""Write straight to the row, skipping any field this site does not have yet."""
 	meta = frappe.get_meta(EXTRACTION)
 	writable = {key: value for key, value in values.items() if meta.has_field(key)}
@@ -482,7 +482,7 @@ def _set(doc: Any, values: dict) -> None:
 		doc.db_set(writable, update_modified=True)
 
 
-def _publish(doc: Any, **payload: Any) -> None:
+def publish_extraction(doc: Any, **payload: Any) -> None:
 	data = {
 		"type": "extraction_update",
 		"extraction": doc.name,
