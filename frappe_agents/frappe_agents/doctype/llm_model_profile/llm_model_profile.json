@@ -11,6 +11,8 @@
   "provider",
   "model_id",
   "context_limit",
+  "supports_pdf",
+  "supports_images",
   "cost_input_per_million",
   "cost_output_per_million",
   "enabled",
@@ -44,6 +46,20 @@
    "fieldname": "context_limit",
    "fieldtype": "Int",
    "label": "Context Limit"
+  },
+  {
+   "default": "0",
+   "description": "Tick only if this model takes PDF files. Nothing on the wire tells us, so extraction refuses a PDF until you say so.",
+   "fieldname": "supports_pdf",
+   "fieldtype": "Check",
+   "label": "Supports PDF"
+  },
+  {
+   "default": "0",
+   "description": "Tick only if this model takes images. Extraction refuses a scan or a photo until you say so.",
+   "fieldname": "supports_images",
+   "fieldtype": "Check",
+   "label": "Supports Images"
   },
   {
    "fieldname": "cost_input_per_million",
