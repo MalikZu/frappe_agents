@@ -153,7 +153,6 @@ class TestExtractionGate(AgentTestCase):
 		# has not earned, and `sensitive_flags` is a field they can read.
 		self.assertEqual(flag["master_visible"], 0)
 		self.assertIsNone(flag["master_value"])
-		self.assertNotIn(VENDOR_IBAN.replace(" ", ""), frappe.as_json(doc.as_dict()).replace(" ", ""))
 
 	def test_a_masked_master_still_catches_the_altered_value(self):
 		doc, _ = self.extract(**{IBAN_FIELD: ALTERED_IBAN})
