@@ -26,19 +26,12 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 	}
 
 	make() {
-		this.agent_field = this.page.add_field({
-			fieldtype: "Select",
-			fieldname: "agent",
-			label: __("Agent"),
-			options: [],
-			change: () => this.on_agent_change(),
-		});
-
 		this.page.set_secondary_action(__("New Chat"), () => this.new_chat());
 
 		this.chat = new frappe_agents.ChatUI({
 			parent: this.page.main,
 			on_conversation: (conversation, data) => this.on_conversation(conversation, data),
+			on_agent_change: () => this.on_agent_change(),
 		});
 	}
 
@@ -51,34 +44,24 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 	load_agents() {
 		return frappe.xcall("frappe_agents.api.list_agents").then((agents) => {
 			this.agents = agents || [];
-			this.agent_field.df.options = this.agents.map((agent) => ({
-				value: agent.name,
-				label: agent.agent_name || agent.name,
-			}));
-			if (this.agent_field.set_options) {
-				this.agent_field.set_options();
-			} else {
-				this.agent_field.refresh();
-			}
+			// The picker lives on the composer now, so the page hands the whole
+			// payload over and the chat draws its own chips from it.
+			this.chat.set_agents(this.agents);
 
 			if (!this.agents.length) {
 				this.chat.set_agent(null);
 				this.chat.show_empty(__("No agents are available to you."));
 				return;
 			}
-
-			const current = this.agents.find((agent) => agent.name === this.chat.agent);
-			const chosen = current ? current.name : this.agents[0].name;
-			this.agent_field.set_value(chosen);
-			this.chat.set_agent(chosen);
+			if (!this.agents.some((agent) => agent.name === this.chat.agent)) {
+				this.chat.set_agent(this.agents[0].name);
+			}
 		});
 	}
 
+	/** A different agent is a different conversation, so the route stops naming one. */
 	on_agent_change() {
-		const chosen = this.agent_field.get_value() || null;
-		// An empty value while the option list is being rebuilt is not a choice.
-		if (!chosen && this.agents.length) return;
-		this.chat.set_agent(chosen);
+		if (this.route_conversation()) frappe.set_route("agent-chat");
 	}
 
 	/** Reopen the conversation named in the route, so a reload or a deep link resumes it. */
@@ -106,13 +89,9 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 	}
 
 	on_conversation(conversation, data) {
-		if (data) {
-			// Rehydrated: the conversation names its agent, so follow it.
-			if (data.agent && this.agents.some((agent) => agent.name === data.agent)) {
-				this.agent_field.set_value(data.agent);
-			}
-			return;
-		}
+		// Rehydrated: the chat follows the conversation's own agent, and the chips
+		// are drawn from it. Nothing for the page to do.
+		if (data) return;
 		// Freshly created by the first message: make it linkable.
 		if (conversation && conversation !== this.route_conversation()) {
 			frappe.set_route("agent-chat", conversation);
