@@ -167,7 +167,9 @@ def _stored_switch() -> bool:
 	only clears on commit or rollback — and a background job holds one transaction
 	for its whole life, so the memo would pin the switch for the entire run.
 	"""
-	value = frappe.db.get_value(SETTINGS, None, KILL_SWITCH_FIELD)  # nosemgrep: frappe-semgrep-rules.rules.frappe-single-value-type-safety
+	value = frappe.db.get_value(  # nosemgrep: frappe-semgrep-rules.rules.frappe-single-value-type-safety
+		SETTINGS, None, KILL_SWITCH_FIELD
+	)
 	if value is None:
 		# Never saved on this site, so the field's own default stands.
 		field = frappe.get_meta(SETTINGS).get_field(KILL_SWITCH_FIELD)
