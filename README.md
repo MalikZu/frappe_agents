@@ -26,6 +26,17 @@ bench get-app https://github.com/MalikZu/frappe_agents
 bench --site yoursite install-app frappe_agents
 ```
 
+To install a pinned release instead of the tip of `main`, pass its tag:
+
+```bash
+bench get-app --branch v0.1.0 https://github.com/MalikZu/frappe_agents
+bench --site yoursite install-app frappe_agents
+```
+
+On a real site, pin. `main` moves whenever something lands, so the next
+`bench update` can change the app underneath you; a tag is a fixed point you
+can re-install and roll back to.
+
 Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
 Agent Auditor) and registers the built-in read tools. Then, in the Desk:
 create an LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
