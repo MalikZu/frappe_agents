@@ -32,7 +32,7 @@ const STYLES = `
 	.agent-chat-chip {
 		display: inline-flex; align-items: center; gap: 5px; max-width: 260px;
 		border: 1px solid var(--border-color); background: var(--control-bg); border-radius: 999px;
-		padding: 2px 10px; font-size: var(--text-sm); color: var(--text-color); cursor: pointer;
+		padding: 2px 10px; font: inherit; font-size: var(--text-sm); color: var(--text-color); cursor: pointer;
 	}
 	.agent-chat-chip:hover { background: var(--highlight-color); }
 	.agent-chat-chip.is-static, .agent-chat-chip.is-static:hover { cursor: default; background: var(--control-bg); }
@@ -413,7 +413,7 @@ frappe_agents.ChatUI = class ChatUI {
 			if (agent.name === this.agent) {
 				$("<span class='agent-chat-pop-tick'>✓</span>").appendTo($opt);
 			} else {
-				$opt.addClass("is-clickable").on("click", () => {
+				this.clickable($opt, () => {
 					this.close_pop();
 					this.choose_agent(agent.name);
 				});
@@ -486,7 +486,7 @@ frappe_agents.ChatUI = class ChatUI {
 			if (choice.name === current) {
 				$("<span class='agent-chat-pop-tick'>✓</span>").appendTo($opt);
 			} else {
-				$opt.addClass("is-clickable").on("click", () => {
+				this.clickable($opt, () => {
 					this.close_pop();
 					this.choose_model(choice.name);
 				});
@@ -548,15 +548,17 @@ frappe_agents.ChatUI = class ChatUI {
 		);
 	}
 
+	/**
+	 * A chip. One that opens a menu is a button, so it is reachable from the
+	 * keyboard like any other control; one that only states a fact is not.
+	 */
 	make_chip(key, value, has_menu) {
-		const $chip = $("<span class='agent-chat-chip'></span>");
+		const $chip = has_menu
+			? $("<button type='button' class='agent-chat-chip'></button>")
+			: $("<span class='agent-chat-chip is-static'></span>");
 		if (key) $("<span class='agent-chat-chip-key'></span>").text(key).appendTo($chip);
 		$("<span class='agent-chat-chip-value'></span>").text(value).appendTo($chip);
-		if (has_menu) {
-			$("<span class='agent-chat-chip-caret'>▾</span>").appendTo($chip);
-		} else {
-			$chip.addClass("is-static");
-		}
+		if (has_menu) $("<span class='agent-chat-chip-caret'>▾</span>").appendTo($chip);
 		return $chip;
 	}
 
@@ -594,6 +596,19 @@ frappe_agents.ChatUI = class ChatUI {
 			$("<span class='agent-chat-pop-sub'></span>").text(sub).attr("title", sub).appendTo($text);
 		}
 		return $opt.appendTo(this.$pop);
+	}
+
+	/** A popover row you can pick, with the keyboard as well as the mouse. */
+	clickable($opt, choose) {
+		return $opt
+			.addClass("is-clickable")
+			.attr({ role: "button", tabindex: 0 })
+			.on("click", choose)
+			.on("keydown", (e) => {
+				if (e.key !== "Enter" && e.key !== " ") return;
+				e.preventDefault();
+				choose();
+			});
 	}
 
 	pop_note(text) {

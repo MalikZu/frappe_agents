@@ -34,8 +34,12 @@ const RAIL_STYLES = `
 	.agent-chat-convo-when { flex: none; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
 	.agent-chat-convo-snippet { display: flex; align-items: baseline; gap: 6px; font-size: var(--text-sm); color: var(--text-muted); }
 	.agent-chat-convo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.agent-chat-rename { flex: none; opacity: 0; font-size: var(--text-xs); }
-	.agent-chat-convo.is-active:hover .agent-chat-rename { opacity: 1; }
+	.agent-chat-rename {
+		flex: none; opacity: 0; font: inherit; font-size: var(--text-xs); color: var(--text-muted);
+		border: none; background: none; padding: 0; cursor: pointer;
+	}
+	.agent-chat-convo.is-active:hover .agent-chat-rename,
+	.agent-chat-rename:focus { opacity: 1; }
 	.agent-chat-pane { min-width: 0; padding-left: 14px; }
 	@media (max-width: 720px) {
 		.agent-chat-layout, .agent-chat-layout.is-collapsed { grid-template-columns: minmax(0, 1fr); }
@@ -203,8 +207,13 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 
 	render_row(row, when) {
 		const $row = $("<div class='agent-chat-convo'></div>")
-			.attr("data-conversation", row.name)
-			.on("click", () => this.open_conversation(row.name));
+			.attr({ "data-conversation": row.name, role: "button", tabindex: 0 })
+			.on("click", () => this.open_conversation(row.name))
+			.on("keydown", (e) => {
+				if (e.key !== "Enter" && e.key !== " ") return;
+				e.preventDefault();
+				this.open_conversation(row.name);
+			});
 
 		const $line = $("<div class='agent-chat-convo-row'></div>").appendTo($row);
 		$("<span class='agent-chat-convo-agent'></span>")
@@ -219,7 +228,7 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		$("<span class='agent-chat-convo-text'></span>")
 			.text(row.snippet || __("No messages yet"))
 			.appendTo($snippet);
-		$("<span class='agent-chat-rename'></span>")
+		$("<button type='button' class='agent-chat-rename'></button>")
 			.text(`✎ ${__("rename")}`)
 			.attr("title", __("Rename this conversation"))
 			.on("click", (e) => {
