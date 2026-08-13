@@ -12,6 +12,7 @@
   "run_as",
   "service_user",
   "model_profile",
+  "alternate_profiles",
   "autonomy",
   "instructions",
   "allowed_roles",
@@ -61,6 +62,13 @@
    "label": "Model Profile",
    "options": "LLM Model Profile",
    "reqd": 1
+  },
+  {
+   "description": "Other profiles a conversation with this agent may be switched to. Each one is still filtered by its own Allowed Roles, so listing a profile here offers it, it does not grant it.",
+   "fieldname": "alternate_profiles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Alternate Model Profiles",
+   "options": "Agent Alternate Profile"
   },
   {
    "default": "Suggest",
@@ -127,7 +135,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 12:40:00.000000",
+ "modified": "2026-08-13 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent",
