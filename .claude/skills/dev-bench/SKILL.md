@@ -52,8 +52,11 @@ Workers: `bench worker` is a bash wrapper whose python child's cmdline is
 `pkill -f "[b]ench worker"; pkill -f "[b]ench_helper frappe worker"` and verify
 zero remain before restarting, or a zombie from before a pip install keeps
 winning the queue race and every job dies on ModuleNotFoundError while new
-workers sit idle. After any `bench get-app`, restart workers — a running
-interpreter never sees a new editable install. Canary with
+workers sit idle. After any `bench get-app`, restart EVERY long-lived python process — workers
+AND the web server (`pkill -f "[s]erve --port 8000"` + relaunch) — a running
+interpreter never sees a new editable install. The web server fails LATE:
+redis-cached hooks mask the missing import until a migrate or clear-cache
+rebuilds them, then every request 500s on ModuleNotFoundError. Canary with
 `frappe.enqueue("frappe.ping")` before burning real model calls.
 Tear down with `docker rm -f fa-db fa-bench` when done; nothing in it is precious.
 
