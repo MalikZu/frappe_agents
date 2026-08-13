@@ -13,6 +13,7 @@
   "effective_user",
   "run_as_mode",
   "surface",
+  "model_profile",
   "context_doctype",
   "context_name",
   "status",
@@ -65,6 +66,14 @@
    "fieldtype": "Select",
    "label": "Surface",
    "options": "Desk Chat"
+  },
+  {
+   "description": "The model profile this run actually used. Empty on a run that never started.",
+   "fieldname": "model_profile",
+   "fieldtype": "Link",
+   "label": "Model Profile",
+   "options": "LLM Model Profile",
+   "read_only": 1
   },
   {
    "description": "The document this run is about, if it started from a form.",

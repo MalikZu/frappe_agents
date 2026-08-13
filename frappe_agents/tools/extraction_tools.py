@@ -60,10 +60,12 @@ def _require_provenance(file_doc: Any) -> None:
 
 
 def _run_profile() -> str | None:
-	"""Extract with the agent's own model profile when there is a run to ask."""
+	"""Extract with the model this run is on, which is the agent's unless it was overridden."""
 	run = current_run()
 	if run is None or not run.get("agent"):
 		return None
+	if run.get("model_profile"):
+		return run.model_profile
 	agent = frappe.get_cached_doc("Agent", run.agent)
 	return agent.model_profile or None
 
