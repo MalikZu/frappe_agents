@@ -1,28 +1,47 @@
 """The run loop.
 
 `execute_run` is the RQ job. It binds the effective user, refuses to run as
-Administrator or Guest, calls the model, executes whatever tools the model asks
-for, and writes the outcome back onto the Agent Run.
+Administrator or Guest, drives the agent loop, executes whatever tools the model
+asks for, and writes the outcome back onto the Agent Run.
+
+The loop itself is the vendored harness in `frappe_agents.harness`. This module
+owns everything the harness must not decide: who the run acts as, whether it may
+run at all, which tools exist, what a tool call is allowed to do, and what gets
+written down. The harness only decides when to call the model again.
 
 One attempt per run: failures are recorded on the run, never re-raised into a
 retry, because a retry would repeat the side effects of every tool already called.
 """
 
+import asyncio
 from typing import Any
 
 import frappe
 from frappe.utils import cint, now_datetime
 
-from frappe_agents.runner.providers import call_model
+from frappe_agents.harness.events import MessageEndEvent, MessageUpdateEvent, TurnStartEvent
+from frappe_agents.harness.loop import run_agent_loop
+from frappe_agents.harness.messages import (
+	AgentMessage,
+	AssistantMessage,
+	TextContent,
+	UserMessage,
+)
+from frappe_agents.harness.tools import AgentTool, AgentToolResult
+from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
 	CAPABILITY_DRAFT,
 	KillSwitchActive,
 	execute_tool,
+	log_interrupted_call,
 )
 from frappe_agents.tools.registry import get_tool_schemas
 
 EVENT = "frappe_agents:run_update"
+# The loop's own events, forwarded as they happen. The three legacy event types
+# still go out beside them, unchanged, because the chat surface reads those.
+HARNESS_EVENT = "harness_event"
 
 FORBIDDEN_USERS = ("Administrator", "Guest")
 DEFAULT_MAX_STEPS = 10
@@ -30,6 +49,18 @@ DEFAULT_MAX_DEPTH = 3
 HISTORY_LIMIT = 20
 ERROR_LIMIT = 500
 TOOL_RESULT_LIMIT = 20_000
+
+KILL_SWITCH_MESSAGE = "The agent runtime is switched off."
+# A turn that ended in one of these produced no answer — the loop wrote the
+# message itself to say why it stopped.
+FAILED_STOPS = ("error", "aborted")
+
+# What is kept of a run's events. Everything at the start, because that is where
+# the run's shape is decided, and as much of the end as fits, because that is
+# what a person reading a finished run is looking at.
+EVENT_LOG_HEAD = 20
+EVENT_LOG_TAIL = 480
+EVENT_LOG_BYTES = 500_000
 
 TOOL_DISCIPLINE = (
 	"You are an assistant working inside a Frappe site.\n"
@@ -93,7 +124,7 @@ def _execute(run: Any) -> None:
 
 	settings = frappe.get_cached_doc("Agent Settings")
 	if not cint(settings.global_enabled):
-		return _fail(run, "The agent runtime is switched off.", status="Cancelled")
+		return _fail(run, KILL_SWITCH_MESSAGE, status="Cancelled")
 	if not cint(agent.enabled):
 		return _fail(run, f"Agent {agent.name} is disabled.")
 
@@ -108,73 +139,267 @@ def _execute(run: Any) -> None:
 	_update(run, {"status": "Running", "started_at": now_datetime()})
 	publish_event(run, "status", status="Running")
 
-	messages = _build_messages(agent, run)
-	tool_schemas = get_tool_schemas(agent)
-	max_steps = cint(agent.max_steps) or DEFAULT_MAX_STEPS
-
-	tokens_in = 0
-	tokens_out = 0
-	steps = 0
-	final_text = None
+	provider = ModelProfileProvider(agent.model_profile)
+	cancellation = RunCancellation()
+	events = RunEvents(run, cancellation)
+	max_turns = cint(agent.max_steps) or DEFAULT_MAX_STEPS
 
 	try:
-		while steps < max_steps:
-			steps += 1
-			reply = call_model(agent.model_profile, messages, tool_schemas)
-			tokens_in += cint(reply.get("tokens_in"))
-			tokens_out += cint(reply.get("tokens_out"))
-
-			calls = reply.get("tool_calls") or []
-			if not calls:
-				final_text = reply.get("text") or ""
-				break
-
-			messages.append(
-				{
-					"role": "assistant",
-					"content": reply.get("text") or "",
-					"tool_calls": calls,
-				}
+		asyncio.run(
+			_drive(
+				run=run,
+				agent=agent,
+				provider=provider,
+				cancellation=cancellation,
+				events=events,
+				max_turns=max_turns,
 			)
-			for call in calls:
-				result = execute_tool(run, call.get("name"), call.get("args"))
-				publish_event(
-					run,
-					"tool_call",
-					tool=call.get("name"),
-					args=call.get("args") or {},
-					ok=result.get("ok"),
-					error=result.get("error"),
-				)
-				messages.append(
-					{
-						"role": "tool",
-						"tool_call_id": call.get("id"),
-						"name": call.get("name"),
-						"content": _tool_content(result),
-					}
-				)
-	except KillSwitchActive as exc:
-		_update(run, {"tokens_in": tokens_in, "tokens_out": tokens_out, "steps_taken": steps})
-		return _fail(run, str(exc), status="Cancelled")
+		)
+	finally:
+		# What the run cost and what it did, on every path out — including the
+		# one where the provider raised and the job is about to record a failure.
+		_update(
+			run,
+			{
+				"tokens_in": provider.tokens_in,
+				"tokens_out": provider.tokens_out,
+				"steps_taken": events.steps,
+			},
+		)
+		_save_event_log(run, events)
 
-	if final_text is None:
-		_update(run, {"tokens_in": tokens_in, "tokens_out": tokens_out, "steps_taken": steps})
-		return _fail(run, f"Stopped after {steps} steps without a final answer.")
+	if cancellation.is_cancelled():
+		return _fail(run, cancellation.reason or "The run was cancelled.", status="Cancelled")
+
+	if events.final_text is None:
+		return _fail(run, events.failure(max_turns))
 
 	_update(
 		run,
 		{
 			"status": "Completed",
-			"output_message": final_text,
+			"output_message": events.final_text,
 			"ended_at": now_datetime(),
-			"tokens_in": tokens_in,
-			"tokens_out": tokens_out,
-			"steps_taken": steps,
 		},
 	)
-	publish_event(run, "message", status="Completed", message=final_text)
+	publish_event(run, "message", status="Completed", message=events.final_text)
 	_touch_conversation(run)
+
+
+async def _drive(
+	*,
+	run: Any,
+	agent: Any,
+	provider: ModelProfileProvider,
+	cancellation: "RunCancellation",
+	events: "RunEvents",
+	max_turns: int,
+) -> None:
+	"""Run the agent loop to its end, handing every event to `events`."""
+	# What a tool call turned out to be, keyed by call id. The event models forbid
+	# extra fields, so an outcome cannot travel on the event itself.
+	outcomes: dict[str, bool] = {}
+	tools = _tools(run, cancellation, agent, outcomes)
+	names = {tool.name for tool in tools}
+
+	async def before_tool_call(call: Any) -> tuple[bool, str | None]:
+		"""Refuse — and audit — a tool the agent was never given.
+
+		The loop answers "tool not found" by itself and never reaches an
+		executor, which would leave no Agent Tool Call row behind. `execute_tool`
+		refuses an unknown tool too, and writes the row, so the refusal goes
+		through it like every other one.
+		"""
+		if call.name in names:
+			return False, None
+		return True, _call_tool(run, cancellation, call.name, dict(call.arguments))[1]
+
+	async def after_tool_call(call: Any, result: Any, is_error: bool) -> tuple[Any, bool]:
+		"""Say whether the tool actually succeeded.
+
+		The loop only calls a result an error when the executor raised, and this
+		app's executor never raises: a denial is data the model has to read. So
+		the outcome comes back off the sidecar and onto the event.
+		"""
+		ok = outcomes.pop(call.id, None)
+		return result, is_error if ok is None else not ok
+
+	async for event in run_agent_loop(
+		provider=provider,
+		model=agent.model_profile,
+		system=build_system_prompt(agent, run),
+		messages=_build_messages(agent, run),
+		tools=tools,
+		max_turns=max_turns,
+		signal=cancellation,
+		before_tool_call=before_tool_call,
+		after_tool_call=after_tool_call,
+	):
+		events.handle(event)
+
+
+class RunCancellation:
+	"""The kill switch, in the shape the loop asks about it.
+
+	Nothing here reads the database. `RunEvents` re-reads Agent Settings at every
+	turn boundary and cancels this token, and a tool that hits the switch inside
+	`execute_tool` cancels it too. The loop then stops before the next model call
+	and before the next tool call, which is the whole job of the switch.
+	"""
+
+	def __init__(self) -> None:
+		self._cancelled = False
+		self.reason: str | None = None
+
+	def cancel(self, reason: str) -> None:
+		"""Stop the run. The first reason given is the one the run records."""
+		if not self._cancelled:
+			self._cancelled = True
+			self.reason = reason
+
+	def is_cancelled(self) -> bool:
+		return self._cancelled
+
+
+class RunEvents:
+	"""Everything the loop said, on its way to the browser and onto the run row.
+
+	It also reads the run's outcome out of the stream: how many times the model
+	was called, the answer it ended on, and the loop's own reason for stopping
+	without one.
+	"""
+
+	def __init__(self, run: Any, cancellation: RunCancellation) -> None:
+		self.run = run
+		self.cancellation = cancellation
+		self.seq = 0
+		self.entries: list[dict] = []
+		self.steps = 0
+		self.final_text: str | None = None
+		self.error: str | None = None
+
+	def handle(self, event: Any) -> None:
+		if isinstance(event, MessageUpdateEvent):
+			# Nothing streams yet, so a partial message is neither published nor kept.
+			return
+
+		if isinstance(event, TurnStartEvent):
+			# The kill switch is read here and nowhere else in the loop. A turn
+			# always starts immediately before the loop asks whether it was
+			# cancelled, so this is what stops the next model call. Reading it on
+			# every event instead would also pre-empt tool calls, and a tool that
+			# never reaches `execute_tool` is a tool that never gets audited.
+			_check_kill_switch(self.cancellation)
+
+		self.seq += 1
+		payload = event.model_dump(mode="json", by_alias=True)
+		self.entries.append(payload)
+		publish_event(self.run, HARNESS_EVENT, seq=self.seq, event=payload)
+
+		if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
+			self._read(event.message)
+
+	def log(self) -> str:
+		"""The kept events, as the JSON the run row stores."""
+		return _event_log(self.entries)
+
+	def failure(self, max_turns: int) -> str:
+		"""Why a run ended without an answer.
+
+		A run that used up its turns is reported the way it always was. Anything
+		else that stopped the loop reports the loop's own words.
+		"""
+		if self.error and self.steps < max_turns:
+			return self.error
+		return f"Stopped after {self.steps} steps without a final answer."
+
+	def _read(self, message: AssistantMessage) -> None:
+		if message.stop_reason in FAILED_STOPS:
+			self.error = message.error_message
+			return
+		# One answer from the model is one step, exactly as before.
+		self.steps += 1
+		self.final_text = None if message.tool_calls else message.text
+
+
+def _check_kill_switch(cancellation: RunCancellation) -> None:
+	settings = frappe.get_cached_doc("Agent Settings")
+	if not cint(settings.global_enabled):
+		cancellation.cancel(KILL_SWITCH_MESSAGE)
+
+
+def _tools(run: Any, cancellation: RunCancellation, agent: Any, outcomes: dict[str, bool]) -> list[AgentTool]:
+	"""The agent's tools, in the shape the loop holds them.
+
+	The schemas are the same ones the model has always been sent. Only the
+	executor is new, and it does nothing but call `execute_tool`.
+	"""
+	tools = []
+	for schema in get_tool_schemas(agent):
+		name = schema["name"]
+		tools.append(
+			AgentTool(
+				name=name,
+				label=name,
+				description=schema.get("description") or "",
+				parameters=schema.get("args_schema") or {},
+				execute_fn=_executor(run, cancellation, name, outcomes),
+			)
+		)
+	return tools
+
+
+def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict[str, bool]) -> Any:
+	"""One tool's executor: `execute_tool` and nothing else.
+
+	`execute_tool` stays the only thing that runs a tool, so the capability gate,
+	the kill switch and the audit row are exactly where they were. It is called
+	directly rather than on a worker thread: tool calls are sequential, they run
+	as the effective user, and the identity they run under is bound to this one.
+	"""
+
+	async def execute(tool_call_id: str, arguments: Any, signal: Any = None, on_update: Any = None):
+		args = dict(arguments or {})
+		logged = False
+		try:
+			result, content = _call_tool(run, cancellation, name, args)
+			logged = True
+			outcomes[tool_call_id] = bool(result.get("ok"))
+			return AgentToolResult(content=[TextContent(text=content)])
+		finally:
+			# A cancelled call is torn down here and the loop re-raises before it
+			# would tell us anything, so the row it never got to write is written
+			# now. Every other path already wrote one inside `execute_tool`.
+			if not logged:
+				log_interrupted_call(run, name, args)
+
+	return execute
+
+
+def _call_tool(run: Any, cancellation: RunCancellation, name: str, args: dict) -> tuple[dict, str]:
+	"""Execute one tool and say what the model should be told.
+
+	The kill switch is the one refusal that ends the run rather than going back
+	to the model: it cancels the run, and the loop stops at the next boundary.
+	"""
+	try:
+		result = execute_tool(run, name, args)
+	except KillSwitchActive as exc:
+		# `execute_tool` already audited the refusal. No tool_call event goes out:
+		# the run is ending, and its error says why.
+		cancellation.cancel(str(exc))
+		refused = {"ok": False, "result": None, "error": str(exc)}
+		return refused, _tool_content(refused)
+
+	publish_event(
+		run,
+		"tool_call",
+		tool=name,
+		args=args,
+		ok=result.get("ok"),
+		error=result.get("error"),
+	)
+	return result, _tool_content(result)
 
 
 def build_system_prompt(agent: Any, run: Any) -> str:
@@ -252,14 +477,20 @@ def _focal_document(run: Any) -> str:
 	)
 
 
-def _build_messages(agent: Any, run: Any) -> list[dict]:
-	messages: list[dict] = [{"role": "system", "content": build_system_prompt(agent, run)}]
+def _build_messages(agent: Any, run: Any) -> list[AgentMessage]:
+	"""The transcript the model reads: this conversation, oldest turn first.
+
+	The system prompt is not in here. It is passed to the loop separately and put
+	back at the head of the list on its way to the provider, so what goes over
+	the wire is what has always gone over the wire.
+	"""
+	messages: list[AgentMessage] = []
 	for prior in _history(run):
 		if prior.get("input_message"):
-			messages.append({"role": "user", "content": prior["input_message"]})
+			messages.append(UserMessage(content=prior["input_message"]))
 		if prior.get("output_message"):
-			messages.append({"role": "assistant", "content": prior["output_message"]})
-	messages.append({"role": "user", "content": run.input_message or ""})
+			messages.append(AssistantMessage(model=agent.model_profile, content=prior["output_message"]))
+	messages.append(UserMessage(content=run.input_message or ""))
 	return messages
 
 
@@ -288,6 +519,46 @@ def _tool_content(result: dict) -> str:
 	if len(content) > TOOL_RESULT_LIMIT:
 		content = content[:TOOL_RESULT_LIMIT] + "\n... (result truncated)"
 	return content
+
+
+def _event_log(entries: list[dict]) -> str:
+	"""The run's events as stored JSON, capped in count and in size.
+
+	A run that called a tool a hundred times would otherwise put megabytes on one
+	row. What is dropped is the middle, and the log says so.
+	"""
+	kept = list(entries)
+	truncated = False
+
+	if len(kept) > EVENT_LOG_HEAD + EVENT_LOG_TAIL:
+		kept = kept[:EVENT_LOG_HEAD] + kept[-EVENT_LOG_TAIL:]
+		truncated = True
+
+	sizes = [len(frappe.as_json(entry)) for entry in kept]
+	total = sum(sizes)
+	while total > EVENT_LOG_BYTES and len(kept) > EVENT_LOG_HEAD:
+		total -= sizes.pop(EVENT_LOG_HEAD)
+		kept.pop(EVENT_LOG_HEAD)
+		truncated = True
+
+	log = frappe.as_json({"events": kept, "truncated": truncated})
+	while len(log) > EVENT_LOG_BYTES and kept:
+		# Only a single enormous event gets this far. Drop from the front too
+		# rather than store something over the cap.
+		kept.pop(0)
+		truncated = True
+		log = frappe.as_json({"events": kept, "truncated": truncated})
+	return log
+
+
+def _save_event_log(run: Any, events: "RunEvents") -> None:
+	"""Store the run's events. A log that will not write must not fail the run."""
+	try:
+		_update(run, {"event_log": events.log()})
+	except Exception:
+		frappe.logger("frappe_agents").error(
+			f"could not store the event log for run {run.name}", exc_info=True
+		)
 
 
 def _touch_conversation(run: Any) -> None:
