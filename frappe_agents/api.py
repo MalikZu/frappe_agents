@@ -269,6 +269,22 @@ def _run_events(log: Any) -> list[dict]:
 
 
 @frappe.whitelist(methods=["POST"])
+def rename_conversation(conversation: str, title: str) -> dict:
+	"""Give a conversation a name of your own. Yours only."""
+	doc = _own_conversation(conversation)
+
+	title = (title or "").strip()
+	if not title:
+		frappe.throw(_("A conversation title cannot be empty."))
+	if len(title) > TITLE_CHARS:
+		frappe.throw(_("That title is {0} characters, and the limit is {1}.").format(len(title), TITLE_CHARS))
+
+	doc.title = title
+	doc.save()
+	return {"conversation": doc.name, "title": doc.title}
+
+
+@frappe.whitelist(methods=["POST"])
 def set_conversation_model(conversation: str, model_profile: str | None = None) -> dict:
 	"""Pin this conversation to one of its agent's model profiles, or unpin it.
 
