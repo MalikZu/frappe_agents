@@ -161,8 +161,13 @@ def publish_kill_switch(enabled: Any) -> None:
 
 
 def _stored_switch() -> bool:
-	"""The switch as the database holds it, past the document cache and its memo."""
-	value = frappe.db.get_value(SETTINGS, None, KILL_SWITCH_FIELD)
+	"""The switch as the database holds it, past the document cache and its memo.
+
+	get_single_value is not usable here: it memoizes into db.value_cache, which
+	only clears on commit or rollback — and a background job holds one transaction
+	for its whole life, so the memo would pin the switch for the entire run.
+	"""
+	value = frappe.db.get_value(SETTINGS, None, KILL_SWITCH_FIELD)  # nosemgrep: frappe-semgrep-rules.rules.frappe-single-value-type-safety
 	if value is None:
 		# Never saved on this site, so the field's own default stands.
 		field = frappe.get_meta(SETTINGS).get_field(KILL_SWITCH_FIELD)
