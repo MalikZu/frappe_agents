@@ -32,10 +32,13 @@ docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench get-app fra
 ```bash
 # once per container — the mount is host-owned, git refuses it otherwise
 # (the failure is the misleading "correct access rights" message, and the
-# old clone keeps running silently: CHECK THE TEST COUNT went up)
-docker exec fa-bench bash -lc 'git config --global --add safe.directory /mnt/frappe_agents'
+# old clone keeps running silently: CHECK THE TEST COUNT went up).
+# Wildcard, not the single path: fetch-by-path also hits /mnt/.../.git directly.
+docker exec fa-bench bash -lc "git config --global --replace-all safe.directory '*'"
 
-docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench/apps/frappe_agents && git pull /mnt/frappe_agents main'
+# fetch+reset, not pull — a pull after any in-container commit (or against a
+# rebased main) leaves merge commits that diverge the clone forever
+docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench/apps/frappe_agents && git fetch /mnt/frappe_agents main && git reset --hard FETCH_HEAD'
 docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site migrate && bench --site test_site run-tests --app frappe_agents'
 ```
 
