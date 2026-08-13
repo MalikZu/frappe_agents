@@ -1,7 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Frappe Agents">
-	<rect width="64" height="64" rx="14" fill="#334155"/>
-	<path d="M32 21 18 45M32 21l14 24M18 45h28" stroke="#64748b" stroke-width="3" stroke-linecap="round"/>
-	<circle cx="32" cy="21" r="7" fill="#e2e8f0"/>
-	<circle cx="18" cy="45" r="5" fill="#94a3b8"/>
-	<circle cx="46" cy="45" r="5" fill="#94a3b8"/>
+	<!-- The countersign: a machine-drafted document, signed over by a human hand. -->
+	<rect width="64" height="64" rx="14" fill="#26303C"/>
+	<rect x="16" y="13" width="23" height="34" rx="3.5" fill="#303C4B" stroke="#5A6B80" stroke-width="1.5"/>
+	<rect x="20.5" y="19" width="14" height="2.2" rx="1.1" fill="#5A6B80"/>
+	<rect x="20.5" y="24" width="11" height="2.2" rx="1.1" fill="#5A6B80"/>
+	<rect x="20.5" y="29" width="13" height="2.2" rx="1.1" fill="#5A6B80"/>
+	<path d="M21 39.5 L30.5 49 L51 20.5" fill="none" stroke="#E58A3E" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
