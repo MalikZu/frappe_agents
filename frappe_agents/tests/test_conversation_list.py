@@ -22,8 +22,6 @@ from frappe_agents.tests.fixtures import (
 	RESTRICTED_USER,
 	AgentTestCase,
 	as_user,
-	make_conversation,
-	make_run,
 )
 
 
@@ -58,11 +56,11 @@ class TestConversationList(AgentTestCase):
 		self.assertTrue(row["last_activity"])
 
 	def test_a_conversation_without_a_title_falls_back_to_its_first_message(self):
-		conversation = make_conversation(RESTRICTED_USER, title="")
-		make_run(effective_user=RESTRICTED_USER, conversation=conversation.name, message="The first thing")
-		make_run(effective_user=RESTRICTED_USER, conversation=conversation.name, message="The second thing")
+		started = self.start(RESTRICTED_USER, "The first thing")
+		self.start(RESTRICTED_USER, "The second thing", conversation=started["conversation"])
+		frappe.db.set_value("Agent Conversation", started["conversation"], "title", "")
 
-		row = self.row(RESTRICTED_USER, conversation.name)
+		row = self.row(RESTRICTED_USER, started["conversation"])
 		self.assertEqual(row["snippet"], "The first thing")
 
 	def test_the_rail_carries_nothing_a_run_produced(self):
