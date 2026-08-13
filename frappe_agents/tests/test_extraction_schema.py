@@ -17,7 +17,7 @@ reaches the model at all. A field that was never asked for cannot come back.
 
 import frappe
 
-from frappe_agents.extraction.schema import build_extraction_schema, normalise_values
+from frappe_agents.extraction.schema import build_extraction_schema, normalise_values, read_field_notes
 from frappe_agents.tests.fixtures import (
 	DRAFT_USER,
 	IBAN_FIELD,
@@ -94,6 +94,22 @@ class TestExtractionSchema(AgentTestCase):
 		values = normalise_values(self.spec(), {"fields": {"payment_terms": "net 30"}})
 
 		self.assertEqual(values["payment_terms"], "Net 30")
+
+	def test_a_note_about_a_field_we_never_asked_for_is_dropped_and_the_rest_clamped(self):
+		"""Both numbers are the model's self-report, so neither is taken on trust."""
+		notes = read_field_notes(
+			self.spec(),
+			{
+				"field_notes": [
+					{"fieldname": "amount", "confidence": 4.2, "page": -3},
+					{"fieldname": "internal_rate", "confidence": 1, "page": 1},
+					"not even a note",
+				]
+			},
+		)
+
+		self.assertEqual(notes["amount"], {"confidence": 1.0, "page": 0})
+		self.assertNotIn("internal_rate", notes)
 
 	def test_a_child_table_is_asked_for_as_rows(self):
 		spec = self.spec()
