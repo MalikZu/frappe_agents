@@ -42,6 +42,12 @@ None of them is Administrator, deliberately: `frappe.get_roles("Administrator")`
 returns every role on the site and `has_permission` short-circuits to True for
 it, so a separation-of-duties test run as Administrator proves nothing.
 
+The model is a fixture too. `FakeProvider` is the one fake model the runner tests
+run against: it satisfies the same provider contract the real adapter does, so a
+run drives the real agent loop, the real executor and the real audit path — only
+the answers are scripted. Nothing here patches `call_model`; the seam is the
+provider, one layer further out.
+
 The extraction cast is one more doctype and one more user. `FA Test Vendor` is
 the master record an invoice claims to be from: it carries an IBAN-shaped field,
 and that field is **masked**, because the mismatch comparison has to survive a
@@ -59,6 +65,14 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import cint, now_datetime
 
 from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction, run_extraction
+from frappe_agents.harness.messages import (
+	AssistantMessage,
+	ToolCall,
+	Usage,
+	assistant_content,
+)
+from frappe_agents.harness.provider_events import AssistantDoneEvent, AssistantStartEvent
+from frappe_agents.runner.run import execute_run
 from frappe_agents.tools.base import execute_tool
 
 MODULE = "Frappe Agents"
@@ -298,6 +312,133 @@ def make_run(
 	run.flags.ignore_permissions = True
 	run.insert(ignore_permissions=True)
 	return run
+
+
+def model_says(text: str, tokens_in: int = 0, tokens_out: int = 0) -> dict:
+	"""A scripted answer with no tool calls: the model is done."""
+	return {"text": text, "tool_calls": [], "tokens_in": tokens_in, "tokens_out": tokens_out}
+
+
+def model_calls(*calls: dict, text: str | None = None, tokens_in: int = 0, tokens_out: int = 0) -> dict:
+	"""A scripted answer asking for one or more tools."""
+	return {
+		"text": text,
+		"tool_calls": list(calls),
+		"tokens_in": tokens_in,
+		"tokens_out": tokens_out,
+	}
+
+
+def tool_request(tool: str, args: dict | None = None, call_id: str = "call_1") -> dict:
+	"""One tool call inside a scripted answer."""
+	return {"id": call_id, "name": tool, "args": dict(args or {})}
+
+
+class FakeProvider:
+	"""A model that answers from a script, in the shape the agent loop asks.
+
+	The runner never sees `call_model`: it builds a provider and hands it to the
+	loop. So the tests replace the provider and nothing else — the loop, the
+	executor, the capability gate and the audit path are all the real ones.
+
+	A script entry is one of:
+
+	* a reply dict — `model_says` or `model_calls` build them;
+	* a callable returning one, which is how a test changes the site's state
+	  between two model calls (throwing the kill switch, say);
+	* an exception, which is raised instead of answering.
+
+	The last entry answers every call after it, so a script of one reply is a
+	model that always says the same thing — which is what a turn-cap test needs.
+	An empty script means the model must not be called at all, and says so
+	loudly rather than answering.
+	"""
+
+	def __init__(self, script: Any = ()) -> None:
+		self.script = [script] if isinstance(script, dict) else list(script)
+		self.calls: list[dict] = []
+		self.tokens_in = 0
+		self.tokens_out = 0
+
+	@property
+	def call_count(self) -> int:
+		return len(self.calls)
+
+	def messages(self, index: int = -1) -> list:
+		"""The transcript the model was handed on one call."""
+		return self.calls[index]["messages"]
+
+	def tool_names(self, index: int = 0) -> set[str]:
+		"""The tools the model was offered on one call."""
+		return {tool.name for tool in self.calls[index]["tools"]}
+
+	async def stream_response(
+		self,
+		*,
+		model: str,
+		system: str,
+		messages: list,
+		tools: list,
+		signal: Any = None,
+		session_id: str | None = None,
+	):
+		self.calls.append(
+			{"model": model, "system": system, "messages": list(messages), "tools": list(tools)}
+		)
+		reply = self._reply()
+
+		yield AssistantStartEvent(partial=AssistantMessage(model=model))
+
+		tokens_in = cint(reply.get("tokens_in"))
+		tokens_out = cint(reply.get("tokens_out"))
+		self.tokens_in += tokens_in
+		self.tokens_out += tokens_out
+
+		calls = [
+			ToolCall(id=call["id"], name=call["name"], arguments=dict(call.get("args") or {}))
+			for call in reply.get("tool_calls") or []
+		]
+		reason = "toolUse" if calls else "stop"
+		message = AssistantMessage(
+			model=model,
+			content=assistant_content(reply.get("text") or "", calls),
+			usage=Usage(input=tokens_in, output=tokens_out, total_tokens=tokens_in + tokens_out),
+			stop_reason=reason,
+		)
+		yield AssistantDoneEvent(reason=reason, message=message)
+
+	def _reply(self) -> dict:
+		if not self.script:
+			raise AssertionError("the model was called and the script says it must not be")
+
+		entry = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+		if isinstance(entry, BaseException):
+			raise entry
+		if isinstance(entry, type) and issubclass(entry, BaseException):
+			raise entry()
+		return entry() if callable(entry) else entry
+
+
+def run_with_model(run_name: str, script: Any = ()) -> FakeProvider:
+	"""Execute one Agent Run against a scripted model. Returns the provider.
+
+	Everything else about the run is real: the job, the loop, the tools and the
+	rows they write.
+	"""
+	provider = FakeProvider(script)
+	with patch("frappe_agents.runner.run.ModelProfileProvider", return_value=provider):
+		execute_run(run_name)
+	return provider
+
+
+def run_events(run_name: str) -> list[dict]:
+	"""The events one run stored, parsed."""
+	log = frappe.db.get_value("Agent Run", run_name, "event_log")
+	return (frappe.parse_json(log) or {}).get("events") or [] if log else []
+
+
+def event_types(events: list[dict]) -> list[str]:
+	return [event.get("type") for event in events]
 
 
 def make_comment(doctype: str, name: str, content: str) -> str:
