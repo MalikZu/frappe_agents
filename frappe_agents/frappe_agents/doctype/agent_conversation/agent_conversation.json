@@ -45,7 +45,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-12 00:00:00.000000",
+ "modified": "2026-08-13 12:40:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Conversation",
@@ -73,5 +73,6 @@
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],
- "title_field": "title"
+ "title_field": "title",
+ "icon": "message-circle"
 }
