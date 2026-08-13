@@ -3,6 +3,77 @@
 // the global is always there.
 frappe.provide("frappe_agents");
 
+const RAIL_STYLE_ID = "frappe-agents-rail-styles";
+// Remembered per browser, not per user record: which furniture is open is not
+// something to spend a server round trip on.
+const RAIL_COLLAPSED_KEY = "frappe_agents:rail_collapsed";
+
+const RAIL_STYLES = `
+	.agent-chat-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); }
+	.agent-chat-layout.is-collapsed { grid-template-columns: 40px minmax(0, 1fr); }
+	.agent-chat-rail {
+		display: flex; flex-direction: column; gap: 6px; padding: 6px 8px 6px 0;
+		border-right: 1px solid var(--border-color); height: calc(100vh - 220px); min-height: 320px;
+	}
+	.agent-chat-rail-top { display: flex; align-items: center; gap: 6px; }
+	.agent-chat-rail-toggle { flex: none; padding: 2px 6px; color: var(--text-muted); }
+	.agent-chat-new { flex: 1; display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+	.agent-chat-layout.is-collapsed .agent-chat-new,
+	.agent-chat-layout.is-collapsed .agent-chat-rail-list { display: none; }
+	.agent-chat-rail-list { flex: 1; overflow-y: auto; }
+	.agent-chat-rail-group {
+		font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+		color: var(--text-muted); margin: 12px 6px 4px;
+	}
+	.agent-chat-rail-empty { color: var(--text-muted); font-size: var(--text-sm); padding: 10px 6px; }
+	.agent-chat-convo { padding: 6px 8px; border-radius: var(--border-radius-md, 6px); cursor: pointer; margin-bottom: 2px; }
+	.agent-chat-convo:hover { background: var(--highlight-color); }
+	.agent-chat-convo.is-active { background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color); }
+	.agent-chat-convo-row { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+	.agent-chat-convo-agent { font-weight: 600; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.agent-chat-convo-when { flex: none; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
+	.agent-chat-convo-snippet { display: flex; align-items: baseline; gap: 6px; font-size: var(--text-sm); color: var(--text-muted); }
+	.agent-chat-convo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.agent-chat-rename { flex: none; opacity: 0; font-size: var(--text-xs); }
+	.agent-chat-convo.is-active:hover .agent-chat-rename { opacity: 1; }
+	.agent-chat-pane { min-width: 0; padding-left: 14px; }
+	@media (max-width: 720px) {
+		.agent-chat-layout, .agent-chat-layout.is-collapsed { grid-template-columns: minmax(0, 1fr); }
+		.agent-chat-rail { display: none; }
+		.agent-chat-pane { padding-left: 0; }
+	}
+`;
+
+function add_rail_styles() {
+	if (document.getElementById(RAIL_STYLE_ID)) return;
+	$(`<style id="${RAIL_STYLE_ID}">${RAIL_STYLES}</style>`).appendTo(document.head);
+}
+
+/** Whole days between a timestamp and today, in the user's own timezone. */
+function days_ago(value) {
+	if (!value) return null;
+	const local = frappe.datetime.convert_to_user_tz(value);
+	const then = new Date(
+		String(local)
+			.replace(/-/g, "/")
+			.replace(/[TZ]/g, " ")
+			.replace(/\.[0-9]*/, "")
+	);
+	if (isNaN(then.getTime())) return null;
+	const now = new Date(frappe.datetime.now_datetime().replace(/-/g, "/"));
+	const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+	const day = new Date(then.getFullYear(), then.getMonth(), then.getDate());
+	return Math.floor((today - day) / 86400000);
+}
+
+/** Which heading a conversation sits under. */
+function group_of(value) {
+	const days = days_ago(value);
+	if (days === 0) return "today";
+	if (days === 1) return "yesterday";
+	return "earlier";
+}
+
 frappe.pages["agent-chat"].on_page_load = function (wrapper) {
 	frappe_agents.chat_page = new frappe_agents.AgentChatPage(wrapper);
 };
@@ -21,21 +92,54 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 			single_column: true,
 		});
 		this.agents = [];
+		this.conversations = [];
 		this.make();
 		this.refresh();
 	}
 
 	make() {
+		add_rail_styles();
 		this.page.set_secondary_action(__("New Chat"), () => this.new_chat());
 
+		this.$layout = $(`
+			<div class="agent-chat-layout">
+				<aside class="agent-chat-rail">
+					<div class="agent-chat-rail-top">
+						<button class="btn btn-default btn-xs agent-chat-rail-toggle"></button>
+						<button class="btn btn-default btn-xs agent-chat-new"></button>
+					</div>
+					<div class="agent-chat-rail-list"></div>
+				</aside>
+				<div class="agent-chat-pane"></div>
+			</div>
+		`).appendTo(this.page.main);
+
+		this.$rail = this.$layout.find(".agent-chat-rail-list");
+		this.$toggle = this.$layout.find(".agent-chat-rail-toggle");
+		const $new = this.$layout.find(".agent-chat-new").on("click", () => this.new_chat());
+		$("<span></span>").text(__("New chat")).appendTo($new);
+		$("<span></span>").text("+").appendTo($new);
+		this.$toggle.on("click", () => this.toggle_rail(!this.collapsed));
+		this.toggle_rail(localStorage.getItem(RAIL_COLLAPSED_KEY) === "1");
+
 		this.chat = new frappe_agents.ChatUI({
-			parent: this.page.main,
+			parent: this.$layout.find(".agent-chat-pane"),
 			on_conversation: (conversation, data) => this.on_conversation(conversation, data),
 			on_agent_change: () => this.on_agent_change(),
 		});
 	}
 
+	toggle_rail(collapsed) {
+		this.collapsed = Boolean(collapsed);
+		this.$layout.toggleClass("is-collapsed", this.collapsed);
+		this.$toggle
+			.text(this.collapsed ? "»" : "«")
+			.attr("title", this.collapsed ? __("Show conversations") : __("Hide conversations"));
+		localStorage.setItem(RAIL_COLLAPSED_KEY, this.collapsed ? "1" : "0");
+	}
+
 	refresh() {
+		this.load_conversations();
 		this.load_agents()
 			.then(() => this.rehydrate())
 			.catch((error) => console.error("frappe_agents: could not load agents", error));
@@ -59,8 +163,116 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		});
 	}
 
+	load_conversations() {
+		return frappe
+			.xcall("frappe_agents.api.list_conversations")
+			.then((rows) => {
+				this.conversations = rows || [];
+				this.render_rail();
+			})
+			.catch((error) => console.error("frappe_agents: could not load conversations", error));
+	}
+
+	/** Your own conversations, newest activity first, under the day they happened. */
+	render_rail() {
+		this.$rail.empty();
+		if (!this.conversations.length) {
+			$("<div class='agent-chat-rail-empty'></div>")
+				.text(__("Your conversations will show up here."))
+				.appendTo(this.$rail);
+			return;
+		}
+
+		const headings = {
+			today: __("Today"),
+			yesterday: __("Yesterday"),
+			earlier: __("Earlier"),
+		};
+		let group = null;
+		this.conversations.forEach((row) => {
+			const when = row.last_activity || row.modified;
+			const key = group_of(when);
+			if (key !== group) {
+				group = key;
+				$("<div class='agent-chat-rail-group'></div>").text(headings[key]).appendTo(this.$rail);
+			}
+			this.render_row(row, when).appendTo(this.$rail);
+		});
+		this.mark_active();
+	}
+
+	render_row(row, when) {
+		const $row = $("<div class='agent-chat-convo'></div>")
+			.attr("data-conversation", row.name)
+			.on("click", () => this.open_conversation(row.name));
+
+		const $line = $("<div class='agent-chat-convo-row'></div>").appendTo($row);
+		$("<span class='agent-chat-convo-agent'></span>")
+			.text(row.agent_name || row.agent || "")
+			.appendTo($line);
+		$("<span class='agent-chat-convo-when'></span>")
+			.text(frappe.datetime.prettyDate(when, true))
+			.attr("title", frappe.datetime.str_to_user(when))
+			.appendTo($line);
+
+		const $snippet = $("<div class='agent-chat-convo-snippet'></div>").appendTo($row);
+		$("<span class='agent-chat-convo-text'></span>")
+			.text(row.snippet || __("No messages yet"))
+			.appendTo($snippet);
+		$("<span class='agent-chat-rename'></span>")
+			.text(`✎ ${__("rename")}`)
+			.attr("title", __("Rename this conversation"))
+			.on("click", (e) => {
+				// The row underneath switches conversations; renaming is not that.
+				e.stopPropagation();
+				this.rename(row);
+			})
+			.appendTo($snippet);
+
+		return $row;
+	}
+
+	/** A name the user gives it. No model ever writes a conversation's title. */
+	rename(row) {
+		frappe.prompt(
+			{
+				fieldtype: "Data",
+				fieldname: "title",
+				label: __("Title"),
+				default: row.title || row.snippet || "",
+				reqd: 1,
+			},
+			(values) => {
+				frappe.call({
+					method: "frappe_agents.api.rename_conversation",
+					args: { conversation: row.name, title: values.title },
+					callback: () => this.load_conversations(),
+				});
+			},
+			__("Rename conversation"),
+			__("Rename")
+		);
+	}
+
+	mark_active() {
+		const current = this.chat ? this.chat.conversation : null;
+		this.$rail.find(".agent-chat-convo").each((index, element) => {
+			const $element = $(element);
+			$element.toggleClass("is-active", $element.attr("data-conversation") === current);
+		});
+	}
+
+	/** Switch conversations in place: no reload, the route just follows along. */
+	open_conversation(name) {
+		if (!name || name === this.chat.conversation) return;
+		this.chat.load_conversation(name);
+		this.mark_active();
+		if (this.route_conversation() !== name) frappe.set_route("agent-chat", name);
+	}
+
 	/** A different agent is a different conversation, so the route stops naming one. */
 	on_agent_change() {
+		this.mark_active();
 		if (this.route_conversation()) frappe.set_route("agent-chat");
 	}
 
@@ -69,6 +281,7 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		const conversation = this.take_route_conversation();
 		if (!conversation || conversation === this.chat.conversation) return;
 		this.chat.load_conversation(conversation);
+		this.mark_active();
 	}
 
 	/** route_options is a one-shot channel, so reading it consumes it. */
@@ -90,17 +303,22 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 
 	on_conversation(conversation, data) {
 		// Rehydrated: the chat follows the conversation's own agent, and the chips
-		// are drawn from it. Nothing for the page to do.
-		if (data) return;
-		// Freshly created by the first message: make it linkable.
+		// are drawn from it. The rail only has to show which row you are reading.
+		if (data) {
+			this.mark_active();
+			return;
+		}
+		// Freshly created by the first message: make it linkable, and list it.
 		if (conversation && conversation !== this.route_conversation()) {
 			frappe.set_route("agent-chat", conversation);
 		}
+		this.load_conversations();
 	}
 
 	new_chat() {
 		this.chat.reset();
 		this.chat.focus();
+		this.mark_active();
 		if (this.route_conversation()) {
 			frappe.set_route("agent-chat");
 		}
