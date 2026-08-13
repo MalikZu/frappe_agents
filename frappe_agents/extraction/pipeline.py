@@ -66,8 +66,9 @@ ERROR_CHARS = 500
 def queue_extraction(file_name: str, target_doctype: str, model_profile: str | None = None) -> str:
 	"""Record one extraction request and queue it. Returns the extraction name.
 
-	Everything cheap and refusable happens here, in the request, where the caller
-	gets a sentence back instead of a status field to go and read later.
+	Every refusal happens here, in the request, where the caller gets a sentence
+	back instead of a status field to go and read later. The job checks the same
+	things again as the user it runs as — a queued row is not a promise.
 	"""
 	settings = frappe.get_cached_doc("Agent Settings")
 	if not cint(settings.global_enabled):
@@ -77,6 +78,9 @@ def queue_extraction(file_name: str, target_doctype: str, model_profile: str | N
 	target_doctype = validate_target(target_doctype)
 	profile = pick_profile(model_profile)
 	check_daily_cap(settings)
+	# Reads the bytes and throws them away: the size, type and page caps should be
+	# a sentence to the person who asked, not a Failed row they find later.
+	read_source(file_doc, settings)
 
 	extraction = frappe.get_doc(
 		{
