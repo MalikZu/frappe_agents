@@ -718,7 +718,9 @@
 			freeze: true,
 			freeze_message: __("Applying the reviewed values…"),
 			callback: (r) => {
-				const created = (r.message && (r.message.created_doc || r.message.name)) || frm.doc.created_doc;
+				// created_doc only — a bare `name` in the reply is the extraction's
+				// own, and routing to it under the target doctype opens nothing.
+				const created = (r.message && r.message.created_doc) || frm.doc.created_doc;
 				frappe.show_alert({ message: __("Extraction accepted"), indicator: "green" });
 				if (created && frm.doc.target_doctype) {
 					frappe.set_route("Form", frm.doc.target_doctype, created);
