@@ -23,6 +23,11 @@ RUN_FLAG = "agent_current_run"
 
 INTERRUPTED = "The tool call was interrupted before it finished."
 
+SETTINGS = "Agent Settings"
+KILL_SWITCH_FIELD = "global_enabled"
+# Where the switch is published so that a job already running can see it move.
+KILL_SWITCH_KEY = "agent_runtime_enabled"
+
 ARGS_JSON_LIMIT = 10_000
 RESULT_SUMMARY_LIMIT = 500
 DOCS_TOUCHED_LIMIT = 500
@@ -122,9 +127,60 @@ def current_run() -> Any:
 	return frappe.flags.get(RUN_FLAG)
 
 
+def runtime_enabled() -> bool:
+	"""Whether the agent runtime is switched on, read the way a live run needs it.
+
+	The switch is only worth having if a run already in flight sees it move, and
+	neither obvious read does:
+
+	* the cached Single does not. `frappe.get_cached_doc` keeps the document in
+	  this process, and the save that cleared the cache only cleared the process
+	  that saved.
+	* an uncached query on this job's own connection does not either. The job
+	  holds one transaction from start to end, and the database pins what that
+	  transaction sees at its first read — a value another connection committed
+	  afterwards is invisible to it however often it asks.
+
+	So the switch is published to the shared cache every time Agent Settings is
+	saved, and the runtime is on only when nothing says it is off. Either read
+	alone can be behind; neither can be behind in the direction that keeps a
+	stopped runtime running.
+	"""
+	if not _stored_switch():
+		return False
+	published = _published_switch()
+	return True if published is None else published
+
+
+def publish_kill_switch(enabled: Any) -> None:
+	"""Publish the switch to every process. Agent Settings calls this when saved."""
+	try:
+		frappe.cache.set_value(KILL_SWITCH_KEY, cint(enabled))
+	except Exception:
+		frappe.logger("frappe_agents").warning("could not publish the kill switch", exc_info=True)
+
+
+def _stored_switch() -> bool:
+	"""The switch as the database holds it, past the document cache and its memo."""
+	value = frappe.db.get_value(SETTINGS, None, KILL_SWITCH_FIELD)
+	if value is None:
+		# Never saved on this site, so the field's own default stands.
+		field = frappe.get_meta(SETTINGS).get_field(KILL_SWITCH_FIELD)
+		value = field.default if field else 0
+	return bool(cint(value))
+
+
+def _published_switch() -> bool | None:
+	"""The switch as the last save left it, or None when nothing has published it."""
+	try:
+		value = frappe.cache.get_value(KILL_SWITCH_KEY, use_local_cache=False)
+	except Exception:
+		return None
+	return None if value is None else bool(cint(value))
+
+
 def _check_kill_switch() -> None:
-	settings = frappe.get_cached_doc("Agent Settings")
-	if not cint(settings.global_enabled):
+	if not runtime_enabled():
 		raise KillSwitchActive("The agent runtime is switched off.")
 
 

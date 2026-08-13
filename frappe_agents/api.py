@@ -27,6 +27,7 @@ from frappe_agents.extraction.pipeline import (
 	record_fields,
 )
 from frappe_agents.extraction.schema import build_extraction_schema
+from frappe_agents.tools.base import runtime_enabled
 from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
 
 MAX_MESSAGE_CHARS = 20_000
@@ -82,9 +83,10 @@ def start_run(
 			_("Message is too long: {0} characters, limit is {1}.").format(len(message), MAX_MESSAGE_CHARS)
 		)
 
-	settings = frappe.get_cached_doc("Agent Settings")
-	if not cint(settings.global_enabled):
+	if not runtime_enabled():
 		frappe.throw(_("The agent runtime is switched off."))
+
+	settings = frappe.get_cached_doc("Agent Settings")
 
 	frappe.has_permission("Agent", "read", doc=agent, throw=True)
 	agent_doc = frappe.get_doc("Agent", agent)
