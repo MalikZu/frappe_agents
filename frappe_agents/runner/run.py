@@ -35,6 +35,7 @@ from frappe_agents.tools.base import (
 	KillSwitchActive,
 	execute_tool,
 	log_interrupted_call,
+	runtime_enabled,
 )
 from frappe_agents.tools.registry import get_tool_schemas
 
@@ -122,9 +123,10 @@ def _execute(run: Any) -> None:
 	if not cint(frappe.get_cached_value("User", effective_user, "enabled") or 0):
 		return _fail(run, f"Effective user {effective_user} is disabled or missing.")
 
-	settings = frappe.get_cached_doc("Agent Settings")
-	if not cint(settings.global_enabled):
+	if not runtime_enabled():
 		return _fail(run, KILL_SWITCH_MESSAGE, status="Cancelled")
+
+	settings = frappe.get_cached_doc("Agent Settings")
 	if not cint(agent.enabled):
 		return _fail(run, f"Agent {agent.name} is disabled.")
 
@@ -323,8 +325,7 @@ class RunEvents:
 
 
 def _check_kill_switch(cancellation: RunCancellation) -> None:
-	settings = frappe.get_cached_doc("Agent Settings")
-	if not cint(settings.global_enabled):
+	if not runtime_enabled():
 		cancellation.cancel(KILL_SWITCH_MESSAGE)
 
 

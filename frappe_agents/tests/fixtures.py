@@ -73,7 +73,7 @@ from frappe_agents.harness.messages import (
 )
 from frappe_agents.harness.provider_events import AssistantDoneEvent, AssistantStartEvent
 from frappe_agents.runner.run import execute_run
-from frappe_agents.tools.base import execute_tool
+from frappe_agents.tools.base import execute_tool, publish_kill_switch
 
 MODULE = "Frappe Agents"
 
@@ -250,6 +250,11 @@ def set_kill_switch(enabled: int) -> None:
 
 	A Single with no stored row falls back to field defaults, which is a state the
 	tests should never depend on — the first call here writes the row.
+
+	The published copy of the switch is set even when the row already says the
+	right thing: it lives in redis, so a test that died between throwing the
+	switch and putting it back would otherwise leave every later test looking at
+	a runtime that is off.
 	"""
 	stored = frappe.db.get_single_value("Agent Settings", "global_enabled")
 	if stored is None or cint(stored) != cint(enabled):
@@ -257,6 +262,7 @@ def set_kill_switch(enabled: int) -> None:
 		settings.global_enabled = cint(enabled)
 		settings.flags.ignore_permissions = True
 		settings.save(ignore_permissions=True)
+	publish_kill_switch(enabled)
 	frappe.clear_document_cache("Agent Settings", "Agent Settings")
 
 
