@@ -211,6 +211,10 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 			.on("click", () => this.open_conversation(row.name))
 			.on("keydown", (e) => {
 				if (e.key !== "Enter" && e.key !== " ") return;
+				// The rename button sits inside the row and answers these keys
+				// itself. Without this the row switches conversations underneath
+				// the rename dialog it just opened.
+				if (e.target !== e.currentTarget) return;
 				e.preventDefault();
 				this.open_conversation(row.name);
 			});
