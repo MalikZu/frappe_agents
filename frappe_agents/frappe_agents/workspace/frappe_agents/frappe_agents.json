@@ -30,7 +30,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "assign"
+   "icon": "bot"
   },
   {
    "hidden": 0,
@@ -41,7 +41,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "education"
+   "icon": "graduation-cap"
   },
   {
    "hidden": 0,
@@ -52,7 +52,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "tool"
+   "icon": "wrench"
   },
   {
    "hidden": 0,
@@ -63,7 +63,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "setting"
+   "icon": "settings-2"
   },
   {
    "hidden": 0,
@@ -82,7 +82,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "integration"
+   "icon": "plug"
   },
   {
    "hidden": 0,
@@ -93,7 +93,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "setting-gear"
+   "icon": "sliders-horizontal"
   },
   {
    "hidden": 0,
@@ -112,7 +112,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "comment"
+   "icon": "message-circle"
   },
   {
    "hidden": 0,
@@ -123,7 +123,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "change"
+   "icon": "activity"
   },
   {
    "hidden": 0,
@@ -134,7 +134,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "tick"
+   "icon": "check-check"
   },
   {
    "hidden": 0,
@@ -145,7 +145,7 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link",
-   "icon": "attachment"
+   "icon": "scan-text"
   },
   {
    "hidden": 0,
@@ -164,10 +164,10 @@
    "link_type": "Report",
    "onboard": 0,
    "type": "Link",
-   "icon": "chart"
+   "icon": "book-open"
   }
  ],
- "modified": "2026-08-13 12:10:00.000000",
+ "modified": "2026-08-13 17:20:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Frappe Agents",
@@ -183,7 +183,7 @@
    "label": "Agent Chat",
    "link_to": "agent-chat",
    "type": "Page",
-   "icon": "message"
+   "icon": "messages-square"
   },
   {
    "color": "Orange",
@@ -193,7 +193,7 @@
    "link_to": "Agent Action",
    "stats_filter": "{\"status\": \"Pending\"}",
    "type": "DocType",
-   "icon": "tick"
+   "icon": "check-check"
   },
   {
    "color": "Orange",
@@ -203,7 +203,7 @@
    "link_to": "Document Extraction",
    "stats_filter": "{\"status\": \"Needs Review\"}",
    "type": "DocType",
-   "icon": "attachment"
+   "icon": "scan-text"
   },
   {
    "doc_view": "List",
@@ -211,7 +211,7 @@
    "link_to": "Agent",
    "stats_filter": "[]",
    "type": "DocType",
-   "icon": "assign"
+   "icon": "bot"
   },
   {
    "doc_view": "List",
@@ -219,7 +219,7 @@
    "link_to": "Agent Skill",
    "stats_filter": "[]",
    "type": "DocType",
-   "icon": "education"
+   "icon": "graduation-cap"
   },
   {
    "doc_view": "List",
@@ -227,7 +227,7 @@
    "link_to": "Agent Conversation",
    "stats_filter": "[]",
    "type": "DocType",
-   "icon": "comment"
+   "icon": "message-circle"
   },
   {
    "doc_view": "List",
@@ -235,7 +235,7 @@
    "link_to": "LLM Provider",
    "stats_filter": "[]",
    "type": "DocType",
-   "icon": "integration"
+   "icon": "plug"
   },
   {
    "doc_view": "List",
@@ -243,14 +243,14 @@
    "link_to": "LLM Model Profile",
    "stats_filter": "[]",
    "type": "DocType",
-   "icon": "setting-gear"
+   "icon": "sliders-horizontal"
   },
   {
    "label": "Review Quality",
    "link_to": "Agent Action Review Quality",
    "report_ref_doctype": "Agent Action",
    "type": "Report",
-   "icon": "chart"
+   "icon": "book-open"
   }
  ],
  "title": "Frappe Agents",

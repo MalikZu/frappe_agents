@@ -7,10 +7,11 @@
  "label": "Frappe Agents",
  "link_to": "Frappe Agents",
  "link_type": "Workspace Sidebar",
- "logo_url": "/assets/frappe_agents/images/logo.svg",
- "modified": "2026-08-13 12:20:00.000000",
+ "logo_url": "/assets/frappe_agents/icons/desktop_icons/solid/frappe_agents.svg",
+ "modified": "2026-08-13 17:22:00.000000",
  "name": "Frappe Agents",
  "restrict_removal": 0,
  "roles": [],
- "standard": 1
+ "standard": 1,
+ "icon": "frappe_agents"
 }
