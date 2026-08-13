@@ -14,6 +14,7 @@
   "sensitive_fields",
   "max_extraction_pages",
   "max_extraction_file_mb",
+  "pdf_parser_engine",
   "extractions_per_user_per_day"
  ],
  "fields": [
@@ -73,6 +74,14 @@
    "label": "Max Extraction File Size (MB)"
   },
   {
+   "default": "native",
+   "description": "Which engine parses PDFs on OpenRouter. native sends the file to the model itself; the OCR engines hand the model a text layer the reviewer never sees.",
+   "fieldname": "pdf_parser_engine",
+   "fieldtype": "Select",
+   "label": "PDF Parser Engine",
+   "options": "native\nmistral-ocr\ncloudflare-ai"
+  },
+  {
    "default": "50",
    "description": "Extractions one user may start in a day.",
    "fieldname": "extractions_per_user_per_day",
@@ -83,7 +92,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-13 12:40:00.000000",
+ "modified": "2026-08-13 13:20:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Settings",

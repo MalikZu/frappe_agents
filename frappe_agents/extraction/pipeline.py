@@ -275,6 +275,7 @@ def _run(doc: Any) -> None:
 			{
 				"tokens_in": cint(doc.tokens_in) + cint(getattr(exc, "tokens_in", 0)),
 				"tokens_out": cint(doc.tokens_out) + cint(getattr(exc, "tokens_out", 0)),
+				"parser_engine": getattr(exc, "engine", None),
 			},
 		)
 		return _fail(doc, _text(exc))
