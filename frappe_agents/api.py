@@ -352,7 +352,7 @@ def apply_extraction(name: str, values: Any = None, confirmed: Any = None) -> di
 	spec = build_extraction_schema(doc.target_doctype, frappe.session.user)
 	flags = frappe.parse_json(doc.sensitive_flags) or {}
 
-	reviewed, ignored = _reviewed_values(spec, values)
+	reviewed, ignored = _reviewed_values(spec, values, flags)
 	applied, withheld = _confirmed_values(flags, values, confirmed)
 
 	draft = frappe.get_doc(doc.target_doctype, doc.created_doc)
@@ -427,7 +427,7 @@ def _extraction_for_review(name: str) -> Any:
 	return doc
 
 
-def _reviewed_values(spec: dict, values: dict) -> tuple[dict, list[str]]:
+def _reviewed_values(spec: dict, values: dict, flags: dict) -> tuple[dict, list[str]]:
 	"""Everything the reviewer sent that is a field we asked the model for.
 
 	Sensitive fields are dropped here without exception — they come back through
@@ -435,13 +435,16 @@ def _reviewed_values(spec: dict, values: dict) -> tuple[dict, list[str]]:
 	"""
 	fields = spec.get("fields") or {}
 	tables = spec.get("child_tables") or {}
-	sensitive = set(spec.get("sensitive") or [])
+	sensitive = set(spec.get("sensitive") or []) | set(flags or {})
 
 	clean: dict[str, Any] = {}
 	ignored: list[str] = []
 
 	for key, value in values.items():
-		if key in sensitive or key in SYSTEM_FIELDS or str(key).startswith("__"):
+		if key in sensitive:
+			# Handled by the confirmation path, or not at all. Never here.
+			continue
+		if key in SYSTEM_FIELDS or str(key).startswith("__"):
 			ignored.append(key)
 			continue
 		if key in fields:
