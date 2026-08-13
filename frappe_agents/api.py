@@ -27,8 +27,8 @@ from frappe_agents.extraction.pipeline import (
 	record_fields,
 )
 from frappe_agents.extraction.schema import build_extraction_schema
-from frappe_agents.model_profiles import check_profile
-from frappe_agents.tools.base import runtime_enabled
+from frappe_agents.model_profiles import check_profile, profile_choices
+from frappe_agents.tools.base import AUTONOMY_CAPABILITIES, runtime_enabled
 from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
 
 MAX_MESSAGE_CHARS = 20_000
@@ -46,7 +46,13 @@ CONVERSATION_LIMIT = 50
 
 @frappe.whitelist()
 def list_agents() -> list[dict]:
-	"""Enabled agents the session user is allowed to talk to."""
+	"""Enabled agents the session user is allowed to talk to.
+
+	Each one carries what the chat surface has to show about it before anything is
+	sent: the tools it can call, and the models this user may run it on. Both are
+	answers to "what can this agent do", so they travel with the agent rather than
+	costing a call each the moment someone opens a menu.
+	"""
 	roles = set(frappe.get_roles())
 	agents = frappe.get_list(
 		"Agent",
@@ -67,9 +73,51 @@ def list_agents() -> list[dict]:
 				"agent_name": agent.agent_name,
 				"autonomy": agent.autonomy,
 				"description": _description(agent),
+				# What runs when nobody chooses. Shown even to a user who may not
+				# pick it, because it is what their runs will use.
+				"model_profile": agent.model_profile,
+				"model_choices": profile_choices(agent, roles),
+				"tools": _tool_summaries(agent),
 			}
 		)
 	return allowed
+
+
+def _tool_summaries(agent: Any) -> list[dict]:
+	"""The tools this agent can actually call, for the read-only tools popover.
+
+	Filtered the way the executor filters: a disabled tool, or one whose
+	capability is outside the agent's autonomy, is refused at call time. Listing
+	it here would promise the user something that never happens.
+	"""
+	capabilities = AUTONOMY_CAPABILITIES.get(agent.autonomy, set())
+	summaries = []
+	for row in agent.get("tools") or []:
+		tool = _tool(row.tool)
+		if tool is None or not cint(tool.enabled) or tool.capability not in capabilities:
+			continue
+		summaries.append(
+			{
+				"tool_name": tool.tool_name or tool.name,
+				"description": _first_line(tool.description),
+				"capability": tool.capability,
+			}
+		)
+	return summaries
+
+
+def _tool(name: str | None) -> Any:
+	"""The Agent Tool row, or None when the grant points at nothing.
+
+	Read through the document cache: Agent Tool is readable by managers alone, and
+	this is the registry describing itself, not a user reading a record.
+	"""
+	if not name:
+		return None
+	try:
+		return frappe.get_cached_doc("Agent Tool", name)
+	except frappe.DoesNotExistError:
+		return None
 
 
 @frappe.whitelist()
@@ -444,11 +492,15 @@ def _user_may_use(agent: Any, roles: set) -> bool:
 
 
 def _description(agent: Any) -> str:
-	instructions = (agent.instructions or "").strip()
-	if not instructions:
+	return _first_line(agent.instructions)
+
+
+def _first_line(text: str | None) -> str:
+	"""The first line of a block of text, capped. What a tooltip can hold."""
+	stripped = (text or "").strip()
+	if not stripped:
 		return ""
-	first_line = instructions.splitlines()[0].strip()
-	return first_line[:DESCRIPTION_CHARS]
+	return stripped.splitlines()[0].strip()[:DESCRIPTION_CHARS]
 
 
 def _check_budget(agent: Any, settings: Any) -> None:
