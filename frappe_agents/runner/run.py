@@ -19,7 +19,12 @@ from typing import Any
 import frappe
 from frappe.utils import cint, now_datetime
 
-from frappe_agents.harness.events import MessageEndEvent, MessageUpdateEvent, TurnStartEvent
+from frappe_agents.harness.events import (
+	AgentEndEvent,
+	MessageEndEvent,
+	MessageUpdateEvent,
+	TurnStartEvent,
+)
 from frappe_agents.harness.loop import run_agent_loop
 from frappe_agents.harness.messages import (
 	AgentMessage,
@@ -294,7 +299,7 @@ class RunEvents:
 			_check_kill_switch(self.cancellation)
 
 		self.seq += 1
-		payload = event.model_dump(mode="json", by_alias=True)
+		payload = _payload(event)
 		self.entries.append(payload)
 		publish_event(self.run, HARNESS_EVENT, seq=self.seq, event=payload)
 
@@ -322,6 +327,20 @@ class RunEvents:
 		# One answer from the model is one step, exactly as before.
 		self.steps += 1
 		self.final_text = None if message.tool_calls else message.text
+
+
+def _payload(event: Any) -> dict:
+	"""One event as JSON, without the transcript the last one repeats.
+
+	The loop signs off by handing back every message it produced. The browser
+	was told about each of them as it happened and the log kept them one by one,
+	so `agent_end` goes out and is stored as the marker it is — same type, same
+	place in the sequence, none of the conversation a second time.
+	"""
+	payload = event.model_dump(mode="json", by_alias=True)
+	if isinstance(event, AgentEndEvent):
+		payload.pop("messages", None)
+	return payload
 
 
 def _check_kill_switch(cancellation: RunCancellation) -> None:
