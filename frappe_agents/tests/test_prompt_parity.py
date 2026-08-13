@@ -18,7 +18,7 @@ they turn back into what has always been sent.
 
 import frappe
 
-from frappe_agents.runner.run import _build_messages, build_system_prompt
+from frappe_agents.runner.run import _build_messages, build_system_prompt, resolve_run_profile
 from frappe_agents.runner.stream_adapter import wire_messages
 from frappe_agents.tests.fixtures import (
 	AGENT,
@@ -81,7 +81,8 @@ class TestPromptParity(AgentTestCase):
 	def sent(self, run) -> list[dict]:
 		"""The message list the runner would hand `call_model` for this run."""
 		agent = frappe.get_doc("Agent", run.agent)
-		return wire_messages(build_system_prompt(agent, run), _build_messages(agent, run))
+		profile = resolve_run_profile(agent, run)
+		return wire_messages(build_system_prompt(agent, run), _build_messages(profile, run))
 
 	# --- the system prompt ---------------------------------------------------
 
