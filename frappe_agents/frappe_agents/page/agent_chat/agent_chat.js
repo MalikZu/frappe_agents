@@ -19,6 +19,13 @@ const RAIL_STYLES = `
 		--agent-chat-quick: 120ms;
 		--agent-chat-enter: 140ms;
 		--agent-chat-ease: cubic-bezier(0.25, 1, 0.5, 1);
+		/* The drawer comes in from the edge it is anchored to. A transform has no
+		   logical form, so the direction is a value and RTL flips its sign. */
+		--agent-chat-drawer-from: -8px;
+	}
+	[dir="rtl"] .agent-chat-layout { --agent-chat-drawer-from: 8px; }
+	@keyframes agent-chat-drawer-in {
+		from { opacity: 0; transform: translateX(var(--agent-chat-drawer-from)); }
 	}
 	.agent-chat-layout.is-collapsed { grid-template-columns: 40px minmax(0, 1fr); }
 	.agent-chat-rail {
@@ -90,6 +97,9 @@ const RAIL_STYLES = `
 			width: 250px; max-width: 86%; max-height: calc(100vh - 260px); padding: 6px 8px;
 			background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color);
 			border-radius: var(--border-radius-md, 6px); box-shadow: var(--shadow-lg);
+			/* It is a layer over the chat, not a part of it, and arriving from
+			   the edge is what says so. */
+			animation: agent-chat-drawer-in var(--agent-chat-enter) var(--agent-chat-ease);
 		}
 		.agent-chat-layout.is-drawer .agent-chat-new { display: flex; }
 		.agent-chat-layout.is-drawer .agent-chat-rail-list { display: block; }
