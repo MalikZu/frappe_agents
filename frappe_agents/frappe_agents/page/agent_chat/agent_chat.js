@@ -45,7 +45,9 @@ const RAIL_STYLES = `
 	/* The gap belongs between one day and the next, not above the first one. */
 	.agent-chat-rail-group:first-child { margin-block-start: 0; }
 	.agent-chat-rail-empty { color: var(--text-muted); font-size: var(--text-sm); padding: 10px 6px; }
-	.agent-chat-convo-row { position: relative; margin-bottom: 2px; }
+	/* Flex so the row button keeps its min-width:0 truncation chain; relative so
+	   the rename can float over it. Both, or one of two different bugs. */
+	.agent-chat-convo-row { position: relative; display: flex; margin-bottom: 2px; }
 	.agent-chat-convo {
 		flex: 1; min-width: 0; padding: 6px 8px; text-align: start; font: inherit; color: inherit;
 		background: none; border-radius: var(--border-radius-md, 6px); cursor: pointer;
