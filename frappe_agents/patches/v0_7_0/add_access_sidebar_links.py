@@ -12,10 +12,17 @@ in the order a fresh install ships them, and nothing else touched.
 It does nothing at all when there is no sidebar, when there is no Build section
 to add them under, or when the links are already there. Running it twice adds
 nothing the second time.
+
+The sidebar is found by module rather than by name. The desk seeds one for a
+workspace under the workspace's *title*, so this app's sidebar is called
+"Agents" on a site that let the desk make it and "Frappe Agents" on one where
+the installer got there first. Both are the same sidebar, and a patch that knew
+only one name would silently skip half the estate.
 """
 
 import frappe
 
+from frappe_agents.access.exclusions import APP_MODULE
 from frappe_agents.install import BUILD_SECTION, SIDEBAR_NAME
 
 SIDEBAR_DOCTYPE = "Workspace Sidebar"
@@ -31,10 +38,28 @@ NEW_LINKS = (
 
 
 def execute() -> None:
-	if not frappe.db.exists(SIDEBAR_DOCTYPE, SIDEBAR_NAME):
-		return
+	for name in app_sidebars():
+		_add_links(name)
 
-	doc = frappe.get_doc(SIDEBAR_DOCTYPE, SIDEBAR_NAME)
+
+def app_sidebars() -> list[str]:
+	"""This app's public sidebars, whichever of the two names they carry.
+
+	A sidebar with `for_user` set is somebody's personal copy and is left alone:
+	they made it theirs on purpose.
+	"""
+	names = frappe.get_all(
+		SIDEBAR_DOCTYPE,
+		filters={"module": APP_MODULE, "for_user": ("in", ("", None))},
+		pluck="name",
+	)
+	if SIDEBAR_NAME not in names and frappe.db.exists(SIDEBAR_DOCTYPE, SIDEBAR_NAME):
+		names.append(SIDEBAR_NAME)
+	return names
+
+
+def _add_links(name: str) -> None:
+	doc = frappe.get_doc(SIDEBAR_DOCTYPE, name)
 	section = _build_section(doc)
 	if section is None:
 		return
@@ -66,7 +91,7 @@ def execute() -> None:
 
 	doc.flags.ignore_permissions = True
 	doc.save(ignore_permissions=True)
-	print(f"frappe_agents: added {len(missing)} sidebar link(s) to {SIDEBAR_NAME}")
+	print(f"frappe_agents: added {len(missing)} sidebar link(s) to {name}")
 
 
 def _build_section(doc) -> tuple[int, int] | None:
