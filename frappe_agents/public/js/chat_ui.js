@@ -77,7 +77,6 @@ const STYLES = `
 	.agent-chat-att-id:focus-visible,
 	.agent-chat-copy:focus-visible,
 	.agent-chat-older:focus-visible,
-	.agent-chat-rich code.is-copyable:focus-visible,
 	/* The one anchor this file does not build by hand — a link the agent wrote
 	   into its answer — and the one it reaches for most: a cited document. */
 	.agent-chat-rich a:focus-visible,
@@ -191,7 +190,8 @@ const STYLES = `
 	.agent-chat-copy:focus { opacity: 1; }
 	.agent-chat-copy:hover { color: var(--text-color); }
 	/* An id or a snippet the agent wrote is something a person retypes by hand and
-	   gets wrong. Anything set in code is one click instead. */
+	   gets wrong. Anything set in code is one click instead — a mouse shortcut
+	   over text that stays text: no ring here, because it is not a tab stop. */
 	.agent-chat-rich code.is-copyable { cursor: pointer; }
 	.agent-chat-rich code.is-copyable:hover { background: var(--highlight-color); }
 	/* The confirmation: it went somewhere. Short, and the live region says it too. */
@@ -1250,15 +1250,13 @@ frappe_agents.ChatUI = class ChatUI {
 	/**
 	 * Make one element put a piece of text on the clipboard.
 	 *
-	 * A real <button> gets its keyboard behaviour from being a button. Anything
-	 * that has to stay what it is — a code span inside rendered prose — is given
-	 * the same treatment the popover rows get: role, tab stop, Enter and Space.
+	 * Only ever a real <button>, which is where its keyboard behaviour comes
+	 * from. Text that has to stay text is copied by click alone — see
+	 * `make_copyable`.
 	 */
 	copies($el, text, label) {
 		$el.attr({ title: __("Click to copy"), "aria-label": label || __("Click to copy") });
-		const copy = () => this.copy_text($el, text);
-		if ($el.is("button")) $el.on("click", copy);
-		else this.clickable($el, copy);
+		$el.on("click", () => this.copy_text($el, text));
 		return $el;
 	}
 
@@ -2356,14 +2354,23 @@ frappe_agents.ChatUI = class ChatUI {
 	 * wrong. Code blocks are left alone: they are already selectable as a block,
 	 * and a click inside one is somebody selecting part of it.
 	 *
-	 * The whole message goes on its own control in the corner, out of the way
-	 * until the bubble is hovered or the control is tabbed to.
+	 * A code span stays a code span: no role, no name of its own, no tab stop.
+	 * It is prose, and a sentence naming five ids has to read as one sentence
+	 * and cost nobody five stops on the way to the composer. The click is a
+	 * shortcut for a mouse; a keyboard has the selection it always had and the
+	 * message's own copy control.
+	 *
+	 * That control goes in the corner, out of the way until the bubble is
+	 * hovered or the control is tabbed to.
 	 */
 	make_copyable($el, text) {
 		$el.find("code").each((index, node) => {
 			const $code = $(node);
 			if ($code.closest("pre").length) return;
-			this.copies($code.addClass("is-copyable"), $code.text(), __("Copy {0}", [$code.text()]));
+			$code
+				.addClass("is-copyable")
+				.attr("title", __("Click to copy"))
+				.on("click", () => this.copy_text($code, $code.text()));
 		});
 
 		if (!text) return;
