@@ -22,6 +22,8 @@ import frappe
 import requests
 
 from frappe_agents.runner.providers import (
+	ERROR_BODY_BYTES,
+	ERROR_BODY_LIMIT,
 	SSE_LINE_LIMIT,
 	STREAM_CONNECT_TIMEOUT,
 	STREAM_IDLE_TIMEOUT,
@@ -771,7 +773,12 @@ class TestStreamCeilings(AgentTestCase):
 
 
 class FakeStream:
-	"""What `requests.post(stream=True)` hands back, minus the network."""
+	"""What `requests.post(stream=True)` hands back, minus the network.
+
+	An error body arrives on the socket like every other body, so `text` is served
+	through `iter_content` in chunk-sized pieces. Reading `.text` instead would be
+	the whole body in memory, which is the thing the transport must not do.
+	"""
 
 	def __init__(self, chunks, status_code: int = 200, text: str = "", raises=None):
 		self.chunks = chunks
@@ -779,10 +786,19 @@ class FakeStream:
 		self.text = text
 		self.raises = raises
 		self.closed = False
+		self.pulled = 0
 
 	def iter_content(self, chunk_size=None):
 		if self.raises is not None:
 			raise self.raises
+		if self.status_code != 200 and self.text:
+			body = self.text.encode()
+			size = chunk_size or len(body)
+			for start in range(0, len(body), size):
+				chunk = body[start : start + size]
+				self.pulled += len(chunk)
+				yield chunk
+			return
 		yield from self.chunks
 
 	def close(self):
@@ -852,6 +868,17 @@ class TestStreamTransport(AgentTestCase):
 		self.assertIn("401", message)
 		self.assertNotIn("fa-test-key", message)
 		self.assertIn("***", message)
+		self.assertTrue(response.closed)
+
+	def test_an_enormous_error_body_is_capped_on_the_socket_not_afterwards(self):
+		"""The endpoint decides how big its refusal is; we decide how much we read."""
+		response = FakeStream([], status_code=500, text="x" * (4 * ERROR_BODY_BYTES))
+		with patch("frappe_agents.runner.providers.requests.post", return_value=response):
+			with self.assertRaises(ProviderError) as caught:
+				list(call_model_stream(PROFILE, MESSAGES))
+
+		self.assertLessEqual(response.pulled, ERROR_BODY_BYTES)
+		self.assertLessEqual(len(str(caught.exception)), ERROR_BODY_LIMIT + 200)
 		self.assertTrue(response.closed)
 
 	def test_a_disabled_provider_is_refused_before_anything_is_pulled(self):

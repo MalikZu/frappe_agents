@@ -95,6 +95,12 @@ ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ERROR_BODY_LIMIT = 800
+# What may be pulled off the socket to build that 800 characters. A provider that
+# answers a refusal with a gigabyte of HTML is answered by reading the first few
+# kilobytes of it and hanging up: the cap belongs on the read, not on the string
+# that has already been built out of the whole body.
+ERROR_BODY_BYTES = 8 * 1024
+ERROR_BODY_CHUNK = 4 * 1024
 
 # Extraction is a different kind of call and gets its own budget. Anthropic is
 # allowed 180s just to compile a new JSON schema into a grammar, and an OCR
@@ -533,11 +539,30 @@ def _open_stream(url: str, headers: dict, payload: dict, api_key: str) -> Any:
 		raise ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
 
 	if response.status_code != 200:
-		body = _redact(response.text or "", api_key)[:ERROR_BODY_LIMIT]
+		body = _error_body(response, api_key)
 		response.close()
 		raise ProviderError(f"Model request to {url} returned HTTP {response.status_code}: {body}")
 
 	return response
+
+
+def _error_body(response: Any, api_key: str) -> str:
+	"""What a refusal said, read off the socket under a cap and never past it.
+
+	`response.text` downloads the whole body first and truncates afterwards, which
+	makes the size of an error somebody else's endpoint chose the size of our
+	memory. This takes ERROR_BODY_BYTES and stops pulling.
+	"""
+	raw = bytearray()
+	try:
+		for chunk in response.iter_content(chunk_size=ERROR_BODY_CHUNK):
+			raw.extend(chunk.encode("utf-8", "replace") if isinstance(chunk, str) else chunk)
+			if len(raw) >= ERROR_BODY_BYTES:
+				break
+	except requests.RequestException:
+		pass
+	text = bytes(raw[:ERROR_BODY_BYTES]).decode("utf-8", "replace")
+	return _redact(text, api_key)[:ERROR_BODY_LIMIT]
 
 
 def _stream_bytes(response: Any, url: str, api_key: str) -> Iterator[bytes]:
@@ -1407,18 +1432,24 @@ def _refusal_message(profile: Any, text: str) -> str:
 
 def _post(url: str, headers: dict, payload: dict, api_key: str, timeout: int = REQUEST_TIMEOUT) -> dict:
 	try:
-		response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+		# Streamed so that a refusal is read under a cap rather than downloaded
+		# whole and truncated afterwards. An answer is still read in full: that
+		# body is the reply we asked for, and it is what the caller parses.
+		response = requests.post(url, headers=headers, json=payload, timeout=timeout, stream=True)
 	except requests.RequestException as exc:
 		raise ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
 
-	if response.status_code != 200:
-		body = _redact(response.text or "", api_key)[:ERROR_BODY_LIMIT]
-		raise ProviderError(f"Model request to {url} returned HTTP {response.status_code}: {body}")
-
 	try:
-		return response.json()
-	except ValueError:
-		raise ProviderError(f"Model request to {url} returned a non-JSON body.")
+		if response.status_code != 200:
+			body = _error_body(response, api_key)
+			raise ProviderError(f"Model request to {url} returned HTTP {response.status_code}: {body}")
+
+		try:
+			return response.json()
+		except ValueError:
+			raise ProviderError(f"Model request to {url} returned a non-JSON body.")
+	finally:
+		response.close()
 
 
 def _load_args(raw: Any) -> dict:
