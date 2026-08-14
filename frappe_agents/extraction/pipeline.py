@@ -9,6 +9,13 @@ the model is called — permission on the file, permission to create the target
 doctype, the size cap, the page cap, the daily cap — so a refusal costs nothing
 and a hostile file never reaches a provider on someone else's authority.
 
+The row's status is a state machine and `_claim` is the only way it moves. Every
+transition names where it may come from and re-reads the row inside this job's own
+transaction before it writes, so a person who discarded the request while the model
+was thinking has the last word: the reading finishes, its result is dropped, and the
+row says so. The runtime switch is read the same way at the same points, from
+`tools.base.runtime_enabled` and never from a cached copy of Agent Settings.
+
 **The rule this file exists to keep: nothing in here writes a sensitive field.**
 The draft is created from `gate.withhold`'s first return value, which cannot
 contain one. The extracted sensitive values go onto the extraction row, flagged,
@@ -45,7 +52,7 @@ from frappe_agents.runner.providers import (
 	ProviderError,
 	call_model_extract,
 )
-from frappe_agents.tools.base import current_run
+from frappe_agents.tools.base import current_run, runtime_enabled
 
 EXTRACTION = "Document Extraction"
 EVENT = "frappe_agents:extraction_update"
@@ -56,6 +63,16 @@ STATUS_NEEDS_REVIEW = "Needs Review"
 STATUS_ACCEPTED = "Accepted"
 STATUS_DISCARDED = "Discarded"
 STATUS_FAILED = "Failed"
+
+# The statuses a decision has already closed. Nothing the job does afterwards may
+# move a row out of one of these: the person's decision is the last word.
+DECIDED_STATUSES = (STATUS_ACCEPTED, STATUS_DISCARDED)
+
+# What is written on a row somebody closed while its job was still running.
+LATE_RESULT = "This reading finished after the extraction was {0}, so its result was dropped."
+LATE_DRAFT = " The draft it had already created is {0}; delete it if it should not exist."
+
+KILL_SWITCH_MESSAGE = "The agent runtime is switched off."
 
 FORBIDDEN_USERS = ("Administrator", "Guest")
 
@@ -86,8 +103,8 @@ def queue_extraction(file_name: str, target_doctype: str, model_profile: str | N
 	things again as the user it runs as — a queued row is not a promise.
 	"""
 	settings = frappe.get_cached_doc("Agent Settings")
-	if not cint(settings.global_enabled):
-		frappe.throw(_("The agent runtime is switched off."))
+	if not runtime_enabled():
+		frappe.throw(_(KILL_SWITCH_MESSAGE))
 
 	file_doc = readable_file(file_name)
 	target_doctype = validate_target(target_doctype)
@@ -408,6 +425,7 @@ def run_extraction(extraction: str) -> None:
 def _run(doc: Any) -> None:
 	if doc.status != STATUS_PENDING:
 		# A requeued job must not extract a document a person already reviewed.
+		# The cheap read first; `_claim` below is the one that decides.
 		return
 
 	user = doc.owner
@@ -417,13 +435,15 @@ def _run(doc: Any) -> None:
 		return _fail(doc, f"The user {user} is disabled or missing.")
 
 	settings = frappe.get_cached_doc("Agent Settings")
-	if not cint(settings.global_enabled):
-		return _fail(doc, "The agent runtime is switched off.")
+	if not runtime_enabled():
+		return _fail(doc, KILL_SWITCH_MESSAGE)
 
 	# From here on every check runs as the person who asked, not as the worker.
 	frappe.set_user(user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
-	record_fields(doc, {"status": STATUS_RUNNING, "error": None})
+	if not _claim(doc, (STATUS_PENDING,), STATUS_RUNNING, {"error": None}):
+		# Somebody discarded the request between the queue and the worker.
+		return _drop_late_result(doc)
 	publish_extraction(doc, status=STATUS_RUNNING)
 
 	try:
@@ -488,6 +508,16 @@ def _run(doc: Any) -> None:
 		},
 	)
 
+	# The last gate before anything is written into the site. The model call is the
+	# long part of this job, and both of these can move while it is in flight: the
+	# person can discard the request, and the site can switch the runtime off. Both
+	# are read again here, from the database and the shared switch rather than from
+	# what this job read when it started.
+	if stored_status(doc) != STATUS_RUNNING:
+		return _drop_late_result(doc)
+	if not runtime_enabled():
+		return _fail(doc, KILL_SWITCH_MESSAGE)
+
 	try:
 		created = _create_draft(target_doctype, draft_values)
 	except Exception as exc:
@@ -495,7 +525,15 @@ def _run(doc: Any) -> None:
 		# so the reviewer can see what the document said and why it would not save.
 		return _fail(doc, _("Could not create the draft: {0}").format(_text(exc)))
 
-	record_fields(doc, {"created_doc": created, "status": STATUS_NEEDS_REVIEW})
+	# And again before the row is published for review, because the insert is itself
+	# a window. Whatever these find, the draft is not deleted: removing a document
+	# is a decision for a person, so it is named on the row instead and the row says
+	# why it is not waiting for review.
+	if not runtime_enabled():
+		return _fail(doc, KILL_SWITCH_MESSAGE, created=created)
+	if not _claim(doc, (STATUS_RUNNING,), STATUS_NEEDS_REVIEW, {"created_doc": created}):
+		return _drop_late_result(doc, created=created)
+
 	publish_extraction(
 		doc,
 		status=STATUS_NEEDS_REVIEW,
@@ -672,9 +710,65 @@ def _apply_site_defaults(doc: Any) -> None:
 			doc.set(df.fieldname, default)
 
 
-def _fail(doc: Any, message: str) -> None:
-	record_fields(doc, {"status": STATUS_FAILED, "error": (message or "")[:ERROR_CHARS]})
-	publish_extraction(doc, status=STATUS_FAILED, error=(message or "")[:ERROR_CHARS])
+def _fail(doc: Any, message: str, created: str | None = None) -> None:
+	"""Record a failure — unless a person has already closed the row themselves.
+
+	A failure is still the job's result, and the job's result never outranks a
+	decision. So this goes through the same guarded transition as every other
+	status write, and a Discarded row records the dropped failure instead.
+	"""
+	message = (message or "")[:ERROR_CHARS]
+	fields = {"error": message}
+	if created:
+		fields["created_doc"] = created
+	if not _claim(doc, (STATUS_PENDING, STATUS_RUNNING), STATUS_FAILED, fields):
+		return _drop_late_result(doc, created=created)
+	publish_extraction(doc, status=STATUS_FAILED, error=message)
+
+
+def _claim(doc: Any, allowed: tuple[str, ...], status: str, fields: dict | None = None) -> bool:
+	"""Move the row to `status`, but only from one of `allowed`. Says whether it moved.
+
+	This is the whole state machine. Every status write in the job goes through it,
+	so a transition is conditional on where the row actually is and running it twice
+	does nothing the second time.
+
+	The read has to be `for_update`. A background job holds one transaction from
+	start to end, and the database shows that transaction the row as it looked at
+	its first read — a discard another connection committed since is invisible to
+	an ordinary select however often it is asked. A locking read is the one read
+	that sees the current row, and it holds the row until this job commits, so the
+	decision it makes cannot go stale between the check and the write.
+	"""
+	if stored_status(doc) not in allowed:
+		return False
+	record_fields(doc, {**(fields or {}), "status": status})
+	doc.status = status
+	return True
+
+
+def stored_status(doc: Any) -> str | None:
+	"""The row's status as the database holds it now, locked for this transaction."""
+	return frappe.db.get_value(EXTRACTION, doc.name, "status", for_update=True)
+
+
+def _drop_late_result(doc: Any, created: str | None = None) -> None:
+	"""Record that a job finished after its row was closed, and change nothing else.
+
+	The status is not touched: that is the point. What is written is why the row
+	says nothing about the reading that was still running when it was closed — and
+	the name of the draft, if one had already been inserted, so a document nothing
+	points at does not simply exist.
+	"""
+	status = stored_status(doc) or STATUS_DISCARDED
+	note = LATE_RESULT.format(status)
+	fields: dict[str, Any] = {}
+	if created:
+		note += LATE_DRAFT.format(created)
+		fields["created_doc"] = created
+	fields["error"] = note[:ERROR_CHARS]
+	frappe.logger("frappe_agents").info(f"extraction {doc.name} is {status}; late result dropped")
+	record_fields(doc, fields)
 
 
 def record_fields(doc: Any, values: dict) -> None:
