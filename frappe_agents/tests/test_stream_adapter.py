@@ -16,6 +16,7 @@ handed, on what the adapter made of what it yielded, and on when it was closed.
 import asyncio
 import json
 import threading
+import time
 from unittest.mock import patch
 
 from frappe_agents.harness.events import AgentEndEvent
@@ -49,10 +50,14 @@ from frappe_agents.runner.providers import (
 	_openai_messages,
 	parse_anthropic_stream,
 )
+from frappe_agents.runner.run import RunCancellation
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tests.fixtures import PROFILE, AgentTestCase
 
 SYSTEM = "You are an assistant working inside a Frappe site."
+# How long a blocked read is given before the test calls it hung. The provider's
+# own idle timeout is sixty seconds, which is the number this proves it is not.
+BLOCKED_DEADLINE = 10
 SIGNATURE = "ErUBCkYIBBgCIkDf9k2Lm+verbatim+or+the+turn+is+rejected"
 
 SEARCH_SCHEMA = {
@@ -226,6 +231,42 @@ class Stream:
 
 	def close(self) -> None:
 		self.closed = True
+
+
+class BlockedStream:
+	"""A provider stream stuck in its read, and the socket it is stuck on.
+
+	`__next__` waits the way `iter_content` waits, and closing the response is
+	what ends the wait — with the error a read off a closed socket raises. The
+	deadline is a backstop so a stream nobody releases fails the test instead of
+	hanging it.
+	"""
+
+	def __init__(self) -> None:
+		self.reading = threading.Event()
+		self.wire = threading.Event()
+		self.response_closed = False
+		self.closed = False
+		self.delivered = 0
+
+	def __iter__(self):
+		return self
+
+	def __next__(self) -> dict:
+		self.reading.set()
+		self.wire.wait(BLOCKED_DEADLINE)
+		if self.response_closed:
+			raise ProviderError("Model stream from http://localhost:1 broke.")
+		self.delivered += 1
+		return opened()
+
+	def close_response(self) -> None:
+		self.response_closed = True
+		self.wire.set()
+
+	def close(self) -> None:
+		self.closed = True
+		self.wire.set()
 
 
 class Cancelled:
@@ -523,6 +564,57 @@ class TestStreamAdapter(AgentTestCase):
 		self.ask(text_stream())
 
 		self.assertTrue(self.streams[0].closed)
+
+	def test_cancelled_blocked_stream_releases_provider_resources(self):
+		"""The cancel arrives while the worker thread is inside the read.
+
+		Between chunks a cancel is noticed by the check at the top of the loop.
+		This one cannot be: the thread is sitting in `next()` on a socket that
+		will say nothing until the provider does or the idle timeout fires, a
+		minute later. So the run's token closes the response under it, and what
+		this asserts is that the read ends on that rather than on the timeout —
+		the socket closed, the thread back, and nothing kept from after the stop.
+		"""
+		provider = ModelProfileProvider(PROFILE)
+		stream = BlockedStream()
+		cancellation = RunCancellation()
+
+		async def drive():
+			events = []
+
+			async def collect():
+				async for event in provider.stream_response(
+					model=PROFILE,
+					system=SYSTEM,
+					messages=[UserMessage(content="How many?")],
+					tools=[SEARCH_TOOL],
+					signal=cancellation,
+				):
+					events.append(event)
+
+			turn = asyncio.ensure_future(collect())
+			# Wait for the read to be blocked, then stop the run from here — the
+			# event loop is free while the worker thread waits, which is where a
+			# kill switch or a user's Stop arrives from.
+			await asyncio.to_thread(stream.reading.wait, BLOCKED_DEADLINE)
+			cancellation.cancel("The run was cancelled.")
+			await asyncio.wait_for(turn, timeout=BLOCKED_DEADLINE)
+			return events
+
+		with patch("frappe_agents.runner.stream_adapter.call_model_stream", return_value=stream):
+			started = time.monotonic()
+			events = asyncio.run(drive())
+		elapsed = time.monotonic() - started
+
+		self.assertTrue(stream.response_closed, "the response was never closed")
+		self.assertTrue(stream.closed, "the stream itself was never let go of")
+		self.assertLess(elapsed, BLOCKED_DEADLINE)
+		# The worker came back with nothing: the read ended on the closed socket.
+		self.assertEqual(stream.delivered, 0)
+		self.assertIsInstance(events[-1], AssistantErrorEvent)
+		self.assertEqual(events[-1].reason, "aborted")
+		self.assertEqual(events[-1].error.content, [])
+		self.assertEqual([event.type for event in events], ["start", "error"])
 
 	# --- what goes out -------------------------------------------------------
 
