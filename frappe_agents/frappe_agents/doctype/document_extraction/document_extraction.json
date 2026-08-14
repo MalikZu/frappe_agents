@@ -11,6 +11,7 @@
   "source_file",
   "target_doctype",
   "status",
+  "agent_run",
   "model_profile",
   "parser_engine",
   "extracted_json",
@@ -51,6 +52,15 @@
    "in_standard_filter": 1,
    "label": "Status",
    "options": "Pending\nRunning\nNeeds Review\nAccepted\nDiscarded\nFailed"
+  },
+  {
+   "description": "The run that asked for this extraction, when an agent did. Stamped once, by the tool call; empty when a person started it from a form.",
+   "fieldname": "agent_run",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Agent Run",
+   "options": "Agent Run",
+   "read_only": 1
   },
   {
    "fieldname": "model_profile",
@@ -140,7 +150,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 12:40:00.000000",
+ "modified": "2026-08-14 09:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Document Extraction",
