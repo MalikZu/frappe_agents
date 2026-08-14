@@ -226,7 +226,7 @@ const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel"];
 const BUFFER_EVENTS = 2000;
 const BUFFER_CONVERSATIONS = 20;
 
-// How far from the bottom the log may be scrolled and still follow new text.
+// How far from the bottom the log may be scrolled and still follow what arrives.
 const FOLLOW_SLACK = 120;
 
 // Two chats can be mounted at once — the page and a form panel — so the ids the
@@ -1356,14 +1356,13 @@ frappe_agents.ChatUI = class ChatUI {
 		if (data.conversation && this.conversation && data.conversation !== this.conversation) return;
 		if (!data.conversation && !this.pending[data.run]) return;
 
+		// Text arrives several times a second, and a tool line, a proposal or an
+		// error arrives with no warning at all. Chasing any of them is right when
+		// the person is at the bottom of the log and wrong when they are reading
+		// something further up.
+		const following = this.at_bottom();
 		this.apply_run_update(data);
-		// Text arrives several times a second. Chasing it is right when the person
-		// is at the bottom of the log and wrong when they are reading further up.
-		if (data.type === "message_update") {
-			this.follow();
-		} else {
-			this.scroll_to_bottom();
-		}
+		if (following) this.scroll_to_bottom();
 	}
 
 	/** Draw one run event. Replaying the buffer comes through here too. */
@@ -1752,8 +1751,9 @@ frappe_agents.ChatUI = class ChatUI {
 			return;
 		}
 
+		const following = this.at_bottom();
 		this.render_extraction_update(name, data);
-		this.scroll_to_bottom();
+		if (following) this.scroll_to_bottom();
 	}
 
 	/**
@@ -1906,15 +1906,17 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	/**
-	 * Keep up with text as it is written, unless the person has scrolled away.
-	 * Dragging the log back down under someone reading what was said earlier is
-	 * the wrong answer to a message arriving.
+	 * Whether the log is near enough the bottom to keep following what arrives.
+	 * Dragging it back down under someone reading what was said earlier is the
+	 * wrong answer to a message arriving.
+	 *
+	 * Asked before the new content lands, never after: afterwards the log is
+	 * already taller by the height of the thing that arrived, and anything
+	 * taller than the slack would read as a person who had scrolled up.
 	 */
-	follow() {
-		const log = this.$log[0];
-		if (!log) return;
-		if (log.scrollHeight - log.scrollTop - log.clientHeight <= FOLLOW_SLACK) {
-			this.scroll_to_bottom();
-		}
+	at_bottom() {
+		const log = this.$log && this.$log[0];
+		if (!log) return false;
+		return log.scrollHeight - log.scrollTop - log.clientHeight <= FOLLOW_SLACK;
 	}
 };
