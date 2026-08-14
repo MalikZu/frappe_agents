@@ -33,6 +33,7 @@ from frappe_agents.extraction.schema import build_extraction_schema
 from frappe_agents.model_profiles import check_profile, profile_choices
 from frappe_agents.tools.base import AUTONOMY_CAPABILITIES, runtime_enabled
 from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
+from frappe_agents.tools.registry import agent_tool_order
 
 MAX_MESSAGE_CHARS = 20_000
 TITLE_CHARS = 140
@@ -99,14 +100,15 @@ def list_agents() -> list[dict]:
 def _tool_summaries(agent: Any) -> list[dict]:
 	"""The tools this agent can actually call, for the read-only tools popover.
 
-	Filtered the way the executor filters: a disabled tool, or one whose
-	capability is outside the agent's autonomy, is refused at call time. Listing
-	it here would promise the user something that never happens.
+	Filtered the way the executor filters: the access rules decide which generic
+	tools exist at all, and a disabled tool or one whose capability is outside the
+	agent's autonomy is refused at call time. Listing either here would promise
+	the user something that never happens.
 	"""
 	capabilities = AUTONOMY_CAPABILITIES.get(agent.autonomy, set())
 	summaries = []
-	for row in agent.get("tools") or []:
-		tool = _tool(row.tool)
+	for name in agent_tool_order(agent):
+		tool = _tool(name)
 		if tool is None or not cint(tool.enabled) or tool.capability not in capabilities:
 			continue
 		summaries.append(
