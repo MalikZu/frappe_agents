@@ -78,6 +78,9 @@ const STYLES = `
 	.agent-chat-copy:focus-visible,
 	.agent-chat-older:focus-visible,
 	.agent-chat-rich code.is-copyable:focus-visible,
+	/* The one anchor this file does not build by hand — a link the agent wrote
+	   into its answer — and the one it reaches for most: a cited document. */
+	.agent-chat-rich a:focus-visible,
 	.agent-chat-think-head:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
 	/* Hover and open states arrive rather than snap. Colour and a caret's own
 	   rotation only, so nothing in this list moves anything else on the screen.
