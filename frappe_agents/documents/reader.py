@@ -65,6 +65,10 @@ MAX_CELL_CHARS = 500
 # for a thousand pages of work that the character cap will throw away anyway.
 MAX_UNITS = 100
 
+# The blank line between two units, counted against the cap like everything else.
+SEPARATOR = "\n\n"
+SEPARATOR_CHARS = len(SEPARATOR)
+
 # Below this, a PDF's "text layer" is the stray glyph a scanner leaves behind and
 # the document has to be looked at instead. Kept small on purpose: sending a page
 # that really does carry its own text to a model costs money and needs a profile
@@ -379,23 +383,30 @@ def _assemble(units: Any, wanted: list[int] | None, unit: str, lane: str, **extr
 	budget = MAX_CHARS
 	cut = False
 	for number in numbers:
-		label, text = get(number)
 		if budget <= 0:
 			break
-		if len(text) > budget:
+		label, text = get(number)
+		# The cap is on what comes back, so what comes back is what it counts: the
+		# unit's own heading and the blank line before it, not only its text. A
+		# document of a thousand near-empty pages is otherwise unbounded — every
+		# page costs nothing, so every page is read and every heading is returned.
+		piece = f"[{label}]\n{text}" if total > 1 else text
+		cost = len(piece) + (SEPARATOR_CHARS if pieces else 0)
+		if cost > budget:
 			if read:
 				# Stop on a whole unit rather than half of one. The next call can
 				# start here, and half a page read twice is worse than not read.
 				break
-			text = text[:budget]
+			piece = piece[:budget]
+			cost = len(piece)
 			cut = True
-		pieces.append(f"[{label}]\n{text}" if total > 1 else text)
+		pieces.append(piece)
 		read.append(number)
-		budget -= len(text)
+		budget -= cost
 
 	truncated = cut or len(read) < len(numbers) or (not wanted and len(read) < total)
 	return dict(
-		text="\n\n".join(pieces).strip(),
+		text=SEPARATOR.join(pieces).strip(),
 		lane=lane,
 		unit=unit,
 		read=read,
