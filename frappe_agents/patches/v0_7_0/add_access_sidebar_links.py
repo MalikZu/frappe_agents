@@ -89,8 +89,26 @@ def _add_links(name: str) -> None:
 	for idx, row in enumerate(doc.items, start=1):
 		row.idx = idx
 
+	# Link validation off, deliberately. Saving re-validates every row, including
+	# the ones the desk seeded — and the desk's own "Home" row stores a workspace
+	# *title* where a name belongs, which fails. Refusing an upgrade over a row
+	# this patch did not write, and is not here to fix, is the wrong trade.
 	doc.flags.ignore_permissions = True
-	doc.save(ignore_permissions=True)
+	doc.flags.ignore_links = True
+
+	# Same trade, one step further out: a sidebar link is cosmetic and an upgrade
+	# is not, so anything else this save dislikes rolls back to the savepoint and
+	# leaves the sidebar exactly as it was. Only this save is undone.
+	save_point = "frappe_agents_sidebar_links"
+	frappe.db.savepoint(save_point)
+	try:
+		doc.save(ignore_permissions=True)
+	except Exception as exc:
+		frappe.db.rollback(save_point=save_point)
+		print(f"frappe_agents: could not add sidebar links to {name} — {exc}")
+		return
+
+	frappe.db.release_savepoint(save_point)
 	print(f"frappe_agents: added {len(missing)} sidebar link(s) to {name}")
 
 
