@@ -212,6 +212,17 @@ DRAFT_TOOL_NAMES = (
 # autonomy test needs a Suggest agent that holds create_draft to prove it.
 TOOL_NAMES = READ_TOOL_NAMES + DRAFT_TOOL_NAMES
 
+# Tools no fixture agent selects, because nothing selects them any more: the
+# matrix decides who is offered them. They still have to exist as Agent Tool
+# rows before a test can call one, so the registry sweep below watches for them.
+MATRIX_TOOL_NAMES = (
+	"find_doctypes",
+	"list_site_doctypes",
+	"list_site_reports",
+	"describe_site_doctype",
+)
+REGISTERED_TOOL_NAMES = TOOL_NAMES + MATRIX_TOOL_NAMES
+
 # Rights added to FA Test Order for the approval cast. The doctype already grants
 # System Manager everything; these two roles exist so that "may draft" and "may
 # submit" can be held by different people.
@@ -1729,7 +1740,7 @@ def _ensure_user_permission() -> None:
 def _ensure_tools() -> None:
 	from frappe_agents.tools.registry import sync_tools
 
-	if all(frappe.db.exists("Agent Tool", name) for name in TOOL_NAMES):
+	if all(frappe.db.exists("Agent Tool", name) for name in REGISTERED_TOOL_NAMES):
 		return
 	sync_tools()
 
