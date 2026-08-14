@@ -10,6 +10,7 @@ read. Neither returns file content, and neither returns a raw docstatus.
 
 from typing import Any
 
+from frappe_agents.access.grants import VERB_READ
 from frappe_agents.context.manifest import build_manifest
 from frappe_agents.context.slices import (
 	MAX_CHILD_ROWS,
@@ -17,20 +18,24 @@ from frappe_agents.context.slices import (
 	SLICES,
 	get_slice,
 )
-from frappe_agents.tools.base import CAPABILITY_READ
+from frappe_agents.tools.base import CAPABILITY_READ, require_grant
 
 SLICE_PARAMS = ("table", "direction", "limit")
 
 
 def get_document_context(payload: dict) -> dict:
 	"""What exists around one document: core fields and counts, no content."""
-	return build_manifest(_arg(payload, "doctype"), _arg(payload, "name"))
+	doctype = _arg(payload, "doctype")
+	require_grant(doctype, VERB_READ)
+	return build_manifest(doctype, _arg(payload, "name"))
 
 
 def get_document_slice(payload: dict) -> dict:
 	"""One named slice of one document."""
+	doctype = _arg(payload, "doctype")
+	require_grant(doctype, VERB_READ)
 	params = {key: payload[key] for key in SLICE_PARAMS if payload.get(key) is not None}
-	return get_slice(_arg(payload, "doctype"), _arg(payload, "name"), _arg(payload, "slice"), **params)
+	return get_slice(doctype, _arg(payload, "name"), _arg(payload, "slice"), **params)
 
 
 def _arg(payload: dict, key: str) -> str:
