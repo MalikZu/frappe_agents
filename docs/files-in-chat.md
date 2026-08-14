@@ -63,9 +63,12 @@ the agent is told which pages it read and asks for the next ones — so "what do
 page four say" works, and so does "keep going". Pages, sheets and slides are all
 asked for the same way, so you can name one of any of them.
 
-Two things stop a read: a PDF with a password on it, which nothing here can
-open, and a file you could not open yourself. An agent reads a file with your
-permissions, never around them.
+Three things stop a read: a PDF with a password on it, which nothing here can
+open; a file you could not open yourself — an agent reads a file with your
+permissions, never around them; and a document past what one reading may open.
+That last one is a size, and the answer says the number: more pages than the
+page limit in Agent Settings, more sheets than a workbook may have, or an
+office file that unpacks to more than a reading can hold.
 
 Reading a document never changes anything. Asking for records off the back of
 what was read is a second ask, and it is below. Lifting an invoice's values into
