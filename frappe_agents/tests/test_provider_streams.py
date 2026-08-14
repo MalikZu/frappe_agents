@@ -384,6 +384,39 @@ class TestAnthropicStream(AgentTestCase):
 				)
 				self.assertEqual(chunks[-1], {"type": "message_end", "reason": "stop"})
 
+	def test_a_chunk_cut_through_a_character_loses_nothing(self):
+		"""The same cruelty as the other format: a character split across packets."""
+		answer = "Café ✅ مرحبا"
+		body = sse(
+			named_frame(
+				"content_block_start",
+				{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+			),
+			named_frame(
+				"content_block_delta",
+				{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": answer}},
+			),
+			named_frame("content_block_stop", {"type": "content_block_stop", "index": 0}),
+			named_frame("message_stop", {"type": "message_stop"}),
+		)
+
+		for position in range(1, len(body)):
+			chunks = list(parse_anthropic_stream(cut_at(body, position)))
+			self.assertEqual(joined(chunks, "text_delta"), answer)
+
+	def test_crlf_and_bare_cr_line_endings_parse(self):
+		for newline in ("\r\n", "\r", "\n"):
+			with self.subTest(repr(newline)):
+				body = self.text_stream().decode().replace("\n", newline).encode()
+				for stream in ([body], one_byte_at_a_time(body)):
+					chunks = list(parse_anthropic_stream(stream))
+					self.assertEqual(joined(chunks, "text_delta"), "Three are open.")
+					self.assertEqual(
+						of_type(chunks, "usage")[-1],
+						{"type": "usage", "tokens_in": 120, "tokens_out": 42},
+					)
+					self.assertEqual(chunks[-1], {"type": "message_end", "reason": "stop"})
+
 	def test_ping_frames_are_ignored(self):
 		body = sse(
 			named_frame("ping", {"type": "ping"}),

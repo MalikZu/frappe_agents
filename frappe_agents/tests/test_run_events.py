@@ -281,6 +281,25 @@ class TestRunEvents(AgentTestCase):
 		started = [event for event in replayed if event["type"] == "tool_execution_start"]
 		self.assertEqual(started[0]["toolName"], "search_documents")
 
+	def test_the_log_replays_in_the_order_the_run_happened(self):
+		"""A reopened conversation redraws the whole run by walking the log.
+
+		Log order is draw order, so the log has to hold everything the browser
+		was told live, in the same places: the tool line between the turn that
+		asked for it and the answer that came after it.
+		"""
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		published = self.published(run.name, [SEARCH, STREAMED])
+
+		live = [event["event"]["type"] for event in published if event["type"] == "harness_event"]
+		stored = event_types(run_events(run.name))
+		self.assertEqual(stored, live)
+
+		ended = [position for position, name in enumerate(stored) if name == "message_end"]
+		self.assertLess(ended[0], stored.index("tool_execution_start"))
+		self.assertLess(stored.index("tool_execution_end"), ended[-1])
+
 	def test_a_proposal_can_be_redrawn_from_the_log(self):
 		"""The reload the log exists for.
 
