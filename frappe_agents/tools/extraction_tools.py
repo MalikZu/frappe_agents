@@ -19,19 +19,21 @@ from typing import Any
 
 import frappe
 
-from frappe_agents.extraction.pipeline import queue_extraction, readable_file
+from frappe_agents.extraction.pipeline import queue_extraction, resolve_file
 from frappe_agents.tools.base import CAPABILITY_DRAFT, ToolDenied, current_run
 
 
 def extract_document(payload: dict) -> dict:
 	"""Queue an extraction of one attached file into one doctype."""
-	file_name = _require_str(payload, "file")
+	file_ref = _require_str(payload, "file")
 	target_doctype = _require_str(payload, "target_doctype")
 
-	file_doc = readable_file(file_name)
+	# A File name, a link to a file on this site, or the filename itself — all three
+	# end as one File row, checked for permission the way a File name always was.
+	file_doc = resolve_file(file_ref)
 	_require_provenance(file_doc)
 
-	name = queue_extraction(file_name, target_doctype, model_profile=_run_profile())
+	name = queue_extraction(file_doc.name, target_doctype, model_profile=_run_profile())
 
 	return {
 		"extraction": name,
@@ -47,6 +49,11 @@ def extract_document(payload: dict) -> dict:
 
 
 def _require_provenance(file_doc: Any) -> None:
+	"""The file has to hang off a record, and one this user may read.
+
+	An Agent Conversation is an acceptable anchor like any other record: it says who
+	supplied the file and in what context, which is what a reviewer needs to check.
+	"""
 	if not file_doc.attached_to_doctype or not file_doc.attached_to_name:
 		raise ToolDenied(
 			f"{file_doc.file_name or file_doc.name} is not attached to any record. Attach it to "
@@ -84,7 +91,7 @@ TOOLS = [
 		"capability": CAPABILITY_DRAFT,
 		"description": (
 			"Read an attached PDF or image and turn it into a draft document for a person "
-			"to review. Give the File name and the doctype the draft should be. The file "
+			"to review. Give the file and the doctype the draft should be. The file "
 			"must already be attached to a record you can read. This returns straight away "
 			"with an extraction name: the reading happens in the background, you never see "
 			"the values, and fields the site marks sensitive — bank and payment details — "
@@ -95,7 +102,11 @@ TOOLS = [
 			"properties": {
 				"file": {
 					"type": "string",
-					"description": "Name of the File record to read, e.g. the value of a document's attachment.",
+					"description": (
+						"The file to read: a File record name, a link to it on this site "
+						"(/private/files/CV.pdf), or its filename when only one file has it. "
+						"Files elsewhere on the internet cannot be read."
+					),
 				},
 				"target_doctype": {
 					"type": "string",
