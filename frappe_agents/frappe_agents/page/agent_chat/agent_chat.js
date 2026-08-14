@@ -12,7 +12,14 @@ const RAIL_COLLAPSED_KEY = "frappe_agents:rail_collapsed";
 const RAIL_DRAWER_QUERY = "(max-width: 720px)";
 
 const RAIL_STYLES = `
-	.agent-chat-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); }
+	.agent-chat-layout {
+		display: grid; grid-template-columns: 250px minmax(0, 1fr);
+		/* The same budget the chat widget keeps, restated: the rail is a sibling
+		   of that widget, not a child, so it cannot inherit the values. */
+		--agent-chat-quick: 120ms;
+		--agent-chat-enter: 140ms;
+		--agent-chat-ease: cubic-bezier(0.25, 1, 0.5, 1);
+	}
 	.agent-chat-layout.is-collapsed { grid-template-columns: 40px minmax(0, 1fr); }
 	.agent-chat-rail {
 		display: flex; flex-direction: column; gap: 6px; padding: 6px 0; padding-inline-end: 8px;
@@ -36,6 +43,10 @@ const RAIL_STYLES = `
 		/* Carried by every row, so selecting one costs no space and the rows
 		   under it do not shift. */
 		border: 1px solid transparent;
+		/* Colour only: the row keeps its box, so hovering down a long list
+		   never reflows the list. */
+		transition: background-color var(--agent-chat-quick) var(--agent-chat-ease),
+			border-color var(--agent-chat-quick) var(--agent-chat-ease);
 	}
 	.agent-chat-convo:hover { background: var(--highlight-color); }
 	.agent-chat-convo.is-active { background: var(--card-bg, var(--control-bg)); border-color: var(--border-color); }
@@ -48,6 +59,7 @@ const RAIL_STYLES = `
 	.agent-chat-rename {
 		flex: none; opacity: 0; font: inherit; font-size: var(--text-xs); color: var(--text-muted);
 		border: none; background: none; padding: 2px 4px; cursor: pointer;
+		transition: opacity var(--agent-chat-quick) var(--agent-chat-ease);
 	}
 	.agent-chat-convo-row:hover .agent-chat-rename,
 	.agent-chat-rename:focus { opacity: 1; }
@@ -82,6 +94,16 @@ const RAIL_STYLES = `
 		.agent-chat-layout.is-drawer .agent-chat-new { display: flex; }
 		.agent-chat-layout.is-drawer .agent-chat-rail-list { display: block; }
 		.agent-chat-pane { padding-inline-start: 0; }
+	}
+	/* The rail is its own sheet, so it needs its own answer to the same request.
+	   Scoped rather than written as *: this sheet is injected into the whole
+	   desk and the rest of the desk is not ours to quieten. */
+	@media (prefers-reduced-motion: reduce) {
+		.agent-chat-layout, .agent-chat-layout * {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
 	}
 `;
 
