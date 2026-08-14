@@ -187,6 +187,9 @@ OWNED_AGENT = "FA Owned Agent"
 # be rewritten in each `setUp`. The rollback after each test takes it away again.
 MATRIX_AGENT = "FA Matrix Agent"
 ACCESS_PROFILE = "FA Test Access Profile"
+# The pre-matrix shape: a tool selection and no rules. Built per test too, because
+# what the migration does to it depends on what it selected.
+LEGACY_AGENT = "FA Legacy Agent"
 
 READ_TOOL_NAMES = (
 	"search_documents",
@@ -421,6 +424,44 @@ def make_matrix_agent(
 	agent.set("access_rules", [dict(row) for row in rules])
 	agent.set("access_profiles", [{"access_profile": profile} for profile in profiles])
 	agent.set("tools", [{"tool": tool} for tool in tools])
+	agent.flags.ignore_permissions = True
+	agent.save(ignore_permissions=True)
+	frappe.clear_document_cache("Agent", agent.name)
+	return agent
+
+
+def make_legacy_agent(
+	tools: Any = TOOL_NAMES,
+	name: str = LEGACY_AGENT,
+	autonomy: str = "Draft",
+	form_doctypes: Any = (),
+	skills: Any = (),
+) -> Any:
+	"""An agent shaped the way agents were before the matrix: a tool selection.
+
+	No rule rows at all, which is what puts it on the legacy shim, and its only
+	statement about documents is the form scope and the skills it holds — exactly
+	what the migration patch has to read a doctype set out of.
+	"""
+	agent = frappe.get_doc("Agent", name) if frappe.db.exists("Agent", name) else frappe.new_doc("Agent")
+	agent.update(
+		{
+			"agent_name": name,
+			"enabled": 1,
+			"run_as": "Session User",
+			"model_profile": PROFILE,
+			"autonomy": autonomy,
+			"instructions": "Answer from the documents the user may see.",
+			"max_steps": 5,
+			"may_read_files": 0,
+			"show_in_forms": 1 if form_doctypes else 0,
+		}
+	)
+	agent.set("access_rules", [])
+	agent.set("access_profiles", [])
+	agent.set("tools", [{"tool": tool} for tool in tools])
+	agent.set("form_doctypes", [{"document_type": doctype} for doctype in form_doctypes])
+	agent.set("skills", [{"skill": skill} for skill in skills])
 	agent.flags.ignore_permissions = True
 	agent.save(ignore_permissions=True)
 	frappe.clear_document_cache("Agent", agent.name)
