@@ -50,6 +50,8 @@ const STYLES = `
 	.agent-chat-file-drop:focus-visible,
 	.agent-chat-pop-opt:focus-visible,
 	.agent-chat-tool-head:focus-visible,
+	.agent-chat-copy:focus-visible,
+	.agent-chat-rich code.is-copyable:focus-visible,
 	.agent-chat-think-head:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
 	/* Hover and open states arrive rather than snap. Colour and a caret's own
 	   rotation only, so nothing in this list moves anything else on the screen.
@@ -142,8 +144,31 @@ const STYLES = `
 	.agent-chat-row:not(.is-user) .agent-chat-bubble { max-width: min(78%, 68ch); }
 	.agent-chat-row.is-user .agent-chat-bubble { background: var(--bg-light-gray, var(--control-bg)); }
 	.agent-chat-row.is-error .agent-chat-bubble { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
-	/* Rendered markdown: block layout does the spacing, so pre-wrap must not. */
-	.agent-chat-bubble.agent-chat-rich { white-space: normal; }
+	/* Rendered markdown: block layout does the spacing, so pre-wrap must not.
+	   Positioned, because the copy control hangs in its corner. */
+	.agent-chat-bubble.agent-chat-rich { white-space: normal; position: relative; }
+	/* Out of the way until it is wanted, and never out of the tab order: it fades
+	   rather than disappears, so a keyboard reaches it and focus brings it back. */
+	.agent-chat-copy {
+		position: absolute; inset-block-start: 4px; inset-inline-end: 4px;
+		display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0;
+		border: 1px solid var(--border-color); border-radius: var(--border-radius-md, 10px);
+		background: var(--card-bg, var(--control-bg)); color: var(--text-muted);
+		opacity: 0; cursor: pointer;
+		transition: opacity var(--agent-chat-quick) var(--agent-chat-ease),
+			color var(--agent-chat-quick) var(--agent-chat-ease);
+	}
+	.agent-chat-rich:hover .agent-chat-copy,
+	.agent-chat-copy:focus { opacity: 1; }
+	.agent-chat-copy:hover { color: var(--text-color); }
+	/* An id or a snippet the agent wrote is something a person retypes by hand and
+	   gets wrong. Anything set in code is one click instead. */
+	.agent-chat-rich code.is-copyable { cursor: pointer; }
+	.agent-chat-rich code.is-copyable:hover { background: var(--highlight-color); }
+	/* The confirmation: it went somewhere. Short, and the live region says it too. */
+	.agent-chat-copy.is-copied, .agent-chat-rich code.is-copied {
+		background: var(--bg-green, var(--control-bg)); color: var(--text-on-green, var(--text-color));
+	}
 	.agent-chat-rich > :first-child { margin-block-start: 0; }
 	.agent-chat-rich > :last-child { margin-block-end: 0; }
 	.agent-chat-rich h1, .agent-chat-rich h2, .agent-chat-rich h3,
@@ -419,6 +444,17 @@ function clip_icon() {
 		`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
 			stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 			<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+		</svg>`
+	);
+}
+
+/** Two sheets, one behind the other: the copy mark on a message's copy button. */
+function copy_icon() {
+	return $(
+		`<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+			stroke-width="1.5" stroke-linejoin="round">
+			<rect x="5.5" y="5.5" width="9" height="9" rx="1.5"/>
+			<path d="M10.5 5.5v-3a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h3"/>
 		</svg>`
 	);
 }
@@ -1107,6 +1143,50 @@ frappe_agents.ChatUI = class ChatUI {
 		if (this.uploads.some((file) => file.name === file_doc.name)) return;
 		this.uploads.push({ name: file_doc.name, file_name: file_doc.file_name || file_doc.name });
 		this.render_files();
+	}
+
+	/**
+	 * Make one element put a piece of text on the clipboard.
+	 *
+	 * A real <button> gets its keyboard behaviour from being a button. Anything
+	 * that has to stay what it is — a code span inside rendered prose — is given
+	 * the same treatment the popover rows get: role, tab stop, Enter and Space.
+	 */
+	copies($el, text, label) {
+		$el.attr({ title: __("Click to copy"), "aria-label": label || __("Click to copy") });
+		const copy = () => this.copy_text($el, text);
+		if ($el.is("button")) $el.on("click", copy);
+		else this.clickable($el, copy);
+		return $el;
+	}
+
+	/**
+	 * Copy, then say so twice: on the control, and once in the live region.
+	 *
+	 * The clipboard is a promise that can be refused — a page without focus, a
+	 * browser without permission — so a failure is said rather than swallowed.
+	 */
+	copy_text($el, text) {
+		if (!text) return;
+		const clipboard = navigator.clipboard;
+		if (!clipboard || !clipboard.writeText) {
+			this.announce(__("Could not copy."));
+			return;
+		}
+		clipboard.writeText(text).then(
+			() => {
+				this.flash_copied($el);
+				this.announce(__("Copied"));
+			},
+			() => this.announce(__("Could not copy."))
+		);
+	}
+
+	/** The control says it worked, briefly, for whoever is looking at it. */
+	flash_copied($el) {
+		if (!$el || !$el.length) return;
+		$el.addClass("is-copied");
+		setTimeout(() => $el.removeClass("is-copied"), 900);
 	}
 
 	/** One chip per file waiting to be named in the next message. */
@@ -2069,6 +2149,38 @@ frappe_agents.ChatUI = class ChatUI {
 			}
 		});
 		$el.empty().append([...doc.body.childNodes]);
+		// The markdown the bubble was drawn from, kept on the element: the copy
+		// control hands back what the agent wrote, not what the renderer made of it.
+		$el.data("agent-chat-source", text);
+		this.make_copyable($el, text);
+	}
+
+	/**
+	 * The two things worth copying out of an answer, made copyable.
+	 *
+	 * A File id, a fieldname, a doctype — the agent sets them in code, and they
+	 * are exactly the strings a person retypes by hand and gets one character
+	 * wrong. Code blocks are left alone: they are already selectable as a block,
+	 * and a click inside one is somebody selecting part of it.
+	 *
+	 * The whole message goes on its own control in the corner, out of the way
+	 * until the bubble is hovered or the control is tabbed to.
+	 */
+	make_copyable($el, text) {
+		$el.find("code").each((index, node) => {
+			const $code = $(node);
+			if ($code.closest("pre").length) return;
+			this.copies($code.addClass("is-copyable"), $code.text(), __("Copy {0}", [$code.text()]));
+		});
+
+		if (!text) return;
+		this.copies(
+			$("<button type='button' class='agent-chat-copy'></button>")
+				.append(copy_icon())
+				.appendTo($el),
+			text,
+			__("Copy message")
+		);
 	}
 
 	add_bubble(text, cls) {
