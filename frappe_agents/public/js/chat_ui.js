@@ -5,7 +5,14 @@ frappe.provide("frappe_agents");
 const STYLE_ID = "frappe-agents-chat-styles";
 
 const STYLES = `
-	.agent-chat { display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 320px; }
+	.agent-chat {
+		display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 320px;
+		/* The whole of this screen's motion budget. Feedback is quicker than an
+		   entrance, and the curve decelerates — nothing here overshoots. */
+		--agent-chat-quick: 120ms;
+		--agent-chat-enter: 140ms;
+		--agent-chat-ease: cubic-bezier(0.25, 1, 0.5, 1);
+	}
 	.agent-chat.agent-chat-compact { height: 55vh; min-height: 260px; }
 	.agent-chat-head { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border-color); }
 	.agent-chat-title { font-weight: 600; }
@@ -44,6 +51,24 @@ const STYLES = `
 	.agent-chat-pop-opt:focus-visible,
 	.agent-chat-tool-head:focus-visible,
 	.agent-chat-think-head:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
+	/* Hover and open states arrive rather than snap. Colour and a caret's own
+	   rotation only, so nothing in this list moves anything else on the screen.
+	   The focus ring is deliberately not among them: a ring that fades in reads
+	   as lag to someone driving this from the keyboard. */
+	.agent-chat-doc,
+	.agent-chat-attach,
+	.agent-chat-chip,
+	.agent-chat-file-drop,
+	.agent-chat-tool-head,
+	.agent-chat-think-head,
+	.agent-chat-pop-opt.is-clickable {
+		transition: background-color var(--agent-chat-quick) var(--agent-chat-ease),
+			border-color var(--agent-chat-quick) var(--agent-chat-ease),
+			color var(--agent-chat-quick) var(--agent-chat-ease);
+	}
+	.agent-chat-chip-caret,
+	.agent-chat-tool-caret,
+	.agent-chat-think-caret { transition: transform var(--agent-chat-quick) var(--agent-chat-ease); }
 	.agent-chat-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
 	.agent-chat-chips { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 	.agent-chat-send { margin-inline-start: auto; }
@@ -75,9 +100,15 @@ const STYLES = `
 	}
 	.agent-chat-chip:hover { background: var(--highlight-color); }
 	.agent-chat-chip.is-static, .agent-chat-chip.is-static:hover { cursor: default; background: var(--control-bg); }
+	/* A chip whose menu is open looks open, and its caret turns to point at the
+	   menu — which opens upward, above the composer. Keyed off the same
+	   aria-expanded the menu already sets, so the look cannot drift from what a
+	   screen reader is told. */
+	.agent-chat-chip[aria-expanded="true"] { background: var(--highlight-color); border-color: var(--text-muted); }
+	.agent-chat-chip[aria-expanded="true"] .agent-chat-chip-caret { transform: rotate(180deg); }
 	.agent-chat-chip-key { color: var(--text-muted); }
 	.agent-chat-chip-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.agent-chat-chip-caret { color: var(--text-muted); font-size: var(--text-xs); }
+	.agent-chat-chip-caret { display: inline-block; color: var(--text-muted); font-size: var(--text-xs); }
 	.agent-chat-pop {
 		display: none; position: absolute; bottom: calc(100% + 6px); z-index: 10;
 		min-width: 250px; max-width: 340px; max-height: 300px; overflow-y: auto; padding: 6px;
@@ -146,7 +177,17 @@ const STYLES = `
 	.agent-chat-think.is-open .agent-chat-think-body { display: block; }
 	@keyframes agent-chat-think-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 	.agent-chat-think.is-live .agent-chat-think-label { animation: agent-chat-think-pulse 1.4s ease-in-out infinite; }
+	/* Everything this screen animates is a colour, an opacity or a small
+	   transform, so a person who has asked for less motion loses nothing: they
+	   get the same states, arrived at at once. Scoped to the widget rather than
+	   written as *, because this sheet is injected into the whole desk and the
+	   rest of the desk is not ours to quieten. */
 	@media (prefers-reduced-motion: reduce) {
+		.agent-chat, .agent-chat * {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
 		.agent-chat-think.is-live .agent-chat-think-label { animation: none; }
 	}
 	.agent-chat-status { font-size: var(--text-sm); color: var(--text-muted); margin-bottom: 10px; }
