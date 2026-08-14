@@ -14,6 +14,7 @@ retry, because a retry would repeat the side effects of every tool already calle
 """
 
 import asyncio
+import time
 from typing import Any
 
 import frappe
@@ -32,6 +33,14 @@ from frappe_agents.harness.messages import (
 	TextContent,
 	UserMessage,
 )
+from frappe_agents.harness.provider_events import (
+	TextDeltaEvent,
+	TextEndEvent,
+	TextStartEvent,
+	ThinkingDeltaEvent,
+	ThinkingEndEvent,
+	ThinkingStartEvent,
+)
 from frappe_agents.harness.tools import AgentTool, AgentToolResult
 from frappe_agents.model_profiles import check_profile
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
@@ -49,6 +58,28 @@ EVENT = "frappe_agents:run_update"
 # The loop's own events, forwarded as they happen. The three legacy event types
 # still go out beside them, unchanged, because the chat surface reads those.
 HARNESS_EVENT = "harness_event"
+# The answer as it is written. This one is published and never stored: the log
+# keeps final state, and a run's own message_end says everything it said.
+UPDATE_EVENT = "message_update"
+
+# How long, and how much, a delta may be held back. A model writes a few
+# characters at a time and a realtime frame costs the same whether it carries
+# three of them or four hundred, so they are collected and sent together. Both
+# are loose: whichever comes first wins, and a block ending flushes anyway.
+STREAM_FLUSH_MS = 150
+STREAM_FLUSH_CHARS = 400
+
+# Which streamed block events the browser is told about, and what each one is.
+# Tool calls are not in here: their arguments arrive as raw JSON fragments, and
+# the surface hears about the call itself when the loop starts executing it.
+STREAM_EVENTS = {
+	TextStartEvent: ("text", "start"),
+	TextDeltaEvent: ("text", "delta"),
+	TextEndEvent: ("text", "end"),
+	ThinkingStartEvent: ("thinking", "start"),
+	ThinkingDeltaEvent: ("thinking", "delta"),
+	ThinkingEndEvent: ("thinking", "end"),
+}
 
 FORBIDDEN_USERS = ("Administrator", "Guest")
 DEFAULT_MAX_STEPS = 10
@@ -181,6 +212,9 @@ def _execute(run: Any) -> None:
 			},
 		)
 		_save_event_log(run, events)
+		# The last thing the model wrote, even on the path where the loop threw
+		# and nothing else will flush it.
+		events.updates.flush()
 
 	if cancellation.is_cancelled():
 		return _fail(run, cancellation.reason or "The run was cancelled.", status="Cancelled")
@@ -295,6 +329,46 @@ class RunCancellation:
 		return self._cancelled
 
 
+class StreamThrottle:
+	"""Streamed deltas, coalesced into updates a browser can keep up with.
+
+	A delta is held until it is worth sending: `STREAM_FLUSH_CHARS` characters
+	have piled up, or `STREAM_FLUSH_MS` have passed since the first one was
+	held. Deltas only merge with deltas of the same kind in the same block, so
+	nothing is ever glued to text it does not belong to.
+
+	Whoever holds one must flush it before anything else goes out, or the
+	browser sees a block end before the text inside it.
+	"""
+
+	def __init__(self, publish: Any, clock: Any = time.monotonic) -> None:
+		self.publish = publish
+		self.clock = clock
+		self.kind: str | None = None
+		self.index = 0
+		self.buffer = ""
+		self.held = 0.0
+
+	def add(self, kind: str, index: int, delta: str) -> None:
+		if not delta:
+			return
+		if self.buffer and (kind, index) != (self.kind, self.index):
+			self.flush()
+		if not self.buffer:
+			self.kind, self.index, self.held = kind, index, self.clock()
+
+		self.buffer += delta
+		enough = len(self.buffer) >= STREAM_FLUSH_CHARS
+		if enough or (self.clock() - self.held) * 1000 >= STREAM_FLUSH_MS:
+			self.flush()
+
+	def flush(self) -> None:
+		if not self.buffer:
+			return
+		buffer, self.buffer = self.buffer, ""
+		self.publish(self.kind, self.index, "delta", buffer)
+
+
 class RunEvents:
 	"""Everything the loop said, on its way to the browser and onto the run row.
 
@@ -311,11 +385,17 @@ class RunEvents:
 		self.steps = 0
 		self.final_text: str | None = None
 		self.error: str | None = None
+		self.updates = StreamThrottle(self._publish_update)
 
 	def handle(self, event: Any) -> None:
 		if isinstance(event, MessageUpdateEvent):
-			# Nothing streams yet, so a partial message is neither published nor kept.
+			# A half-written message is published and never stored. The log keeps
+			# final state — the message_end after this one holds all of it.
+			self._stream(event.assistant_message_event)
 			return
+
+		# Whatever is being held back was said before this event was.
+		self.updates.flush()
 
 		if isinstance(event, TurnStartEvent):
 			# The kill switch is read here and nowhere else in the loop. A turn
@@ -346,6 +426,28 @@ class RunEvents:
 		if self.error and self.steps < max_turns:
 			return self.error
 		return f"Stopped after {self.steps} steps without a final answer."
+
+	def _stream(self, event: Any) -> None:
+		"""One streamed block event, on its way to the browser.
+
+		A delta joins whatever is being held. A block opening or closing is news
+		on its own — the thinking strip closes on one — so it flushes first and
+		then goes out immediately.
+		"""
+		streamed = STREAM_EVENTS.get(type(event))
+		if streamed is None:
+			return
+
+		kind, phase = streamed
+		if phase == "delta":
+			self.updates.add(kind, event.content_index, event.delta)
+			return
+
+		self.updates.flush()
+		self._publish_update(kind, event.content_index, phase, "")
+
+	def _publish_update(self, kind: str, index: int, phase: str, delta: str) -> None:
+		publish_event(self.run, UPDATE_EVENT, kind=kind, index=index, phase=phase, delta=delta)
 
 	def _read(self, message: AssistantMessage) -> None:
 		if message.stop_reason in FAILED_STOPS:
