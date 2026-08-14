@@ -63,7 +63,8 @@ const STYLES = `
 	}
 	.agent-chat-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.agent-chat-file-drop {
-		flex: none; border: none; background: none; padding: 0 4px; line-height: 1;
+		flex: none; min-width: 24px; min-height: 24px; display: inline-grid; place-items: center;
+		border: none; background: none; padding: 0; line-height: 1;
 		font: inherit; color: var(--text-muted); cursor: pointer;
 	}
 	.agent-chat-file-drop:hover { color: var(--text-color); }
@@ -982,8 +983,12 @@ frappe_agents.ChatUI = class ChatUI {
 				.text(file.file_name)
 				.attr("title", file.file_name)
 				.appendTo($chip);
+			// A × announces as a punctuation mark, so the file it drops is its name.
 			$("<button type='button' class='agent-chat-file-drop'>×</button>")
-				.attr("title", __("Leave this file out of the message. It stays where it was uploaded."))
+				.attr({
+					title: __("Leave this file out of the message. It stays where it was uploaded."),
+					"aria-label": __("Remove {0} from this message", [file.file_name]),
+				})
 				.on("click", () => this.drop_upload(file.name))
 				.appendTo($chip);
 		});
