@@ -30,7 +30,27 @@ class SidebarCase(AgentTestCase):
 		if not names:
 			self.skipTest("this site has no Frappe Agents sidebar to append to")
 		self.sidebar = names[0]
+		self._strip_new_links()
 		self.before = self.rows()
+
+	def _strip_new_links(self) -> None:
+		"""Put the sidebar back the way a site that never took this patch has it.
+
+		The patch has already run on the site the tests run against, so without
+		this every assertion below would be about rows that were already there.
+		Undone with the rest of the test's writes when the case rolls back.
+		"""
+		doc = frappe.get_doc(SIDEBAR_DOCTYPE, self.sidebar)
+		targets = {link[1] for link in NEW_LINKS}
+		keep = [row for row in doc.items if row.link_to not in targets]
+		if len(keep) == len(doc.items):
+			return
+
+		doc.items = keep
+		for idx, row in enumerate(doc.items, start=1):
+			row.idx = idx
+		doc.flags.ignore_links = True
+		doc.save(ignore_permissions=True)
 
 	def rows(self) -> list[tuple]:
 		doc = frappe.get_doc(SIDEBAR_DOCTYPE, self.sidebar)
