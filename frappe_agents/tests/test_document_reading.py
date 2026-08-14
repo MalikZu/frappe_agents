@@ -517,6 +517,38 @@ class TestReadingOfficeXml(ReadingTestCase):
 		self.assertIn("entities", payload["error"])
 
 
+class TestOneCallStaysInsideTheCap(ReadingTestCase):
+	"""MAX_CHARS caps the answer, so it has to count all of the answer.
+
+	Every unit costs a heading whether or not there is anything under it, and a
+	document of a thousand near-empty pages is exactly the document that turns
+	"cap the text" into no cap at all. It is also cheap to make: a deck of
+	thousands of blank slides is a small file.
+	"""
+
+	def test_a_page_that_says_nothing_still_costs_its_heading(self):
+		"""Straight at the assembler: the lanes differ, this arithmetic does not."""
+		read = reader._assemble(
+			(5000, lambda number: (f"{reader.UNIT_PAGE} {number}", "")),
+			None,
+			reader.UNIT_PAGE,
+			reader.LANE_TEXT_LAYER,
+		)
+
+		self.assertLessEqual(len(read["text"]), reader.MAX_CHARS)
+		self.assertTrue(read["truncated"])
+		self.assertLess(len(read["read"]), 5000)
+
+	def test_a_deck_of_near_empty_slides_stops_at_the_cap(self):
+		result = self.result("many.pptx", pptx_bytes([["s"]] * 2000))
+
+		self.assertEqual(result["total"], 2000)
+		self.assertLessEqual(len(self.body(result)), reader.MAX_CHARS)
+		self.assertTrue(result["truncated"])
+		self.assertLess(len(result["read"]), result["total"])
+		self.assertIn("read_document again", result["note"])
+
+
 class TestReadingPlainText(ReadingTestCase):
 	"""csv, txt, md and json: the bytes, decoded, through the same caps."""
 
