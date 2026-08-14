@@ -300,7 +300,7 @@ function proposal_from_event(event) {
 function clip_icon() {
 	return $(
 		`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-			stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 			<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
 		</svg>`
 	);
@@ -309,7 +309,7 @@ function clip_icon() {
 /** The little document mark on the context chip. */
 function doc_icon() {
 	return $(
-		`<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+		`<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
 			<path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/>
 		</svg>`
 	);
