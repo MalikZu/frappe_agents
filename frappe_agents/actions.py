@@ -351,8 +351,17 @@ def _require_separation_of_duties(action: Any) -> None:
 
 
 def _load_target(action: Any) -> Any:
+	"""The document the proposal is about, once this approver is allowed to see it.
+
+	Fail closed, and before anything is written. An approval is a person saying
+	they read the record and agree; an approval of a document they may not open is
+	a signature on a blank page. `get_doc` checks nothing on its own, and the apply
+	only ever exercises submit or cancel — read is the one right this path would
+	otherwise never prove.
+	"""
 	if not frappe.db.exists(action.target_doctype, action.target_name):
 		return None
+	frappe.has_permission(action.target_doctype, "read", doc=action.target_name, throw=True)
 	return frappe.get_doc(action.target_doctype, action.target_name)
 
 

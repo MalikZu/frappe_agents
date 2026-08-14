@@ -477,6 +477,16 @@ def list_pending_actions(limit: int | None = None) -> list[dict]:
 	permissions already allow. Each row carries whether *this* user may decide it —
 	the separation of duties is a property of the pair, not of the row, and the
 	queue should say so before the approver opens anything.
+
+	A row about a document this approver may not read is redacted, not dropped.
+	Dropped would be the easier answer and the worse one: the queue is a work list
+	somebody is expected to clear, and a silently shorter queue hides work rather
+	than protecting anything. What is protected is the target — `target_doctype`,
+	`target_name`, `reason` and both timestamps are about the document, and they
+	come back empty with `target_visible: 0` and the reason in `blocked_because`.
+	Everything that is about the proposal itself — the agent, the run, who asked,
+	when — stays, because the approver already holds read on the Agent Action.
+	Redaction is not the gate: `approve_action` refuses the same row on its own.
 	"""
 	if APPROVER_ROLE not in set(frappe.get_roles()):
 		raise frappe.PermissionError(
@@ -502,18 +512,52 @@ def list_pending_actions(limit: int | None = None) -> list[dict]:
 		limit_page_length=_pending_limit(limit),
 	)
 
-	for row in rows:
-		block = separation_of_duties_block(frappe._dict(row))
-		row["can_decide"] = 0 if block else 1
-		row["blocked_because"] = block
-		# What the approver will be asked to send back as expected_modified, and the
-		# first hint that the document moved since the agent proposed it.
-		row["target_modified"] = _target_modified(row)
-		row["edited_since_proposal"] = (
-			0 if _same_instant(row["target_modified"], row.get("proposal_modified")) else 1
-		)
+	return [_pending_row(row) for row in rows]
 
-	return rows
+
+def _pending_row(row: dict) -> dict:
+	if not _target_readable(row):
+		return _redacted_row(row)
+
+	block = separation_of_duties_block(frappe._dict(row))
+	row["target_visible"] = 1
+	row["can_decide"] = 0 if block else 1
+	row["blocked_because"] = block
+	# What the approver will be asked to send back as expected_modified, and the
+	# first hint that the document moved since the agent proposed it.
+	row["target_modified"] = _target_modified(row)
+	row["edited_since_proposal"] = (
+		0 if _same_instant(row["target_modified"], row.get("proposal_modified")) else 1
+	)
+	return row
+
+
+def _redacted_row(row: dict) -> dict:
+	"""The same row with everything that is about the target taken out of it."""
+	row["target_visible"] = 0
+	row["target_doctype"] = None
+	row["target_name"] = None
+	row["reason"] = None
+	row["target_modified"] = None
+	# The proposal's snapshot is the target's own timestamp, and it is useless
+	# without the target anyway.
+	row["proposal_modified"] = None
+	row["edited_since_proposal"] = None
+	row["can_decide"] = 0
+	row["blocked_because"] = _("You cannot read the document this proposal is about.")
+	return row
+
+
+def _target_readable(row: dict) -> bool:
+	doctype, name = row.get("target_doctype"), row.get("target_name")
+	if not doctype or not name:
+		return False
+	if not frappe.db.exists(doctype, name):
+		# The target is gone, so there is no document to check against. The
+		# doctype-level right is the most that can be asked here, and the approval
+		# will fail on the missing document anyway.
+		return bool(frappe.has_permission(doctype, "read"))
+	return bool(frappe.has_permission(doctype, "read", doc=name))
 
 
 def _pending_limit(limit: Any) -> int:
@@ -522,10 +566,9 @@ def _pending_limit(limit: Any) -> int:
 
 
 def _target_modified(row: dict) -> Any:
+	"""The target's timestamp, for a row `_target_readable` has already cleared."""
 	doctype, name = row.get("target_doctype"), row.get("target_name")
 	if not doctype or not name:
-		return None
-	if not frappe.has_permission(doctype, "read", doc=name):
 		return None
 	return frappe.db.get_value(doctype, name, "modified")
 

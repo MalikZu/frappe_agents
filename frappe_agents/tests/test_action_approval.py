@@ -20,8 +20,10 @@ permission test run as Administrator asserts nothing at all.
 import frappe
 
 from frappe_agents.actions import approve_action
+from frappe_agents.api import list_pending_actions
 from frappe_agents.tests.fixtures import (
 	APPROVER_USER,
+	BLIND_APPROVER,
 	DRAFT_AGENT,
 	DRAFT_USER,
 	ORDER_DT,
@@ -145,6 +147,53 @@ class TestActionApproval(AgentTestCase):
 		self.assertTrue(row.failure)
 
 		self.assertEqual(frappe.db.get_value(ORDER_DT, order.name, "docstatus"), 0)
+
+	def test_approver_without_target_read_cannot_apply_and_queue_redacts_target(self):
+		"""Being allowed to submit the document is not being allowed to approve it.
+
+		`BLIND_APPROVER` holds Agent Approver and submit on FA Test Order, and a
+		User Permission pins them to the other project — so this order is one they
+		cannot open. Two things follow. The apply fails closed *before* anything is
+		written, which is a different outcome from the missing-submit case above:
+		that one is recorded as Failed because the engine tried, this one never gets
+		as far as trying. And the queue still lists the row, because it is their
+		work list, with everything about the document taken out of it.
+		"""
+		order = make_order_draft(user=DRAFT_USER)
+		action = make_proposal(order.name, user=DRAFT_USER)
+
+		with as_user(BLIND_APPROVER):
+			self.assertFalse(frappe.has_permission(ORDER_DT, "read", doc=order.name))
+			with self.assertRaises(frappe.PermissionError):
+				approve_action(action, self.modified_of(order.name))
+			queue = list_pending_actions()
+
+		self.assertEqual(self.action(action).status, "Pending")
+		self.assertEqual(frappe.db.get_value(ORDER_DT, order.name, "docstatus"), 0)
+
+		row = next(entry for entry in queue if entry["name"] == action)
+		self.assertEqual(row["target_visible"], 0)
+		self.assertIsNone(row["target_doctype"])
+		self.assertIsNone(row["target_name"])
+		self.assertIsNone(row["reason"])
+		self.assertIsNone(row["target_modified"])
+		self.assertEqual(row["can_decide"], 0)
+		self.assertTrue(row["blocked_because"])
+		self.assertNotIn(order.name, frappe.as_json(row))
+		# What is about the proposal rather than about the document stays: they hold
+		# read on the Agent Action, and a queue entry with nothing on it is noise.
+		self.assertEqual(row["requested_by"], DRAFT_USER)
+		self.assertEqual(row["action_type"], "Submit")
+
+		# The approver who may read the order gets the whole row. That is what makes
+		# the redaction above a permission answer and not a missing feature.
+		with as_user(APPROVER_USER):
+			visible = next(entry for entry in list_pending_actions() if entry["name"] == action)
+
+		self.assertEqual(visible["target_visible"], 1)
+		self.assertEqual(visible["target_doctype"], ORDER_DT)
+		self.assertEqual(visible["target_name"], order.name)
+		self.assertEqual(visible["can_decide"], 1)
 
 	def test_a_target_that_disappeared_fails_the_action(self):
 		order = make_order_draft(user=DRAFT_USER)
