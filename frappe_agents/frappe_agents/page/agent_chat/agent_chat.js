@@ -188,11 +188,18 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 
 		// The chat fills whatever is below the page chrome. A fixed guess breaks
 		// the moment the shell around the Desk adds a toolbar, so measure instead:
-		// where the layout starts is where the chrome ends.
+		// where the chat starts is where the chrome ends.
+		//
+		// Measured on the pane rather than the layout, because at ≤720px the rail
+		// is a row above the pane and the chat no longer starts where the layout
+		// does — measuring the layout there puts the composer below the fold by
+		// the rail's own height. At full width the two share a line, so it is the
+		// same number. Cheap enough to redo whenever the pane can have moved.
 		this.fit_height = () => {
 			const el = this.$layout && this.$layout[0];
 			if (!el || !el.isConnected) return;
-			const top = Math.max(0, Math.round(el.getBoundingClientRect().top));
+			const box = (this.$pane && this.$pane[0]) || el;
+			const top = Math.max(0, Math.round(box.getBoundingClientRect().top));
 			el.style.setProperty("--agent-chat-height", `calc(100dvh - ${top + 12}px)`);
 		};
 		this.$layout = $(`
@@ -209,6 +216,7 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 			</div>
 		`).appendTo(this.page.main);
 
+		this.$pane = this.$layout.find(".agent-chat-pane");
 		this.fit_height();
 		requestAnimationFrame(this.fit_height);
 		$(window).on("resize.agent-chat-fit", this.fit_height);
@@ -227,7 +235,7 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		this.bind_drawer();
 
 		this.chat = new frappe_agents.ChatUI({
-			parent: this.$layout.find(".agent-chat-pane"),
+			parent: this.$pane,
 			on_conversation: (conversation, data) => this.on_conversation(conversation, data),
 			on_agent_change: () => this.on_agent_change(),
 		});
@@ -238,6 +246,7 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		this.$layout.toggleClass("is-collapsed", this.collapsed);
 		localStorage.setItem(RAIL_COLLAPSED_KEY, this.collapsed ? "1" : "0");
 		this.sync_toggle();
+		this.fit_height();
 	}
 
 	/** One column: the rail opens over the chat instead of beside it. */
@@ -249,6 +258,9 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		this.drawer_open = Boolean(open);
 		this.$layout.toggleClass("is-drawer", this.drawer_open);
 		this.sync_toggle();
+		// The drawer takes the rail out of the flow and putting it back returns
+		// it, so the pane moves under the chat both ways.
+		this.fit_height();
 	}
 
 	/** The same control either way, so it says what it will do either way. */
@@ -281,6 +293,9 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		const on_change = () => {
 			if (this.is_narrow()) this.sync_toggle();
 			else this.toggle_drawer(false);
+			// Crossing the breakpoint moves the rail from beside the chat to
+			// above it, which is the one thing the measured height depends on.
+			this.fit_height();
 		};
 		if (query.addEventListener) query.addEventListener("change", on_change);
 		else if (query.addListener) query.addListener(on_change);
