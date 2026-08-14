@@ -30,6 +30,26 @@ const STYLES = `
 	.agent-chat-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
 	.agent-chat-chips { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 	.agent-chat-send { margin-left: auto; }
+	.agent-chat-attach {
+		flex: none; display: inline-flex; align-items: center; justify-content: center;
+		width: 26px; height: 26px; padding: 0; border: none; background: none;
+		border-radius: var(--border-radius-md, 6px); color: var(--text-muted); cursor: pointer;
+	}
+	.agent-chat-attach:hover { background: var(--highlight-color); color: var(--text-color); }
+	.agent-chat-attach:disabled { opacity: 0.5; cursor: default; background: none; }
+	.agent-chat-files { display: none; flex-wrap: wrap; gap: 6px; padding: 6px 10px 0; }
+	.agent-chat-files.is-filled { display: flex; }
+	.agent-chat-file {
+		display: inline-flex; align-items: center; gap: 4px; max-width: 240px;
+		border: 1px solid var(--border-color); background: var(--control-bg);
+		border-radius: 999px; padding: 2px 4px 2px 10px; font-size: var(--text-sm);
+	}
+	.agent-chat-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.agent-chat-file-drop {
+		flex: none; border: none; background: none; padding: 0 4px; line-height: 1;
+		font: inherit; color: var(--text-muted); cursor: pointer;
+	}
+	.agent-chat-file-drop:hover { color: var(--text-color); }
 	.agent-chat-chip {
 		display: inline-flex; align-items: center; gap: 5px; max-width: 260px;
 		border: 1px solid var(--border-color); background: var(--control-bg); border-radius: 999px;
@@ -142,6 +162,16 @@ function proposal_from_event(event) {
 	return result && result.action ? result : null;
 }
 
+/** The paperclip on the attach button. */
+function clip_icon() {
+	return $(
+		`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+			stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+		</svg>`
+	);
+}
+
 /** The little document mark on the context chip. */
 function doc_icon() {
 	return $(
@@ -216,6 +246,9 @@ frappe_agents.ChatUI = class ChatUI {
 	/** Forget everything drawn for a conversation. Called wherever the log is emptied. */
 	clear_state() {
 		this.pending = {};
+		// Files uploaded for the next message. The upload itself is already on a
+		// record; this list is only what the message about to be sent will name.
+		this.uploads = [];
 		// One card per extraction, redrawn in place as its status moves.
 		this.extractions = {};
 		// One card per proposal, so replaying a log cannot draw a second one.
@@ -239,7 +272,9 @@ frappe_agents.ChatUI = class ChatUI {
 				<div class="agent-chat-composer">
 					<div class="agent-chat-pop"></div>
 					<textarea class="form-control agent-chat-input" rows="2"></textarea>
+					<div class="agent-chat-files"></div>
 					<div class="agent-chat-bar">
+						<button type="button" class="agent-chat-attach"></button>
 						<span class="agent-chat-chips"></span>
 						<button class="btn btn-primary btn-sm agent-chat-send"></button>
 					</div>
@@ -254,18 +289,23 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$context = this.$body.find(".agent-chat-context");
 		this.$log = this.$body.find(".agent-chat-log");
 		this.$input = this.$body.find(".agent-chat-input");
+		this.$files = this.$body.find(".agent-chat-files");
 		this.$chips = this.$body.find(".agent-chat-chips");
+		this.$attach = this.$body.find(".agent-chat-attach");
 		this.$pop = this.$body.find(".agent-chat-pop");
 		this.$send = this.$body.find(".agent-chat-send");
 
 		this.$input.attr("placeholder", __("Ask the agent something…"));
+		this.$attach.attr("title", this.attach_hint()).append(clip_icon());
 		this.$send.text(__("Send"));
 		this.render_head();
 		this.render_chips();
+		this.render_files();
 	}
 
 	bind() {
 		this.$send.on("click", () => this.send());
+		this.$attach.on("click", () => this.attach());
 		this.$input.on("keydown", (e) => {
 			if (e.key === "Enter" && !e.shiftKey) {
 				e.preventDefault();
@@ -643,6 +683,125 @@ frappe_agents.ChatUI = class ChatUI {
 	refresh_composer() {
 		this.$send.prop("disabled", !this.agent);
 		this.$input.prop("disabled", !this.agent);
+		this.$attach.prop("disabled", !this.agent).attr("title", this.attach_hint());
+		this.render_files();
+	}
+
+	/** What the paperclip promises, which depends on where the file will land. */
+	attach_hint() {
+		return this.on_document()
+			? __("Attach a file — stored on this document")
+			: __("Attach a file — stored on this conversation");
+	}
+
+	/** A chat opened from a form is about a document, and that document is the anchor. */
+	on_document() {
+		return Boolean(this.context_doctype && this.context_name);
+	}
+
+	/**
+	 * Upload a file the agent can then be asked to read.
+	 *
+	 * Frappe's own uploader does the uploading; all this decides is what the File
+	 * hangs off, because that is what a reviewer checks it by. The open document
+	 * when there is one — it is the better anchor, and the file belongs to it. A
+	 * plain chat has no document, so the conversation is the record: it says who
+	 * supplied the file, to which agent, and what was being talked about.
+	 */
+	attach() {
+		if (!this.agent) {
+			frappe.show_alert({ message: __("Select an agent first"), indicator: "orange" });
+			return;
+		}
+		this.upload_anchor()
+			.then((anchor) => this.open_uploader(anchor))
+			.catch((error) => console.error("frappe_agents: could not open an upload", error));
+	}
+
+	/** The record the upload attaches to, opening a conversation first if there is none. */
+	upload_anchor() {
+		if (this.on_document()) {
+			return Promise.resolve({ doctype: this.context_doctype, name: this.context_name });
+		}
+		if (this.conversation) {
+			return Promise.resolve({ doctype: "Agent Conversation", name: this.conversation });
+		}
+
+		const args = { agent: this.agent };
+		if (this.model_profile) args.model_profile = this.model_profile;
+		return frappe.xcall("frappe_agents.api.start_conversation", args).then((r) => {
+			this.conversation = r.conversation;
+			// Freshly created, exactly as the first message creates one: the page
+			// lists it and the form panel remembers it.
+			if (this.on_conversation) this.on_conversation(this.conversation, null);
+			return { doctype: "Agent Conversation", name: this.conversation };
+		});
+	}
+
+	open_uploader(anchor) {
+		// Desk loads the uploader asynchronously, so ask for it before using it.
+		// require() is idempotent and comes straight back when it is already there.
+		return frappe.require("file_uploader.bundle.js", () => this.make_uploader(anchor));
+	}
+
+	make_uploader(anchor) {
+		return new frappe.ui.FileUploader({
+			doctype: anchor.doctype,
+			docname: anchor.name,
+			folder: "Home/Attachments",
+			allow_multiple: true,
+			// Private, and not a checkbox: a file handed to an agent is evidence a
+			// reviewer opens from the record it hangs off, not a public asset.
+			make_attachments_public: false,
+			allow_toggle_private: false,
+			// A file already in the system is named in the message by its link or
+			// its filename. The paperclip is for putting a new one in.
+			disable_file_browser: true,
+			on_success: (file_doc) => this.add_upload(file_doc),
+		});
+	}
+
+	add_upload(file_doc) {
+		if (!file_doc || !file_doc.name) return;
+		if (this.uploads.some((file) => file.name === file_doc.name)) return;
+		this.uploads.push({ name: file_doc.name, file_name: file_doc.file_name || file_doc.name });
+		this.render_files();
+	}
+
+	/** One chip per file waiting to be named in the next message. */
+	render_files() {
+		if (!this.$files) return;
+		this.$files.empty().toggleClass("is-filled", this.uploads.length > 0);
+		this.uploads.forEach((file) => {
+			const $chip = $("<span class='agent-chat-file'></span>").appendTo(this.$files);
+			$("<span class='agent-chat-file-name'></span>")
+				.text(file.file_name)
+				.attr("title", file.file_name)
+				.appendTo($chip);
+			$("<button type='button' class='agent-chat-file-drop'>×</button>")
+				.attr("title", __("Leave this file out of the message. It stays where it was uploaded."))
+				.on("click", () => this.drop_upload(file.name))
+				.appendTo($chip);
+		});
+	}
+
+	/** Take a file out of the next message. The upload itself is a record and stays. */
+	drop_upload(name) {
+		this.uploads = this.uploads.filter((file) => file.name !== name);
+		this.render_files();
+	}
+
+	/**
+	 * The line the message carries so the model knows what it was handed.
+	 *
+	 * Plain text on the message the person sent, not a channel of its own: a run
+	 * stores one input_message, and that is what a reload draws the bubble from.
+	 * The File name is in it because that is what a tool that reads files takes.
+	 */
+	files_line() {
+		if (!this.uploads.length) return "";
+		const list = this.uploads.map((file) => `${file.file_name} (File: ${file.name})`).join(", ");
+		return __("Attached files: {0}", [list]);
 	}
 
 	/** Redraw a past conversation from the server: one user bubble and one reply per run. */
@@ -770,7 +929,10 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	send() {
-		const message = (this.$input.val() || "").trim();
+		const typed = (this.$input.val() || "").trim();
+		// One message: what was typed, then what was attached. The bubble shows the
+		// same text the run is stored with, so a reload draws exactly this again.
+		const message = [typed, this.files_line()].filter(Boolean).join("\n\n");
 		if (!this.agent) {
 			frappe.show_alert({ message: __("Select an agent first"), indicator: "orange" });
 			return;
@@ -780,6 +942,8 @@ frappe_agents.ChatUI = class ChatUI {
 		this.clear_empty();
 		this.add_bubble(message, "is-user");
 		this.$input.val("");
+		this.uploads = [];
+		this.render_files();
 		this.set_busy(true);
 
 		const $pending = this.add_status(__("Queued…"));
