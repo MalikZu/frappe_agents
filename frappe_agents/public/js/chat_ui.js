@@ -296,7 +296,9 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$send = this.$body.find(".agent-chat-send");
 
 		this.$input.attr("placeholder", __("Ask the agent something…"));
-		this.$attach.attr("title", this.attach_hint()).append(clip_icon());
+		// An icon on its own says nothing to a screen reader, so the hint is its name.
+		this.$attach.attr({ title: this.attach_hint(), "aria-label": this.attach_hint() });
+		this.$attach.append(clip_icon());
 		this.$send.text(__("Send"));
 		this.render_head();
 		this.render_chips();
@@ -683,7 +685,9 @@ frappe_agents.ChatUI = class ChatUI {
 	refresh_composer() {
 		this.$send.prop("disabled", !this.agent);
 		this.$input.prop("disabled", !this.agent);
-		this.$attach.prop("disabled", !this.agent).attr("title", this.attach_hint());
+		this.$attach
+			.prop("disabled", !this.agent)
+			.attr({ title: this.attach_hint(), "aria-label": this.attach_hint() });
 		this.render_files();
 	}
 
