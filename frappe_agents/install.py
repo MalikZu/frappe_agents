@@ -3,6 +3,8 @@
 
 import frappe
 
+from frappe_agents.access.default_profiles import seed_default_profiles
+
 # Every role needs the Desk: managers configure agents, users chat, approvers review
 # drafts, auditors read the tool-call trail. None of them is a portal-only role.
 AGENT_ROLES = (
@@ -15,6 +17,7 @@ AGENT_ROLES = (
 
 def after_install() -> None:
 	create_roles()
+	seed_default_profiles()
 	build_workspace_sidebar()
 
 
