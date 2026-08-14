@@ -38,6 +38,18 @@ Attaching a file to an empty chat opens the conversation first — a file has to
 hang off something. The conversation gets its name from your first message, as
 it always did.
 
+## The files a conversation is carrying
+
+A strip under the header lists every file on the conversation, however long ago
+it was uploaded. Click a name to open the file. Beside each name is its File
+record name; click that to copy it. The strip is drawn from the conversation
+itself, so it is there after a reload and after a hundred turns.
+
+The agent is given the same list at the start of every run, so it can always
+name a file exactly. A long conversation is trimmed to fit the model's context
+limit, and the message that named a file can be trimmed away with it — the list
+is not, because it is read again each time rather than remembered.
+
 ## Asking about a document
 
 Ask what a file says and the agent reads it back to you. It can read PDFs,
