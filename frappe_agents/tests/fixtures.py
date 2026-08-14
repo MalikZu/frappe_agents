@@ -175,6 +175,7 @@ READ_TOOL_NAMES = (
 	"run_report",
 	"get_document_context",
 	"get_document_slice",
+	"read_document",
 )
 DRAFT_TOOL_NAMES = (
 	"create_draft",
