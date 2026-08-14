@@ -47,10 +47,15 @@ const RAIL_STYLES = `
 	.agent-chat-convo-actions { flex: none; display: flex; align-items: center; }
 	.agent-chat-rename {
 		flex: none; opacity: 0; font: inherit; font-size: var(--text-xs); color: var(--text-muted);
-		border: none; background: none; padding: 0 2px; cursor: pointer;
+		border: none; background: none; padding: 2px 4px; cursor: pointer;
 	}
 	.agent-chat-convo-row:hover .agent-chat-rename,
 	.agent-chat-rename:focus { opacity: 1; }
+	/* Desk restores a focus ring only for .btn, and neither of these is one. The
+	   ring sits inside the button: this list scrolls, and an outset ring on a
+	   row the full width of it would put a scrollbar under the conversations. */
+	.agent-chat-convo:focus-visible,
+	.agent-chat-rename:focus-visible { outline: 2px solid var(--text-color); outline-offset: -2px; }
 	/* No hover to reveal it on a touch screen, and a control you cannot see but
 	   can hit by accident is worse than one always on show. */
 	@media (hover: none) { .agent-chat-rename { opacity: 1; } }
