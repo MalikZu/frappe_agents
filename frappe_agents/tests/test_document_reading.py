@@ -24,6 +24,7 @@ from unittest.mock import patch
 import frappe
 
 from frappe_agents.documents import reader
+from frappe_agents.extraction.pipeline import EXTRACTION
 from frappe_agents.tests.fixtures import (
 	AGENT,
 	DRAFT_USER,
@@ -37,6 +38,8 @@ from frappe_agents.tests.fixtures import (
 	make_run,
 	tool_calls_for,
 )
+from frappe_agents.tools.extraction_tools import TOOLS as EXTRACTION_TOOLS
+from frappe_agents.tools.read_tools import TOOLS as READ_TOOLS
 
 FOREIGN = "https://files.example.com/private/files/fa-cv.pdf"
 OPEN_TAG = '<untrusted source="File '
@@ -142,6 +145,15 @@ def xls_bytes(rows: list[list]) -> bytes:
 				out += struct.pack("<HH", 0x0003, len(data)) + data
 	out += struct.pack("<HH", 0x000A, 0)
 	return bytes(out)
+
+
+def png_bytes(colour: str = "white") -> bytes:
+	"""A real PNG: both the sniffer and the image cap open the bytes themselves."""
+	from PIL import Image
+
+	buffer = BytesIO()
+	Image.new("RGB", (48, 32), colour).save(buffer, format="PNG")
+	return buffer.getvalue()
 
 
 def office_zip(members: dict[str, str]) -> bytes:
@@ -362,6 +374,25 @@ class TestReadingBySight(ReadingTestCase):
 
 		self.assertFalse(payload["ok"])
 
+	def test_a_photograph_goes_straight_to_the_only_lane_it_has(self):
+		"""A PNG has no text layer to try first, so there is nothing to fall back from."""
+		file = self.attach("receipt.png", png_bytes())
+		run = make_run(effective_user=DRAFT_USER, model_profile=EXTRACT_PROFILE)
+
+		with patch("frappe_agents.documents.reader.call_model_extract") as call:
+			call.return_value = self.transcribed("CAFE 24\nTotal 31.50\n[a stamped receipt]")
+			payload, run = self.read_file(file, run=run)
+
+		self.assertTrue(payload["ok"], payload["error"])
+		result = payload["result"]
+		self.assertEqual(result["format"], reader.FORMAT_IMAGE)
+		self.assertEqual(result["lane"], reader.LANE_VISION)
+		self.assertNotIn("no text layer", result["note"])
+		self.assertIn("Total 31.50", self.body(result))
+		# The image is sent as an image: the media type is sniffed, not assumed.
+		self.assertEqual(call.call_args.args[2], "image/png")
+		self.assertIn(reader.LANE_VISION, tool_calls_for(run.name)[0].result_summary)
+
 
 class TestReadingSpreadsheets(ReadingTestCase):
 	"""Sheets are pages, the shape is bounded, and a formula is not a value."""
@@ -403,6 +434,16 @@ class TestReadingSpreadsheets(ReadingTestCase):
 		self.assertIn(f"only the first {reader.MAX_SHEET_ROWS} rows are shown", body)
 		self.assertIn("row 200 | 200", body)
 		self.assertNotIn("row 201", body)
+
+	def test_a_sheet_with_more_columns_than_fit_says_so_too(self):
+		"""The bound is on the shape, so both sides of the shape have to say when they hit it."""
+		wide = [f"c{number}" for number in range(1, reader.MAX_SHEET_COLS + 6)]
+
+		body = self.body(self.result("wide.xlsx", xlsx_bytes({"Wide": [wide]})))
+
+		self.assertIn(f"only the first {reader.MAX_SHEET_COLS} columns are shown", body)
+		self.assertIn(f"c{reader.MAX_SHEET_COLS}", body)
+		self.assertNotIn(f"c{reader.MAX_SHEET_COLS + 1}", body)
 
 	def test_pages_picks_the_sheet(self):
 		content = xlsx_bytes({"First": [["one"]], "Second": [["two"]]})
@@ -526,6 +567,13 @@ class TestReadingRefusals(ReadingTestCase):
 				self.assertIn(expected, payload["error"])
 				self.assertIn("attach it again", payload["error"])
 
+	def test_a_name_alone_neither_opens_a_file_nor_closes_one(self):
+		"""The bytes decide. A PDF somebody saved as .doc is a PDF, refusal list or not."""
+		result = self.result("minutes.doc", text_pdf(["Minutes of the meeting"]))
+
+		self.assertEqual(result["format"], reader.FORMAT_PDF)
+		self.assertIn("Minutes of the meeting", self.body(result))
+
 	def test_a_loose_file_is_refused_for_want_of_provenance(self):
 		loose = frappe.get_doc(
 			{
@@ -557,3 +605,49 @@ class TestReadingRefusals(ReadingTestCase):
 
 		self.assertFalse(payload["ok"])
 		self.assertIn("pages must be", payload["error"])
+
+
+class TestReadingWritesNothing(ReadingTestCase):
+	"""Reading is a read, and the wall around writing is why it is allowed at all.
+
+	Extraction is walled because it feeds values into a draft: a reviewer, a
+	sensitive-field gate, a record of what was decided. Reading returns text to
+	somebody who could have opened the file themselves, so it earns none of that
+	— and must therefore leave none of it behind either. A read that quietly
+	queued an extraction would put a document into the write path without anybody
+	asking for it.
+	"""
+
+	def test_a_read_leaves_no_extraction_and_no_draft_behind(self):
+		extractions = frappe.db.count(EXTRACTION)
+		orders = frappe.db.count(ORDER_DT)
+
+		payload, _ = self.read("invoice.pdf", text_pdf(["Total due 240 AED"]))
+
+		self.assertTrue(payload["ok"], payload["error"])
+		self.assertEqual(frappe.db.count(EXTRACTION), extractions)
+		self.assertEqual(frappe.db.count(ORDER_DT), orders)
+
+	def test_the_only_document_a_read_touches_is_the_file_it_read(self):
+		file = self.attach("invoice.pdf", text_pdf(["Total due 240 AED"]))
+
+		_, run = self.read_file(file)
+
+		self.assertEqual(tool_calls_for(run.name)[0].docs_touched, f"File: {file.name}")
+
+
+class TestSteeringToTheRightDocumentTool(AgentTestCase):
+	"""The misfire this lane exists for was a tool description, so one lives here.
+
+	An identity document was queued into an order draft because the only file
+	tool the model had was the one that writes. Each description now names the
+	other tool, which is what tells reading and extracting apart before either
+	one runs.
+	"""
+
+	def test_each_document_tool_sends_the_wrong_question_to_the_other(self):
+		described = {tool["tool_name"]: tool["description"] for tool in READ_TOOLS + EXTRACTION_TOOLS}
+
+		self.assertIn("read_document", described["extract_document"])
+		self.assertIn("identity", described["extract_document"])
+		self.assertIn("extract_document", described["read_document"])
