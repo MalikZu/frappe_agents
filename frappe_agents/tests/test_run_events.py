@@ -24,9 +24,11 @@ from frappe_agents.runner.run import (
 	EVENT_LOG_BYTES,
 	EVENT_LOG_HEAD,
 	EVENT_LOG_TAIL,
+	EVENT_TEXT_LIMIT,
 	STREAM_FLUSH_CHARS,
 	STREAM_FLUSH_MS,
 	STREAM_FRAME_CHARS,
+	TRUNCATION_NOTE,
 	StreamThrottle,
 	_event_log,
 )
@@ -363,13 +365,43 @@ class TestRunEvents(AgentTestCase):
 		self.assertTrue(log["truncated"])
 		self.assertEqual(log["events"][0]["type"], "message_end")
 
-	def test_one_event_over_the_cap_is_dropped_rather_than_stored(self):
+	def test_one_event_over_the_cap_is_cut_short_rather_than_dropped(self):
+		"""It is still an event that happened. Only its tail is expendable."""
 		stored = _event_log([{"type": "message_end", "text": "x" * (EVENT_LOG_BYTES + 1000)}])
 
 		log = frappe.parse_json(stored)
 		self.assertLessEqual(len(stored), EVENT_LOG_BYTES)
-		self.assertEqual(log["events"], [])
+		self.assertEqual(len(log["events"]), 1)
 		self.assertTrue(log["truncated"])
+		self.assertTrue(log["events"][0]["text"].endswith(TRUNCATION_NOTE))
+
+	def test_one_enormous_event_does_not_empty_the_log_around_it(self):
+		"""A run that thought for two megabytes still shows what else it did.
+
+		Cutting whole events to fit one of them is the wrong trade: the log's job
+		is the shape of the run, and a marker on the long one costs nothing.
+		"""
+		entries = [
+			{"type": "agent_start", "seq": 1},
+			{"type": "tool_execution_start", "seq": 2, "toolName": "search_documents"},
+			{
+				"type": "message_end",
+				"seq": 3,
+				"message": {"content": [{"type": "thinking", "thinking": "z" * 2_000_000}]},
+			},
+			{"type": "agent_end", "seq": 4},
+		]
+
+		log = frappe.parse_json(_event_log(entries))
+
+		self.assertEqual(
+			[event["type"] for event in log["events"]],
+			["agent_start", "tool_execution_start", "message_end", "agent_end"],
+		)
+		self.assertTrue(log["truncated"])
+		thinking = log["events"][2]["message"]["content"][0]["thinking"]
+		self.assertEqual(len(thinking), EVENT_TEXT_LIMIT + len(TRUNCATION_NOTE))
+		self.assertTrue(thinking.endswith(TRUNCATION_NOTE))
 
 	def test_a_log_that_will_not_write_does_not_fail_the_run(self):
 		"""A run's answer must not be lost because its diary would not fit."""

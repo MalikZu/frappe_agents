@@ -103,6 +103,12 @@ FAILED_STOPS = ("error", "aborted")
 EVENT_LOG_HEAD = 20
 EVENT_LOG_TAIL = 480
 EVENT_LOG_BYTES = 500_000
+# What one event may say before it is cut short. A single two-megabyte thinking
+# block would otherwise eat the whole byte budget and the log would drop event
+# after event to fit it — a run that did ten things showing none of them. The
+# oversized field loses its tail instead, and the log keeps its shape.
+EVENT_TEXT_LIMIT = 20_000
+TRUNCATION_NOTE = "\n... (truncated)"
 
 TOOL_DISCIPLINE = (
 	"You are an assistant working inside a Frappe site.\n"
@@ -734,10 +740,14 @@ def _tool_content(result: dict) -> str:
 
 
 def _event_log(entries: list[dict]) -> str:
-	"""The run's events as stored JSON, capped in count and in size.
+	"""The run's events as stored JSON, capped in count, in size, and per event.
 
 	A run that called a tool a hundred times would otherwise put megabytes on one
 	row. What is dropped is the middle, and the log says so.
+
+	Each event is cut down to what one event may say before any of that happens.
+	An event is a thing that happened, and every one of them is worth more to a
+	person reading the run than the tail of the longest one.
 	"""
 	kept = list(entries)
 	truncated = False
@@ -745,6 +755,13 @@ def _event_log(entries: list[dict]) -> str:
 	if len(kept) > EVENT_LOG_HEAD + EVENT_LOG_TAIL:
 		kept = kept[:EVENT_LOG_HEAD] + kept[-EVENT_LOG_TAIL:]
 		truncated = True
+
+	shrunk = []
+	for entry in kept:
+		entry, cut = _shrink(entry)
+		truncated = truncated or cut
+		shrunk.append(entry)
+	kept = shrunk
 
 	sizes = [len(frappe.as_json(entry)) for entry in kept]
 	total = sum(sizes)
@@ -755,12 +772,44 @@ def _event_log(entries: list[dict]) -> str:
 
 	log = frappe.as_json({"events": kept, "truncated": truncated})
 	while len(log) > EVENT_LOG_BYTES and kept:
-		# Only a single enormous event gets this far. Drop from the front too
-		# rather than store something over the cap.
+		# Nothing should reach here now that no single event is enormous. Kept as
+		# the floor it always was: something over the cap is never stored.
 		kept.pop(0)
 		truncated = True
 		log = frappe.as_json({"events": kept, "truncated": truncated})
 	return log
+
+
+def _shrink(value: Any) -> tuple[Any, bool]:
+	"""One event with every long string in it cut to the per-event ceiling.
+
+	Whatever it is nested in — a message's content blocks, a tool result — the
+	text is where the size is, so the walk is over the whole payload rather than
+	the fields today's events happen to use. Says whether it cut anything.
+	"""
+	if isinstance(value, str):
+		if len(value) <= EVENT_TEXT_LIMIT:
+			return value, False
+		return value[:EVENT_TEXT_LIMIT] + TRUNCATION_NOTE, True
+
+	if isinstance(value, dict):
+		shrunk = {}
+		cut = False
+		for key, item in value.items():
+			shrunk[key], item_cut = _shrink(item)
+			cut = cut or item_cut
+		return shrunk, cut
+
+	if isinstance(value, list):
+		shrunk = []
+		cut = False
+		for item in value:
+			item, item_cut = _shrink(item)
+			cut = cut or item_cut
+			shrunk.append(item)
+		return shrunk, cut
+
+	return value, False
 
 
 def _save_event_log(run: Any, events: "RunEvents") -> None:
