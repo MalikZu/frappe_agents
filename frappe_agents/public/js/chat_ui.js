@@ -115,7 +115,11 @@ const STYLES = `
 		background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color);
 		border-radius: var(--border-radius-lg); box-shadow: var(--shadow-lg);
 	}
-	.agent-chat-pop.is-open { display: block; }
+	/* The menu hangs above the composer, so it rises the short way into place:
+	   the movement says where it came from. Opening only — it is dismissed by
+	   dropping the class, and an exit nobody waits for is not worth the state. */
+	@keyframes agent-chat-pop-in { from { opacity: 0; transform: translateY(3px); } }
+	.agent-chat-pop.is-open { display: block; animation: agent-chat-pop-in var(--agent-chat-enter) var(--agent-chat-ease); }
 	.agent-chat-pop-label { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); padding: 6px 10px 4px; }
 	.agent-chat-pop-opt { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border-radius: 6px; font-size: var(--text-sm); }
 	.agent-chat-pop-opt.is-clickable { cursor: pointer; }
