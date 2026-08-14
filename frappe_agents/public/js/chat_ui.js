@@ -6,7 +6,7 @@ const STYLE_ID = "frappe-agents-chat-styles";
 
 const STYLES = `
 	.agent-chat {
-		display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 320px;
+		display: flex; flex-direction: column; height: var(--agent-chat-height, calc(100dvh - 220px)); min-height: 320px;
 		/* The whole of this screen's motion budget. Feedback is quicker than an
 		   entrance, and the curve decelerates — nothing here overshoots. */
 		--agent-chat-quick: 120ms;
