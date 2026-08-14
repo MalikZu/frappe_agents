@@ -14,6 +14,7 @@ handed, on what the adapter made of what it yielded, and on when it was closed.
 """
 
 import asyncio
+import json
 import threading
 from unittest.mock import patch
 
@@ -46,6 +47,7 @@ from frappe_agents.runner.providers import (
 	ProviderError,
 	_anthropic_messages,
 	_openai_messages,
+	parse_anthropic_stream,
 )
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tests.fixtures import PROFILE, AgentTestCase
@@ -132,6 +134,70 @@ def ended(reason: str = "stop") -> dict:
 
 def text_stream(text: str = "Three tickets are open.", tokens_in: int = 120, tokens_out: int = 40):
 	return [opened(), usage(tokens_in, tokens_out), *said(text), ended()]
+
+
+# --- and the same answer as the bytes Anthropic would actually send -----------
+
+
+def _frame(payload: dict) -> str:
+	return f"event: {payload['type']}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+def _signed_body() -> bytes:
+	"""A turn that thought, signed the thought, and then asked for a tool.
+
+	The signature is cut into three `signature_delta` frames on purpose: that is
+	how it arrives, and it is worth nothing unless it is put back exactly.
+	"""
+	size = -(-len(SIGNATURE) // 3)
+	fragments = [SIGNATURE[start : start + size] for start in range(0, len(SIGNATURE), size)]
+	thinking = {"type": "thinking", "thinking": ""}
+	tool = {"type": "tool_use", "id": "call_1", "name": "search_documents"}
+	frames = [
+		{"type": "message_start", "message": {"usage": {"input_tokens": 120, "output_tokens": 0}}},
+		{"type": "content_block_start", "index": 0, "content_block": thinking},
+		{
+			"type": "content_block_delta",
+			"index": 0,
+			"delta": {"type": "thinking_delta", "thinking": "The user wants "},
+		},
+		{
+			"type": "content_block_delta",
+			"index": 0,
+			"delta": {"type": "thinking_delta", "thinking": "a count."},
+		},
+		*[
+			{
+				"type": "content_block_delta",
+				"index": 0,
+				"delta": {"type": "signature_delta", "signature": fragment},
+			}
+			for fragment in fragments
+		],
+		{"type": "content_block_stop", "index": 0},
+		{"type": "content_block_start", "index": 1, "content_block": tool},
+		{
+			"type": "content_block_delta",
+			"index": 1,
+			"delta": {"type": "input_json_delta", "partial_json": '{"doctype":'},
+		},
+		{
+			"type": "content_block_delta",
+			"index": 1,
+			"delta": {"type": "input_json_delta", "partial_json": ' "FA Test Ticket"}'},
+		},
+		{"type": "content_block_stop", "index": 1},
+		{"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 40}},
+		{"type": "message_stop"},
+	]
+	return "".join(_frame(frame) for frame in frames).encode()
+
+
+SIGNED_BODY = _signed_body()
+
+
+def one_byte_at_a_time(body: bytes) -> list[bytes]:
+	return [body[index : index + 1] for index in range(len(body))]
 
 
 class Stream:
@@ -647,6 +713,49 @@ class TestStreamAdapter(AgentTestCase):
 
 		_, converted = _anthropic_messages(second)
 		self.assertEqual(converted[1]["content"][0]["signature"], SIGNATURE)
+
+	def test_a_signature_survives_the_wire_as_well_as_the_adapter(self):
+		"""The whole chain, from bytes off the socket to bytes back on it.
+
+		The two halves were each pinned already — the parser reassembles a
+		fragmented signature, and the adapter hands one back. Nothing joined
+		them, so a change to the chunk vocabulary could have satisfied both and
+		still sent Anthropic a signature it would reject. This drives the real
+		parser over a real SSE body, cut one byte at a time so the signature is
+		split in three places at once, and follows it to the second request.
+		"""
+		first = list(parse_anthropic_stream(one_byte_at_a_time(SIGNED_BODY), model=PROFILE))
+		provider = ModelProfileProvider(PROFILE)
+
+		async def drive():
+			return [
+				event
+				async for event in run_agent_loop(
+					provider=provider,
+					model=PROFILE,
+					system=SYSTEM,
+					messages=[UserMessage(content="How many?")],
+					tools=[SEARCH_TOOL],
+					max_turns=5,
+				)
+			]
+
+		with patch("frappe_agents.runner.stream_adapter.call_model_stream") as call:
+			call.side_effect = [Stream(first), Stream(text_stream())]
+			asyncio.run(drive())
+
+		second = call.call_args_list[1].args[1]
+		_, converted = _anthropic_messages(second)
+		thinking = converted[1]["content"][0]
+
+		self.assertEqual(thinking["type"], "thinking")
+		self.assertEqual(thinking["thinking"], "The user wants a count.")
+		# Byte for byte, out of three fragments, across a cut in every gap.
+		self.assertEqual(thinking["signature"], SIGNATURE)
+		self.assertEqual(converted[1]["content"][1]["type"], "tool_use")
+
+		# And the same turn, sent the other way, carries no reasoning at all.
+		self.assertNotIn("thinking", _openai_messages(second)[1])
 
 	# --- how it is called ----------------------------------------------------
 
