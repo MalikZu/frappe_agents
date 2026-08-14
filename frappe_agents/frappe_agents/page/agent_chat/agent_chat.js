@@ -39,9 +39,11 @@ const RAIL_STYLES = `
 	.agent-chat-layout.is-collapsed .agent-chat-rail-list { display: none; }
 	.agent-chat-rail-list { flex: 1; overflow-y: auto; }
 	.agent-chat-rail-group {
-		font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+		font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
 		color: var(--text-muted); margin: 12px 6px 4px;
 	}
+	/* The gap belongs between one day and the next, not above the first one. */
+	.agent-chat-rail-group:first-child { margin-block-start: 0; }
 	.agent-chat-rail-empty { color: var(--text-muted); font-size: var(--text-sm); padding: 10px 6px; }
 	.agent-chat-convo-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
 	.agent-chat-convo {

@@ -20,7 +20,7 @@ const STYLES = `
 	.agent-chat-doc {
 		display: inline-flex; align-items: center; gap: 6px; max-width: 320px;
 		background: var(--bg-blue); border: 1px solid var(--blue-300, var(--border-color));
-		color: var(--text-on-blue); border-radius: 999px; padding: 2px 10px;
+		color: var(--text-on-blue); border-radius: var(--border-radius-full, 999px); padding: 2px 10px;
 		font-size: var(--text-sm); text-decoration: none;
 	}
 	.agent-chat-doc:hover { color: var(--text-on-blue); text-decoration: none; }
@@ -75,16 +75,16 @@ const STYLES = `
 	.agent-chat-attach {
 		flex: none; display: inline-flex; align-items: center; justify-content: center;
 		width: 26px; height: 26px; padding: 0; border: none; background: none;
-		border-radius: var(--border-radius-md, 6px); color: var(--text-muted); cursor: pointer;
+		border-radius: var(--border-radius-md, 10px); color: var(--text-muted); cursor: pointer;
 	}
 	.agent-chat-attach:hover { background: var(--highlight-color); color: var(--text-color); }
 	.agent-chat-attach:disabled { opacity: 0.5; cursor: default; background: none; }
-	.agent-chat-files { display: none; flex-wrap: wrap; gap: 6px; padding: 6px 10px 0; }
+	.agent-chat-files { display: none; flex-wrap: wrap; gap: 6px; padding: 6px 12px 0; }
 	.agent-chat-files.is-filled { display: flex; }
 	.agent-chat-file {
 		display: inline-flex; align-items: center; gap: 4px; max-width: 240px;
 		border: 1px solid var(--border-color); background: var(--control-bg);
-		border-radius: 999px; padding: 2px 4px; padding-inline-start: 10px; font-size: var(--text-sm);
+		border-radius: var(--border-radius-full, 999px); padding: 2px 4px; padding-inline-start: 10px; font-size: var(--text-sm);
 	}
 	.agent-chat-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.agent-chat-file-drop {
@@ -95,7 +95,7 @@ const STYLES = `
 	.agent-chat-file-drop:hover { color: var(--text-color); }
 	.agent-chat-chip {
 		display: inline-flex; align-items: center; gap: 5px; max-width: 260px;
-		border: 1px solid var(--border-color); background: var(--control-bg); border-radius: 999px;
+		border: 1px solid var(--border-color); background: var(--control-bg); border-radius: var(--border-radius-full, 999px);
 		padding: 2px 10px; font: inherit; font-size: var(--text-sm); color: var(--text-color); cursor: pointer;
 	}
 	.agent-chat-chip:hover { background: var(--highlight-color); }
@@ -128,19 +128,19 @@ const STYLES = `
 	.agent-chat-pop-sub { display: block; color: var(--text-muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.agent-chat-pop-tick { color: var(--text-on-green); font-weight: 600; }
 	.agent-chat-pop-note { font-size: var(--text-xs); color: var(--text-muted); padding: 6px 10px; margin-top: 4px; border-top: 1px solid var(--border-color); }
-	.agent-chat-cap { flex: none; font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; border-radius: 4px; padding: 1px 6px; background: var(--control-bg); color: var(--text-muted); }
+	.agent-chat-cap { flex: none; font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; border-radius: var(--border-radius-tiny, 4px); padding: 1px 6px; background: var(--control-bg); color: var(--text-muted); }
 	.agent-chat-cap.is-read { background: var(--bg-blue); color: var(--text-on-blue); }
 	.agent-chat-cap.is-draft { background: var(--bg-green); color: var(--text-on-green); }
 	.agent-chat-cap.is-write, .agent-chat-cap.is-submit { background: var(--bg-orange); color: var(--text-on-orange); }
 	.agent-chat-row { margin-bottom: 10px; display: flex; }
 	.agent-chat-row.is-user { justify-content: flex-end; }
-	.agent-chat-bubble { max-width: 78%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; background: var(--control-bg); }
+	.agent-chat-bubble { max-width: 78%; padding: 8px 12px; border-radius: var(--border-radius-md, 10px); white-space: pre-wrap; word-break: break-word; background: var(--control-bg); }
 	/* The agent's answer is prose and the pane is wide, so cap its measure. What a
 	   person typed is their own line length and is left alone. */
 	.agent-chat-row:not(.is-user) .agent-chat-bubble { max-width: min(78%, 68ch); }
 	.agent-chat-row.is-user .agent-chat-bubble { background: var(--bg-light-gray, var(--control-bg)); }
 	.agent-chat-row.is-error .agent-chat-bubble { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
-	.agent-chat-tool { margin: 2px 0 6px; margin-inline-start: 2px; }
+	.agent-chat-tool { margin-block: 2px 8px; margin-inline: 2px 0; }
 	.agent-chat-tool-head {
 		display: inline-flex; align-items: flex-start; gap: 6px; max-width: 100%;
 		padding: 1px 0; border: none; background: none; text-align: start;
@@ -163,7 +163,7 @@ const STYLES = `
 	}
 	.agent-chat-tool-block.is-waiting { color: var(--text-muted); font-style: italic; }
 	.agent-chat-tool-block.is-error { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
-	.agent-chat-think { margin: 0 0 8px; margin-inline-start: 2px; }
+	.agent-chat-think { margin-block: 2px 8px; margin-inline: 2px 0; }
 	.agent-chat-think-head {
 		display: inline-flex; align-items: center; gap: 6px; padding: 1px 0;
 		border: none; background: none; font: inherit; font-size: var(--text-sm);
@@ -195,8 +195,13 @@ const STYLES = `
 		.agent-chat-think.is-live .agent-chat-think-label { animation: none; }
 	}
 	.agent-chat-status { font-size: var(--text-sm); color: var(--text-muted); margin-bottom: 10px; }
-	.agent-chat-empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
-	.agent-chat-action { border: 1px solid var(--border-color); border-inline-start: 3px solid var(--orange-500, var(--border-color)); border-radius: 8px; padding: 8px 12px; margin: 4px 0 10px 0; background: var(--card-bg, var(--control-bg)); }
+	/* The only thing on an empty log, so it gets room around it and a measure of
+	   its own — several of these lines are a sentence, not a label. */
+	.agent-chat-empty {
+		color: var(--text-muted); padding: 48px 16px; text-align: center;
+		max-width: 44ch; margin-inline: auto; text-wrap: balance;
+	}
+	.agent-chat-action { border: 1px solid var(--border-color); border-inline-start: 3px solid var(--orange-500, var(--border-color)); border-radius: var(--border-radius-sm, 8px); padding: 8px 12px; margin-block: 4px 10px; background: var(--card-bg, var(--control-bg)); }
 	.agent-chat-action-title { font-weight: 600; }
 	.agent-chat-action-target { font-size: var(--text-sm); color: var(--text-muted); }
 	.agent-chat-action-reason { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
