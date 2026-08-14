@@ -11,6 +11,7 @@ means several files is answered with all of them rather than a guess, and a file
 this user may not read is refused however cleverly it is written.
 """
 
+import os
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
@@ -157,6 +158,47 @@ class TestFileReference(AgentTestCase):
 			with self.subTest(ref=ref):
 				self.assertIn(EXTERNAL_REFERENCE, self.refuse(ref))
 
+	def test_a_foreign_host_written_loudly_is_still_a_foreign_host(self):
+		"""Case is not a disguise: the host is lowered on both sides before comparing."""
+		self.assertIn(EXTERNAL_REFERENCE, self.refuse(FOREIGN.upper()))
+
+	def test_this_site_written_loudly_or_with_a_stop_after_it_is_still_this_site(self):
+		host = urlsplit(get_url()).hostname or "localhost"
+		for ref in (
+			f"https://{host.upper()}{self.file.file_url}",
+			f"HTTPS://{host}{self.file.file_url}",
+			# A trailing dot is the same host to DNS, so it is the same host here.
+			f"https://{host}.{self.file.file_url}",
+		):
+			with self.subTest(ref=ref):
+				self.assertEqual(self.resolve(ref).name, self.file.name)
+
+	def test_a_host_that_only_decodes_to_this_site_is_not_this_site(self):
+		"""Nothing decodes the host, so an encoded one matches nothing and is refused."""
+		host = urlsplit(get_url()).hostname or "localhost"
+		encoded = f"%{ord(host[0]):02x}{host[1:]}"
+
+		self.assertIn(EXTERNAL_REFERENCE, self.refuse(f"https://{encoded}{self.file.file_url}"))
+
+	def test_whitespace_inside_a_link_cannot_hide_the_host_it_really_names(self):
+		"""urlsplit drops the newline first, so what is compared is what would be dialled."""
+		host = urlsplit(get_url()).hostname or "localhost"
+
+		self.assertIn(
+			EXTERNAL_REFERENCE,
+			self.refuse(f"https://{host}\n@files.example.com{self.file.file_url}"),
+		)
+
+	def test_a_port_does_not_make_this_site_a_different_one(self):
+		"""The port is not compared, because nothing here dials anything.
+
+		A reference is only ever a way to name a File row, and the path still has to
+		match a stored `file_url` exactly — so the port carries no authority to drop.
+		"""
+		host = urlsplit(get_url()).hostname or "localhost"
+
+		self.assertEqual(self.resolve(f"https://{host}:8443{self.file.file_url}").name, self.file.name)
+
 	def test_the_tool_refuses_a_link_to_somewhere_else_and_queues_nothing(self):
 		payload, _ = self.extract(FOREIGN)
 
@@ -167,6 +209,36 @@ class TestFileReference(AgentTestCase):
 	def test_a_path_that_climbs_out_of_the_files_directory_finds_nothing(self):
 		"""A reference is matched against stored URLs, never walked on disk."""
 		for ref in ("/private/files/../../../etc/passwd", "/private/files/..%2f..%2fetc/passwd"):
+			with self.subTest(ref=ref):
+				self.assertIn("No such file", self.refuse(ref))
+
+	def test_an_endpoint_that_would_serve_a_file_is_not_a_reference_to_one(self):
+		"""Only `file_url` is matched. A path carrying one in its query names no File."""
+		ref = f"/api/method/frappe.core.doctype.file.file.download_file?file_url={self.file.file_url}"
+
+		self.assertIn("No such file", self.refuse(ref))
+
+	def test_a_path_on_the_server_is_not_a_reference_to_anything(self):
+		"""There are no filesystem semantics in here — an absolute path is just a string."""
+		absolute = os.path.abspath(frappe.get_site_path("private", "files", self.file.file_name))
+		for ref in (absolute, f"../private/files/{self.file.file_name}", f".{self.file.file_url}"):
+			with self.subTest(ref=ref):
+				self.assertIn("No such file", self.refuse(ref))
+
+	def test_real_bytes_on_disk_with_no_File_row_are_not_a_file_here(self):
+		"""The proof that resolution never touches disk: the file is there, and unreachable.
+
+		Every form of the reference is the name of a row that does not exist, so every
+		form answers the same way. A File record is the only thing this app can read.
+		"""
+		file_name = f"fa-orphan-{frappe.generate_hash(length=8)}.pdf"
+		path = os.path.join(frappe.get_site_path("private", "files"), file_name)
+		with open(path, "wb") as handle:
+			handle.write(unique_pdf("orphan"))
+		self.addCleanup(os.remove, path)
+
+		url = f"/private/files/{file_name}"
+		for ref in (url, get_url(url), file_name):
 			with self.subTest(ref=ref):
 				self.assertIn("No such file", self.refuse(ref))
 
