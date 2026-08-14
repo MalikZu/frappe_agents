@@ -17,6 +17,10 @@ Two sets, and the first one is computed rather than listed:
 
 The check runs twice — once when a rule row is saved, once again inside
 `require_grant` at call time — so a row put in by direct SQL still denies.
+
+Reports are asked the same question through the doctype they read. A report over
+User is a way to read User, and an exclusion that only watched the DocType rows
+would be a lock on the front door with the side door open.
 """
 
 import frappe
@@ -80,6 +84,34 @@ def module_of(doctype: str) -> str | None:
 		return None
 
 
+def report_is_excluded(report: str | None) -> bool:
+	"""Whether this report reads a doctype no agent may ever be granted.
+
+	A report row grants running one report, and running one returns rows of the
+	doctype it reports on. A rule naming a report over User or over this app's own
+	records would hand an agent exactly what `is_excluded` refuses — the same
+	records, through a second door — so the exclusion is asked of the report's
+	`ref_doctype` as well.
+
+	A report that names no doctype is not excluded here: there is nothing to ask
+	the question of. Such a report still passes the user's own permission checks
+	in `run_report`, which is the floor it always had.
+	"""
+	ref = report_ref_doctype(report)
+	return bool(ref) and is_excluded(ref)
+
+
+def report_ref_doctype(report: str | None) -> str | None:
+	"""The doctype a report reads, or None when it names none or does not exist."""
+	report = (report or "").strip()
+	if not report:
+		return None
+	try:
+		return frappe.get_cached_value("Report", report, "ref_doctype") or None
+	except Exception:
+		return None
+
+
 def exclusion_reason(doctype: str) -> str:
 	"""Why this doctype is refused, in words a model and a person both read."""
 	if module_of(doctype) == APP_MODULE:
@@ -88,3 +120,9 @@ def exclusion_reason(doctype: str) -> str:
 			"access to what governs them."
 		)
 	return f"{doctype} is part of the site's security configuration and is never granted to an agent."
+
+
+def report_exclusion_reason(report: str) -> str:
+	"""Why this report is refused: the doctype underneath it is."""
+	ref = report_ref_doctype(report) or ""
+	return f"The report {report} reads {ref}. {exclusion_reason(ref)}"

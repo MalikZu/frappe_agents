@@ -38,6 +38,7 @@ from frappe_agents.tests.fixtures import (
 	RESTRICTED_USER,
 	SKILL_AUTHOR,
 	SKILL_WRITER,
+	TEST_REPORT,
 	TICKET_DT,
 	VAULT_DT,
 	AgentTestCase,
@@ -53,7 +54,7 @@ from frappe_agents.tools.builder_tools import list_site_doctypes
 BUILDER_RULE = rule(BLUEPRINT, can_read=1, can_create_draft=1, can_update_draft=1)
 
 APP_REPORT = "Agent Action Review Quality"
-SITE_REPORT = "FA Test Order Register"
+SITE_REPORT = TEST_REPORT
 
 SECRET_FIELD = "secret_note"
 
@@ -195,20 +196,6 @@ class TestDescribingADoctype(BuilderCase):
 
 
 class TestListingReports(BuilderCase):
-	def setUp(self) -> None:
-		super().setUp()
-		if not frappe.db.exists("Report", SITE_REPORT):
-			frappe.get_doc(
-				{
-					"doctype": "Report",
-					"report_name": SITE_REPORT,
-					"ref_doctype": ORDER_DT,
-					"report_type": "Report Builder",
-					"module": "Custom",
-					"is_standard": "No",
-				}
-			).insert(ignore_permissions=True)
-
 	def listed(self, **payload) -> list[str]:
 		result = self.ask("list_site_reports", payload)
 		return [row["report"] for row in result["reports"]]

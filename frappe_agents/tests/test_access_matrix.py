@@ -30,6 +30,7 @@ from frappe_agents.tests.fixtures import (
 	PROJECT_DT,
 	RESTRICTED_USER,
 	SECOND_DRAFTER,
+	TEST_REPORT,
 	TICKET_DT,
 	TOOL_NAMES,
 	VAULT_DT,
@@ -54,7 +55,7 @@ READ_FAMILY = {
 	"get_document_slice",
 	"find_doctypes",
 }
-REPORT = "Agent Action Review Quality"
+REPORT = TEST_REPORT
 
 
 class TestToolExposure(AgentTestCase):

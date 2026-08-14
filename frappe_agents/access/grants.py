@@ -41,7 +41,13 @@ from typing import Any
 import frappe
 from frappe.utils import cint
 
-from frappe_agents.access.exclusions import BLUEPRINT, exclusion_reason, is_excluded
+from frappe_agents.access.exclusions import (
+	BLUEPRINT,
+	exclusion_reason,
+	is_excluded,
+	report_exclusion_reason,
+	report_is_excluded,
+)
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
 	CAPABILITY_DRAFT,
@@ -169,6 +175,8 @@ def require_grant(target: str, verb: str, target_type: str = TARGET_DOCTYPE) -> 
 	"""
 	if target_type == TARGET_DOCTYPE and is_excluded(target):
 		raise ToolDenied(exclusion_reason(target))
+	if target_type == TARGET_REPORT and report_is_excluded(target):
+		raise ToolDenied(report_exclusion_reason(target))
 
 	agent = current_agent()
 	if agent is None or in_legacy_mode(agent):
@@ -310,6 +318,8 @@ def _merge(grants: dict, row: Any) -> None:
 	if target_type not in (TARGET_DOCTYPE, TARGET_REPORT) or not target:
 		return
 	if target_type == TARGET_DOCTYPE and is_excluded(target):
+		return
+	if target_type == TARGET_REPORT and report_is_excluded(target):
 		return
 
 	verbs = REPORT_VERBS if target_type == TARGET_REPORT else tuple(VERBS)

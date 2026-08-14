@@ -18,7 +18,12 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint
 
-from frappe_agents.access.exclusions import exclusion_reason, is_excluded
+from frappe_agents.access.exclusions import (
+	exclusion_reason,
+	is_excluded,
+	report_exclusion_reason,
+	report_is_excluded,
+)
 
 TARGET_DOCTYPE = "DocType"
 TARGET_REPORT = "Report"
@@ -67,6 +72,12 @@ def validate_rule(row: Document) -> None:
 
 def _validate_report_row(row: Document, target: str) -> None:
 	"""A report row grants running it. The other checks are cleared, not honoured."""
+	# A report is a way of reading the doctype under it, so the exclusions apply
+	# here too — otherwise the list of doctypes no agent may name would be a lock
+	# on one door only.
+	if report_is_excluded(target):
+		frappe.throw(report_exclusion_reason(target))
+
 	if not cint(row.get("can_read")):
 		frappe.throw(
 			_("The rule for report {0} grants nothing. Tick Read to let the agent run it.").format(target)

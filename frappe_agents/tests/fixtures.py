@@ -164,6 +164,13 @@ BLIND_APPROVER = "fa-blind-approver@example.com"
 AUDITOR_USER = "fa-auditor@example.com"
 BLIND_DRAFTER = "fa-blind-drafter@example.com"
 
+# A report a rule may actually grant. The app's own report reads Agent Action,
+# which is a doctype no agent may be granted — so it cannot stand in for the
+# report a site would really give an agent. This one reads FA Test Order and is
+# a plain Report Builder report, which runs through `frappe.get_list` as the
+# session user like every other read in the suite.
+TEST_REPORT = "FA Test Order Register"
+
 MANAGER_ROLE = "Agent Manager"
 APPROVER_ROLE = "Agent Approver"
 AUDITOR_ROLE = "Agent Auditor"
@@ -297,6 +304,7 @@ def ensure_fixtures() -> None:
 	_ensure_read_only_roles()
 	_ensure_order_permissions()
 	_ensure_extraction_fields()
+	_ensure_report()
 	_ensure_users()
 	_ensure_records()
 	_ensure_user_permission()
@@ -1292,6 +1300,28 @@ def _ensure_vendor_doctype() -> None:
 			{"role": VENDOR_ROLE, "read": 1, "write": 1, "create": 1},
 		],
 	)
+
+
+def _ensure_report() -> None:
+	"""One saved report an access rule is allowed to name.
+
+	Report Builder rather than a query or a script: it runs through
+	`frappe.get_list` on `ref_doctype` as the session user, so a report row grants
+	the agent nothing its user could not already have listed by hand.
+	"""
+	if frappe.db.exists("Report", TEST_REPORT):
+		return
+
+	frappe.get_doc(
+		{
+			"doctype": "Report",
+			"report_name": TEST_REPORT,
+			"ref_doctype": ORDER_DT,
+			"report_type": "Report Builder",
+			"module": MODULE,
+			"is_standard": "No",
+		}
+	).insert(ignore_permissions=True)
 
 
 def _ensure_extraction_fields() -> None:

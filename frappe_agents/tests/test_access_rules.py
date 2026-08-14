@@ -14,22 +14,28 @@ in is not a gate.
 import frappe
 
 from frappe_agents.access.exclusions import is_excluded
-from frappe_agents.access.grants import compiled_grants, grant_for
+from frappe_agents.access.grants import compiled_grants, grant_for, require_grant
 from frappe_agents.tests.fixtures import (
 	ORDER_DT,
 	ORDER_ITEM_DT,
 	RESTRICTED_USER,
+	TEST_REPORT,
 	TICKET_DT,
 	VAULT_DT,
 	AgentTestCase,
 	call_tool,
 	make_access_profile,
 	make_matrix_agent,
+	make_run,
 	rule,
 )
+from frappe_agents.tools.base import RUN_FLAG, ToolDenied
 
 BLUEPRINT = "Agent Blueprint"
-REPORT = "Agent Action Review Quality"
+REPORT = TEST_REPORT
+# The app's own report. It reads Agent Action, which is a doctype no rule may
+# name, so no rule may name the report over it either.
+APP_REPORT = "Agent Action Review Quality"
 # A single settings document nothing in this app owns. Drafting one is not a
 # thing that exists, whoever asks.
 SINGLE_DT = "Website Settings"
@@ -87,6 +93,11 @@ class TestAccessRuleValidation(AgentTestCase):
 		self.assertEqual(row.can_create_draft, 0)
 		self.assertEqual(row.can_propose, 0)
 
+	def test_a_report_over_an_excluded_doctype_is_refused(self):
+		"""The exclusions hold on both doors: a report is a way of reading a doctype."""
+		with self.assertRaises(frappe.ValidationError):
+			make_matrix_agent([rule(APP_REPORT, target_type="Report", can_read=1)])
+
 
 class TestGrantCompilation(AgentTestCase):
 	def test_profiles_and_local_rules_union_their_verbs(self):
@@ -139,6 +150,30 @@ class TestGrantCompilation(AgentTestCase):
 		)
 		self.assertFalse(payload["ok"])
 		self.assertIn("agent framework", payload["error"])
+
+	def test_a_smuggled_report_row_still_denies(self):
+		"""Same second check for reports: the row exists and grants nothing anyway."""
+		agent = make_matrix_agent(
+			[rule(REPORT, target_type="Report", can_read=1)],
+			autonomy="Suggest",
+		)
+		smuggled = agent.access_rules[0]
+		frappe.db.set_value("Agent Access Rule", smuggled.name, "target", APP_REPORT)
+		frappe.clear_document_cache("Agent", agent.name)
+
+		reloaded = frappe.get_cached_doc("Agent", agent.name)
+		self.assertNotIn(APP_REPORT, compiled_grants(reloaded)["Report"])
+
+		run = make_run(effective_user=RESTRICTED_USER, agent=agent.name)
+		previous = frappe.flags.get(RUN_FLAG)
+		frappe.flags[RUN_FLAG] = run
+		try:
+			with self.assertRaises(ToolDenied) as caught:
+				require_grant(APP_REPORT, "read", "Report")
+		finally:
+			frappe.flags[RUN_FLAG] = previous
+
+		self.assertIn("agent framework", str(caught.exception))
 
 	def test_a_rule_on_one_doctype_says_nothing_about_another(self):
 		agent = make_matrix_agent([rule(TICKET_DT, can_read=1)], autonomy="Suggest")

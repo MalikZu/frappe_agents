@@ -23,6 +23,7 @@ from frappe_agents.tests.fixtures import (
 	PROJECT_DT,
 	RESTRICTED_USER,
 	SKILL_AUTHOR,
+	TEST_REPORT,
 	TICKET_DT,
 	VAULT_DT,
 	AgentTestCase,
@@ -32,7 +33,7 @@ from frappe_agents.tests.fixtures import (
 	rule,
 )
 
-REPORT = "Agent Action Review Quality"
+REPORT = TEST_REPORT
 
 
 class PreviewCase(AgentTestCase):
