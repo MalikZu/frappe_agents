@@ -1,5 +1,5 @@
 app_name = "frappe_agents"
-app_title = "Frappe Agents"
+app_title = "Agents"
 app_publisher = "Malik AlZubaidi"
 app_description = "Agent runtime for Frappe. Agents are records, not deployments."
 app_email = "malik@leam.ae"
@@ -14,7 +14,7 @@ add_to_apps_screen = [
 	{
 		"name": "frappe_agents",
 		"logo": "/assets/frappe_agents/images/logo.svg",
-		"title": "Frappe Agents",
+		"title": "Agents",
 		"route": "/desk/frappe-agents",
 		"has_permission": "frappe_agents.utils.has_app_permission",
 	}
