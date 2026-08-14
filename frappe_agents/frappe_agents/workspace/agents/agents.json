@@ -17,7 +17,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Agent Setup",
-   "link_count": 4,
+   "link_count": 6,
    "onboard": 0,
    "type": "Card Break"
   },
@@ -28,6 +28,28 @@
    "label": "Agent",
    "link_count": 0,
    "link_to": "Agent",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "icon": "lock",
+   "is_query_report": 0,
+   "label": "Agent Access Profile",
+   "link_count": 0,
+   "link_to": "Agent Access Profile",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "icon": "file-text",
+   "is_query_report": 0,
+   "label": "Agent Blueprint",
+   "link_count": 0,
+   "link_to": "Agent Blueprint",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -167,7 +189,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-15 12:00:00.000000",
+ "modified": "2026-08-16 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agents",

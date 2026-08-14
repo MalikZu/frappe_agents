@@ -3,6 +3,8 @@
 
 import frappe
 
+from frappe_agents.access.builder import seed_agents_builder
+from frappe_agents.access.default_profiles import seed_default_profiles
 from frappe_agents.default_catalog import seed_default_catalog
 
 # Every role needs the Desk: managers configure agents, users chat, approvers review
@@ -17,6 +19,8 @@ AGENT_ROLES = (
 
 def after_install() -> None:
 	create_roles()
+	seed_default_profiles()
+	seed_agents_builder()
 	build_workspace_sidebar()
 	seed_default_catalog()
 
@@ -40,6 +44,16 @@ def create_roles() -> None:
 # must all be this same word or the tile 404s (the v0.5.0 regression).
 WORKSPACE = "Agents"
 
+# What the installer called the sidebar before the rename above. Nothing writes
+# it any more; the v0_6_0 rename patch converges old sites onto WORKSPACE, and
+# the v0_7_0 sidebar patch keeps this as the fallback lookup for a site whose
+# rename has not run yet.
+SIDEBAR_NAME = "Frappe Agents"
+
+# The section the agent, its access and the things it is made of live under. The
+# sidebar patch appends into it and needs to find it by the name shipped here.
+BUILD_SECTION = "Build"
+
 SIDEBAR = (
 	("Link", "Home", "Workspace", WORKSPACE, "home", 0),
 	("Link", "Agent Chat", "Page", "agent-chat", "messages-square", 0),
@@ -47,8 +61,10 @@ SIDEBAR = (
 	("Link", "Pending Actions", "DocType", "Agent Action", None, 1),
 	("Link", "Needs Review", "DocType", "Document Extraction", None, 1),
 	("Link", "Review Quality", "Report", "Agent Action Review Quality", None, 1),
-	("Section Break", "Build", None, None, "bot", 0),
+	("Section Break", BUILD_SECTION, None, None, "bot", 0),
 	("Link", "Agents", "DocType", "Agent", None, 1),
+	("Link", "Access Profiles", "DocType", "Agent Access Profile", None, 1),
+	("Link", "Blueprints", "DocType", "Agent Blueprint", None, 1),
 	("Link", "Skills", "DocType", "Agent Skill", None, 1),
 	("Link", "Tools", "DocType", "Agent Tool", None, 1),
 	("Link", "Settings", "DocType", "Agent Settings", None, 1),

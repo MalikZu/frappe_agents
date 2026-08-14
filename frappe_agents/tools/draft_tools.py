@@ -40,9 +40,17 @@ from frappe.model import table_fields
 from frappe.model.workflow import get_workflow_name
 from frappe.utils import cint, strip_html
 
+from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_UPDATE_DRAFT
 from frappe_agents.actions import pending_action_for, record_proposal
 from frappe_agents.runner.run import publish_event
-from frappe_agents.tools.base import CAPABILITY_DRAFT, ToolDenied, current_run
+from frappe_agents.tools.base import (
+	CAPABILITY_DRAFT,
+	ToolDenied,
+	current_run,
+	require_draft_ownership,
+	require_grant,
+	row_cap,
+)
 
 ACTION_SUBMIT = "Submit"
 ACTION_CANCEL = "Cancel"
@@ -118,7 +126,7 @@ def create_drafts(payload: dict) -> dict:
 	reason to throw away the other thirty-nine.
 	"""
 	doctype = _require_str(payload, "doctype")
-	rows = _require_rows(payload)
+	rows = _require_rows(payload, row_cap(doctype, BULK_ROW_LIMIT))
 	dry_run = _as_bool(payload.get("dry_run"))
 
 	meta = _creatable_meta(doctype)
@@ -203,6 +211,7 @@ def _row_error(index: int, error: str) -> dict:
 def _creatable_meta(doctype: str) -> Any:
 	"""The doctype's meta, once it is something this user may create a draft of."""
 	meta = _writable_meta(doctype)
+	require_grant(doctype, VERB_CREATE_DRAFT)
 	if not frappe.has_permission(doctype, "create"):
 		raise ToolDenied(f"You are not allowed to create {doctype}.")
 	return meta
@@ -234,10 +243,14 @@ def update_draft(payload: dict) -> dict:
 	values = _require_dict(payload, "values")
 
 	meta = _writable_meta(doctype)
+	require_grant(doctype, VERB_UPDATE_DRAFT)
 	doc = _load(doctype, name)
 
 	if not frappe.has_permission(doctype, "write", doc=doc):
 		raise ToolDenied(f"You are not allowed to change {doctype} {name}.")
+
+	# Whose drafts, on top of which drafts: the rule's own If Owner.
+	require_draft_ownership(doctype, doc)
 
 	if cint(doc.docstatus) != DRAFT:
 		raise ToolDenied(
@@ -278,6 +291,8 @@ def _propose(payload: dict, action_type: str) -> dict:
 	name = _require_str(payload, "name")
 	reason = _require_reason(payload)
 	run = _require_run(action_type)
+
+	require_grant(doctype, VERB_PROPOSE)
 
 	meta = _meta(doctype)
 	if not cint(meta.is_submittable):
@@ -495,15 +510,16 @@ def _require_dict(payload: dict, key: str) -> dict:
 	return value
 
 
-def _require_rows(payload: dict) -> list:
+def _require_rows(payload: dict, limit: int = BULK_ROW_LIMIT) -> list:
+	"""The rows of a batch, held to the smaller of the tool's cap and the rule's."""
 	rows = payload.get("rows")
 	if not isinstance(rows, list) or not rows:
 		raise ValueError("rows is required and must be a non-empty list of objects, one document per row.")
-	if len(rows) > BULK_ROW_LIMIT:
+	if len(rows) > limit:
 		raise ValueError(
-			f"Too many rows: {len(rows)}, and {BULK_ROW_LIMIT} is the limit for one call. "
+			f"Too many rows: {len(rows)}, and {limit} is the limit for one call. "
 			"Send the first "
-			f"{BULK_ROW_LIMIT} and the rest in a second call, or ask a person to import the file."
+			f"{limit} and the rest in a second call, or ask a person to import the file."
 		)
 	return rows
 

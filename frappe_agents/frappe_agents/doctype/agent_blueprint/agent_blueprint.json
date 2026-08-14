@@ -1,0 +1,118 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:title",
+ "creation": "2026-08-14 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "status",
+  "purpose",
+  "suggested_model",
+  "suggested_profiles",
+  "suggested_rules",
+  "created_section",
+  "created_agent",
+  "created_profile"
+ ],
+ "fields": [
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Draft\nApplied",
+   "read_only": 1
+  },
+  {
+   "description": "What this agent would be for, and who would use it.",
+   "fieldname": "purpose",
+   "fieldtype": "Text",
+   "label": "Purpose"
+  },
+  {
+   "description": "A model the drafter suggests. Informational — the human picks the real one.",
+   "fieldname": "suggested_model",
+   "fieldtype": "Data",
+   "label": "Suggested Model"
+  },
+  {
+   "description": "Existing access profiles worth attaching, by name, one per line.",
+   "fieldname": "suggested_profiles",
+   "fieldtype": "Small Text",
+   "label": "Suggested Profiles"
+  },
+  {
+   "description": "The access this agent would need. Nothing here grants anything: a blueprint is paper until a human presses Create Agent.",
+   "fieldname": "suggested_rules",
+   "fieldtype": "Table",
+   "label": "Suggested Rules",
+   "options": "Agent Access Rule"
+  },
+  {
+   "fieldname": "created_section",
+   "fieldtype": "Section Break",
+   "label": "Created"
+  },
+  {
+   "fieldname": "created_agent",
+   "fieldtype": "Link",
+   "label": "Created Agent",
+   "options": "Agent",
+   "read_only": 1
+  },
+  {
+   "fieldname": "created_profile",
+   "fieldtype": "Link",
+   "label": "Created Profile",
+   "options": "Agent Access Profile",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-14 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Blueprint",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Agent Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Agent User"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "icon": "file-text"
+}

@@ -92,7 +92,12 @@ from frappe_agents.harness.provider_events import (
 from frappe_agents.runner.run import execute_run
 from frappe_agents.tools.base import execute_tool, publish_kill_switch
 
-MODULE = "Frappe Agents"
+# Where the throwaway doctypes live. Deliberately NOT the app's own module:
+# everything in module Frappe Agents is excluded from every agent grant by
+# design, so a fixture parked there could never carry an access rule and the
+# matrix tests would have nothing to grant. "Custom" is where the desk puts a
+# site's own doctypes anyway.
+MODULE = "Custom"
 
 READER_ROLE = "FA Test Reader"
 PERMLEVEL_ROLE = "FA Test Permlevel Reader"
@@ -159,6 +164,13 @@ BLIND_APPROVER = "fa-blind-approver@example.com"
 AUDITOR_USER = "fa-auditor@example.com"
 BLIND_DRAFTER = "fa-blind-drafter@example.com"
 
+# A report a rule may actually grant. The app's own report reads Agent Action,
+# which is a doctype no agent may be granted — so it cannot stand in for the
+# report a site would really give an agent. This one reads FA Test Order and is
+# a plain Report Builder report, which runs through `frappe.get_list` as the
+# session user like every other read in the suite.
+TEST_REPORT = "FA Test Order Register"
+
 MANAGER_ROLE = "Agent Manager"
 APPROVER_ROLE = "Agent Approver"
 AUDITOR_ROLE = "Agent Auditor"
@@ -177,6 +189,14 @@ GATED_PROFILE = "FA Test Gated Profile"
 AGENT = "FA Test Agent"
 DRAFT_AGENT = "FA Draft Agent"
 OWNED_AGENT = "FA Owned Agent"
+# The matrix cast is built inside the tests that need it, not seeded: every test
+# about access rules wants a different set of rules, and a shared one would only
+# be rewritten in each `setUp`. The rollback after each test takes it away again.
+MATRIX_AGENT = "FA Matrix Agent"
+ACCESS_PROFILE = "FA Test Access Profile"
+# The pre-matrix shape: a tool selection and no rules. Built per test too, because
+# what the migration does to it depends on what it selected.
+LEGACY_AGENT = "FA Legacy Agent"
 
 READ_TOOL_NAMES = (
 	"search_documents",
@@ -198,6 +218,17 @@ DRAFT_TOOL_NAMES = (
 # *call* is decided by the capability gate, not by the agent's tool list, and the
 # autonomy test needs a Suggest agent that holds create_draft to prove it.
 TOOL_NAMES = READ_TOOL_NAMES + DRAFT_TOOL_NAMES
+
+# Tools no fixture agent selects, because nothing selects them any more: the
+# matrix decides who is offered them. They still have to exist as Agent Tool
+# rows before a test can call one, so the registry sweep below watches for them.
+MATRIX_TOOL_NAMES = (
+	"find_doctypes",
+	"list_site_doctypes",
+	"list_site_reports",
+	"describe_site_doctype",
+)
+REGISTERED_TOOL_NAMES = TOOL_NAMES + MATRIX_TOOL_NAMES
 
 # Rights added to FA Test Order for the approval cast. The doctype already grants
 # System Manager everything; these two roles exist so that "may draft" and "may
@@ -273,6 +304,7 @@ def ensure_fixtures() -> None:
 	_ensure_read_only_roles()
 	_ensure_order_permissions()
 	_ensure_extraction_fields()
+	_ensure_report()
 	_ensure_users()
 	_ensure_records()
 	_ensure_user_permission()
@@ -359,6 +391,100 @@ def make_run(
 	run.flags.ignore_permissions = True
 	run.insert(ignore_permissions=True)
 	return run
+
+
+def rule(target: str, target_type: str = "DocType", **checks: Any) -> dict:
+	"""One Agent Access Rule row, written the way a manager ticks the boxes."""
+	return {"target_type": target_type, "target": target, **checks}
+
+
+def make_access_profile(rules: list[dict], name: str = ACCESS_PROFILE) -> Any:
+	"""One Agent Access Profile. It grants nothing until an agent attaches it."""
+	profile = (
+		frappe.get_doc("Agent Access Profile", name)
+		if frappe.db.exists("Agent Access Profile", name)
+		else frappe.new_doc("Agent Access Profile")
+	)
+	profile.profile_name = name
+	profile.set("rules", [dict(row) for row in rules])
+	profile.flags.ignore_permissions = True
+	profile.save(ignore_permissions=True)
+	frappe.clear_document_cache("Agent Access Profile", profile.name)
+	return profile
+
+
+def make_matrix_agent(
+	rules: Any = (),
+	name: str = MATRIX_AGENT,
+	autonomy: str = "Draft",
+	may_read_files: int = 0,
+	profiles: Any = (),
+	tools: Any = (),
+) -> Any:
+	"""An agent whose access is the matrix: rule rows, nothing selected by hand.
+
+	`tools` stays available because the two shapes have to be tellable apart — an
+	agent with a selection *and* a matrix is the one that proves the selection no
+	longer decides anything for the generic tools.
+	"""
+	agent = frappe.get_doc("Agent", name) if frappe.db.exists("Agent", name) else frappe.new_doc("Agent")
+	agent.update(
+		{
+			"agent_name": name,
+			"enabled": 1,
+			"run_as": "Session User",
+			"model_profile": PROFILE,
+			"autonomy": autonomy,
+			"instructions": "Work inside the access rules you were given.",
+			"max_steps": 5,
+			"may_read_files": cint(may_read_files),
+		}
+	)
+	agent.set("access_rules", [dict(row) for row in rules])
+	agent.set("access_profiles", [{"access_profile": profile} for profile in profiles])
+	agent.set("tools", [{"tool": tool} for tool in tools])
+	agent.flags.ignore_permissions = True
+	agent.save(ignore_permissions=True)
+	frappe.clear_document_cache("Agent", agent.name)
+	return agent
+
+
+def make_legacy_agent(
+	tools: Any = TOOL_NAMES,
+	name: str = LEGACY_AGENT,
+	autonomy: str = "Draft",
+	form_doctypes: Any = (),
+	skills: Any = (),
+) -> Any:
+	"""An agent shaped the way agents were before the matrix: a tool selection.
+
+	No rule rows at all, which is what puts it on the legacy shim, and its only
+	statement about documents is the form scope and the skills it holds — exactly
+	what the migration patch has to read a doctype set out of.
+	"""
+	agent = frappe.get_doc("Agent", name) if frappe.db.exists("Agent", name) else frappe.new_doc("Agent")
+	agent.update(
+		{
+			"agent_name": name,
+			"enabled": 1,
+			"run_as": "Session User",
+			"model_profile": PROFILE,
+			"autonomy": autonomy,
+			"instructions": "Answer from the documents the user may see.",
+			"max_steps": 5,
+			"may_read_files": 0,
+			"show_in_forms": 1 if form_doctypes else 0,
+		}
+	)
+	agent.set("access_rules", [])
+	agent.set("access_profiles", [])
+	agent.set("tools", [{"tool": tool} for tool in tools])
+	agent.set("form_doctypes", [{"document_type": doctype} for doctype in form_doctypes])
+	agent.set("skills", [{"skill": skill} for skill in skills])
+	agent.flags.ignore_permissions = True
+	agent.save(ignore_permissions=True)
+	frappe.clear_document_cache("Agent", agent.name)
+	return agent
 
 
 def model_says(text: str, tokens_in: int = 0, tokens_out: int = 0) -> dict:
@@ -1176,6 +1302,28 @@ def _ensure_vendor_doctype() -> None:
 	)
 
 
+def _ensure_report() -> None:
+	"""One saved report an access rule is allowed to name.
+
+	Report Builder rather than a query or a script: it runs through
+	`frappe.get_list` on `ref_doctype` as the session user, so a report row grants
+	the agent nothing its user could not already have listed by hand.
+	"""
+	if frappe.db.exists("Report", TEST_REPORT):
+		return
+
+	frappe.get_doc(
+		{
+			"doctype": "Report",
+			"report_name": TEST_REPORT,
+			"ref_doctype": ORDER_DT,
+			"report_type": "Report Builder",
+			"module": MODULE,
+			"is_standard": "No",
+		}
+	).insert(ignore_permissions=True)
+
+
 def _ensure_extraction_fields() -> None:
 	"""Add the extraction fields to the order family, on a doctype that already exists.
 
@@ -1391,6 +1539,7 @@ def _make_doctype(
 	is_submittable: int = 0,
 ) -> None:
 	if frappe.db.exists("DocType", name):
+		_ensure_module(name)
 		return
 	doctype = frappe.get_doc(
 		{
@@ -1411,9 +1560,24 @@ def _make_doctype(
 	doctype.insert(ignore_permissions=True)
 
 
+def _ensure_module(name: str) -> None:
+	"""Move a fixture doctype an earlier run left in the app's own module.
+
+	The doctypes outlive the transaction, so one created before the exclusion rule
+	existed is still sitting in module Frappe Agents — where no access rule may
+	name it. Nothing else about it changes.
+	"""
+	if frappe.db.get_value("DocType", name, "module") == MODULE:
+		return
+	frappe.db.set_value("DocType", name, "module", MODULE, update_modified=False)
+	frappe.clear_document_cache("DocType", name)
+	frappe.clear_cache(doctype=name)
+
+
 def _make_child_doctype(name: str, fields: list[dict]) -> None:
 	"""A child table. It carries no permissions of its own — the parent's apply."""
 	if frappe.db.exists("DocType", name):
+		_ensure_module(name)
 		return
 	doctype = frappe.get_doc(
 		{
@@ -1606,7 +1770,7 @@ def _ensure_user_permission() -> None:
 def _ensure_tools() -> None:
 	from frappe_agents.tools.registry import sync_tools
 
-	if all(frappe.db.exists("Agent Tool", name) for name in TOOL_NAMES):
+	if all(frappe.db.exists("Agent Tool", name) for name in REGISTERED_TOOL_NAMES):
 		return
 	sync_tools()
 

@@ -15,6 +15,8 @@ from typing import Any
 import frappe
 from frappe.utils import cint
 
+from frappe_agents.access.grants import exposed_tool_names
+
 DEFAULT_ARGS_SCHEMA = {"type": "object", "properties": {}}
 
 
@@ -55,12 +57,30 @@ def sync_tools() -> None:
 		_disable_undeclared(set(declared))
 
 
+def agent_tool_order(agent: Any) -> list[str]:
+	"""The tools this agent is offered, in the order they are shown and sent.
+
+	The set comes from `exposed_tool_names`: the access matrix decides the generic
+	family, the selection table still carries tools other apps registered. The
+	order keeps the selection's own order first, so an agent that has not moved to
+	the matrix yet is offered exactly what it was offered before.
+	"""
+	agent = _agent_doc(agent)
+	names = exposed_tool_names(agent)
+
+	ordered: list[str] = []
+	for row in agent.get("tools") or []:
+		if row.tool in names and row.tool not in ordered:
+			ordered.append(row.tool)
+	return ordered + sorted(names - set(ordered))
+
+
 def get_tool_schemas(agent: Any) -> list[dict]:
 	"""Schemas for the enabled tools this agent may use, for the model request."""
-	agent = frappe.get_cached_doc("Agent", agent) if isinstance(agent, str) else agent
+	agent = _agent_doc(agent)
 	schemas = []
-	for row in agent.get("tools") or []:
-		tool = _get_enabled_tool(row.tool)
+	for name in agent_tool_order(agent):
+		tool = _get_enabled_tool(name)
 		if not tool:
 			continue
 		schemas.append(
@@ -75,13 +95,17 @@ def get_tool_schemas(agent: Any) -> list[dict]:
 
 def get_agent_tool_names(agent: Any) -> set[str]:
 	"""Names of the enabled tools this agent may call."""
-	agent = frappe.get_cached_doc("Agent", agent) if isinstance(agent, str) else agent
+	agent = _agent_doc(agent)
 	names = set()
-	for row in agent.get("tools") or []:
-		tool = _get_enabled_tool(row.tool)
+	for name in agent_tool_order(agent):
+		tool = _get_enabled_tool(name)
 		if tool:
 			names.add(tool.tool_name or tool.name)
 	return names
+
+
+def _agent_doc(agent: Any) -> Any:
+	return frappe.get_cached_doc("Agent", agent) if isinstance(agent, str) else agent
 
 
 def parse_args_schema(raw: str | dict | None) -> dict:

@@ -16,6 +16,11 @@
   "autonomy",
   "instructions",
   "allowed_roles",
+  "access_section",
+  "access_profiles",
+  "access_rules",
+  "may_read_files",
+  "effective_access_preview",
   "tools",
   "skills",
   "show_in_forms",
@@ -93,6 +98,39 @@
    "options": "Agent Allowed Role"
   },
   {
+   "fieldname": "access_section",
+   "fieldtype": "Section Break",
+   "label": "Access"
+  },
+  {
+   "description": "Reusable rule sets this agent holds. Attaching a profile is what makes it grant anything.",
+   "fieldname": "access_profiles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Access Profiles",
+   "options": "Agent Access Profile Link"
+  },
+  {
+   "description": "Rules for this agent alone, on top of its profiles. Effective access is always the user's own permissions narrowed by these rules.",
+   "fieldname": "access_rules",
+   "fieldtype": "Table",
+   "label": "Access Rules",
+   "options": "Agent Access Rule"
+  },
+  {
+   "default": "0",
+   "description": "Let this agent read attached files. Reading a file is not doctype-shaped, so it is a switch rather than a rule.",
+   "fieldname": "may_read_files",
+   "fieldtype": "Check",
+   "label": "May Read Files"
+  },
+  {
+   "fieldname": "effective_access_preview",
+   "fieldtype": "HTML",
+   "label": "Effective Access",
+   "read_only": 1
+  },
+  {
+   "description": "Tools from other apps. The generic tools are offered by the access rules above, not selected here.",
    "fieldname": "tools",
    "fieldtype": "Table",
    "label": "Tools",
