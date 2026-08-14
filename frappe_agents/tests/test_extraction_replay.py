@@ -20,12 +20,13 @@ from unittest.mock import patch
 
 import frappe
 
-from frappe_agents.api import start_run
+from frappe_agents.api import get_conversation, start_run
 from frappe_agents.extraction.pipeline import EVENT, EXTRACTION
 from frappe_agents.tests.fixtures import (
 	DRAFT_AGENT,
 	DRAFT_USER,
 	ORDER_DT,
+	SECOND_DRAFTER,
 	AgentTestCase,
 	as_user,
 	call_tool,
@@ -34,6 +35,8 @@ from frappe_agents.tests.fixtures import (
 	queue_extraction_as,
 	run_extraction_with,
 )
+
+OUTCOME_KEYS = {"name", "status", "target_doctype", "created_doc"}
 
 
 class TestExtractionReplay(AgentTestCase):
@@ -62,6 +65,10 @@ class TestExtractionReplay(AgentTestCase):
 			)
 		self.assertTrue(payload["ok"], payload["error"])
 		return started, payload["result"]["extraction"]
+
+	def read(self, conversation: str, user: str = DRAFT_USER) -> dict:
+		with as_user(user):
+			return get_conversation(conversation)
 
 	def test_the_run_that_asked_is_stamped_on_the_extraction(self):
 		started, extraction = self.extract_in_a_conversation()
@@ -98,3 +105,51 @@ class TestExtractionReplay(AgentTestCase):
 		for payload in payloads:
 			self.assertNotIn("conversation", payload)
 			self.assertNotIn("run", payload)
+
+	def test_the_conversation_reports_how_each_reading_ended(self):
+		started, extraction = self.extract_in_a_conversation()
+		run_extraction_with(extraction, extraction_reply({"order_title": "FA Extracted in chat"}))
+
+		runs = self.read(started["conversation"])["runs"]
+
+		self.assertEqual(len(runs), 1)
+		outcomes = runs[0]["extractions"]
+		self.assertEqual(len(outcomes), 1)
+		self.assertEqual(set(outcomes[0]), OUTCOME_KEYS)
+		self.assertEqual(outcomes[0]["name"], extraction)
+		self.assertEqual(outcomes[0]["status"], "Needs Review")
+		self.assertEqual(outcomes[0]["target_doctype"], ORDER_DT)
+		self.assertTrue(outcomes[0]["created_doc"])
+
+	def test_a_reading_still_queued_is_reported_as_it_stands(self):
+		"""A card that comes back mid-extraction is the point of the whole lane."""
+		started, extraction = self.extract_in_a_conversation()
+
+		outcomes = self.read(started["conversation"])["runs"][0]["extractions"]
+
+		self.assertEqual([row["name"] for row in outcomes], [extraction])
+		self.assertEqual(outcomes[0]["status"], "Pending")
+		self.assertIsNone(outcomes[0]["created_doc"])
+
+	def test_a_run_that_read_nothing_carries_an_empty_list(self):
+		with as_user(DRAFT_USER), patch("frappe.enqueue"):
+			started = start_run(agent=DRAFT_AGENT, message="How many orders are there?")
+
+		self.assertEqual(self.read(started["conversation"])["runs"][0]["extractions"], [])
+
+	def test_another_users_conversation_is_refused_rather_than_summarised(self):
+		started, _ = self.extract_in_a_conversation()
+
+		with as_user(SECOND_DRAFTER), self.assertRaises(frappe.PermissionError):
+			get_conversation(started["conversation"])
+
+	def test_another_users_conversation_yields_none_of_their_extractions(self):
+		"""And their own conversation says nothing about somebody else's reading."""
+		_, extraction = self.extract_in_a_conversation()
+
+		with as_user(SECOND_DRAFTER), patch("frappe.enqueue"):
+			started = start_run(agent=DRAFT_AGENT, message="Anything waiting for me?")
+		runs = self.read(started["conversation"], user=SECOND_DRAFTER)["runs"]
+
+		self.assertEqual([run["extractions"] for run in runs], [[]])
+		self.assertNotIn(extraction, frappe.as_json(runs))
