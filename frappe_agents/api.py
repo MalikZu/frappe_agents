@@ -14,6 +14,7 @@ from typing import Any
 
 import frappe
 from frappe import _
+from frappe.query_builder.functions import Min, Sum
 from frappe.utils import cint, get_datetime, now_datetime, today
 
 from frappe_agents.actions import APPROVER_ROLE, separation_of_duties_block
@@ -150,20 +151,37 @@ def list_conversations() -> list[dict]:
 def _first_messages(conversations: list[str]) -> dict[str, str]:
 	"""The first thing the user typed in each of these conversations.
 
-	One query for the lot. The rows come newest first and the dict is written in
-	that order, so the value left standing for a conversation is its oldest run.
+	One bounded query for the lot: the database picks each conversation's earliest
+	run and only those rows come back. Reading every run of every conversation to
+	throw all but the oldest away made the rail cost grow with how much the user
+	had ever said, which is the one thing a rail must not do.
+
+	The conversations are the ones `list_conversations` has just been permitted to
+	see, and a run belongs to the conversation it names, so this reads no row the
+	caller was not already handed.
 	"""
 	if not conversations:
 		return {}
 
-	rows = frappe.get_list(
-		"Agent Run",
-		filters={"conversation": ("in", conversations)},
-		fields=["conversation", "input_message"],
-		order_by="creation desc",
-		limit_page_length=0,
-	)
-	return {row.conversation: row.input_message or "" for row in rows}
+	run = frappe.qb.DocType("Agent Run")
+	first = (
+		frappe.qb.from_(run)
+		.select(run.conversation, Min(run.creation).as_("started"))
+		.where(run.conversation.isin(conversations))
+		.groupby(run.conversation)
+	).as_("first_run")
+
+	rows = (
+		frappe.qb.from_(run)
+		.join(first)
+		.on((run.conversation == first.conversation) & (run.creation == first.started))
+		.select(run.conversation, run.input_message)
+		# Two runs of one conversation can share an instant. A handful of extra
+		# rows is the whole cost of that, and the cap keeps it a handful.
+		.limit(len(conversations) * 2)
+	).run()
+
+	return {conversation: message or "" for conversation, message in rows}
 
 
 def _agent_name(name: str | None) -> str:
@@ -628,14 +646,18 @@ def _check_budget(agent: Any, settings: Any) -> None:
 	if not budget:
 		return
 
-	# Budget is per agent per day across all its users, so this counts every run.
-	rows = frappe.get_all(
-		"Agent Run",
-		filters={"agent": agent.name, "creation": (">=", today())},
-		fields=["tokens_in", "tokens_out"],
-		limit_page_length=0,
-	)
-	used = sum(cint(row.tokens_in) + cint(row.tokens_out) for row in rows)
+	# Budget is per agent per day across all its users, so this counts every run —
+	# as one sum the database does. Reading a day's rows into python to add them up
+	# made the check that runs before every message cost more the busier the day
+	# got, which is the wrong way round.
+	run = frappe.qb.DocType("Agent Run")
+	rows = (
+		frappe.qb.from_(run)
+		.select(Sum(run.tokens_in), Sum(run.tokens_out))
+		.where((run.agent == agent.name) & (run.creation >= today()))
+	).run()
+	tokens_in, tokens_out = rows[0] if rows else (0, 0)
+	used = cint(tokens_in) + cint(tokens_out)
 	if used >= budget:
 		frappe.throw(
 			_("Agent {0} has used its daily token budget ({1} of {2}). Try again tomorrow.").format(
