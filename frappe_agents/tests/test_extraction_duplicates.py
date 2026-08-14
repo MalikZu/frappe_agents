@@ -16,10 +16,13 @@ what the second upload of the same invoice looks like.
 import frappe
 
 from frappe_agents.api import discard_extraction
+from frappe_agents.extraction.gate import find_duplicates
 from frappe_agents.tests.fixtures import (
 	DRAFT_USER,
 	ORDER_DT,
 	PROJECT_ALPHA,
+	PROJECT_BETA,
+	RESTRICTED_USER,
 	VENDOR_ACME,
 	VENDOR_DT,
 	AgentTestCase,
@@ -124,6 +127,45 @@ class TestExtractionDuplicates(AgentTestCase):
 
 		self.assertEqual(self.duplicates(doc)["unique_collisions"], [])
 		self.assertEqual(doc.status, "Needs Review")
+
+	def test_duplicate_flags_hide_unreadable_candidates(self):
+		"""The check may look wider than the person it runs for. It may not tell them.
+
+		One user extracts a private invoice into an order on a project the other
+		cannot reach, and the vendor master is a doctype the other cannot read at
+		all. Running both checks as that second user has to come back saying that
+		something is already there and nothing whatsoever about what: no extraction
+		name, no created document, no target name, no value.
+		"""
+		file = make_pdf_attachment(content=self.content)
+		theirs, _ = self.extract(file, project=PROJECT_BETA)
+		self.assertTrue(theirs.created_doc)
+
+		with as_user(RESTRICTED_USER):
+			same_file = find_duplicates(ORDER_DT, file.content_hash, {}, {})
+			collision = find_duplicates(VENDOR_DT, None, {"vendor_name": VENDOR_ACME}, {})
+
+		self.assertEqual(same_file["same_file"], [])
+		self.assertEqual(same_file["same_file_hidden_count"], 1)
+		self.assertEqual(collision["unique_collisions"], [])
+		self.assertEqual(collision["unique_collisions_hidden_count"], 1)
+
+		told = frappe.as_json([same_file, collision])
+		for secret in (theirs.name, theirs.created_doc, VENDOR_ACME):
+			self.assertNotIn(secret, told)
+
+		# And the same two checks run by a user who may read those records name them.
+		# What hides the rows above is the permission system, not a blanket refusal:
+		# a duplicate check that told nobody anything would be no check at all.
+		with as_user(DRAFT_USER):
+			mine = find_duplicates(ORDER_DT, file.content_hash, {}, {})
+			mine_collision = find_duplicates(VENDOR_DT, None, {"vendor_name": VENDOR_ACME}, {})
+
+		self.assertEqual([row["name"] for row in mine["same_file"]], [theirs.name])
+		self.assertEqual(mine["same_file"][0]["created_doc"], theirs.created_doc)
+		self.assertEqual(mine["same_file_hidden_count"], 0)
+		self.assertEqual(mine_collision["unique_collisions"][0]["name"], VENDOR_ACME)
+		self.assertEqual(mine_collision["unique_collisions_hidden_count"], 0)
 
 	def test_a_duplicate_is_a_flag_and_never_a_refusal(self):
 		"""A supplier can send the same invoice twice. That is the reviewer's call."""
