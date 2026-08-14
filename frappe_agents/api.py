@@ -179,6 +179,55 @@ def _require_agent_user() -> None:
 		raise frappe.PermissionError(_("You need the {0} role to use agent chat.").format(AGENT_USER))
 
 
+def _chat_agent(agent: str) -> Any:
+	"""The agent this user may talk to right now, or a refusal.
+
+	Every chat door asks the same questions before anything is written: the
+	runtime is on, this user may read the agent, the agent is enabled, this
+	user's roles are on its list, and it runs as the person talking to it.
+	Opening a conversation is one of those doors, so it asks them too.
+	"""
+	if not runtime_enabled():
+		frappe.throw(_("The agent runtime is switched off."))
+
+	frappe.has_permission("Agent", "read", doc=agent, throw=True)
+	agent_doc = frappe.get_doc("Agent", agent)
+
+	if not cint(agent_doc.enabled):
+		frappe.throw(_("Agent {0} is disabled.").format(agent_doc.name))
+
+	if not _user_may_use(agent_doc, set(frappe.get_roles())):
+		raise frappe.PermissionError(_("You are not allowed to use the agent {0}.").format(agent_doc.name))
+
+	if agent_doc.run_as != "Session User":
+		frappe.throw(
+			_("Agent {0} runs as a service user and cannot be started from chat.").format(agent_doc.name)
+		)
+
+	return agent_doc
+
+
+@frappe.whitelist(methods=["POST"])
+def start_conversation(agent: str, model_profile: str | None = None) -> dict:
+	"""Open a conversation before anything has been said.
+
+	The composer calls this when someone attaches a file to an empty chat: a file
+	has to hang off a record, and the conversation is the record that says who
+	supplied it and in what context. Nothing is queued and nothing is run — the
+	agent checks and the conversation constructor are `start_run`'s own, so this
+	is the same door with the run left out.
+	"""
+	agent_doc = _chat_agent(agent)
+
+	requested = (model_profile or "").strip()
+	requested = check_profile(agent_doc, requested) if requested else None
+
+	# No title yet: nothing has been said. The rail already falls back to the first
+	# thing the user types, so an untitled conversation reads the same as any other.
+	doc = _get_conversation(agent_doc, None, "", requested)
+	return {"conversation": doc.name, "model_profile": doc.model_profile}
+
+
 @frappe.whitelist(methods=["POST"])
 def start_run(
 	agent: str,
@@ -202,24 +251,10 @@ def start_run(
 			_("Message is too long: {0} characters, limit is {1}.").format(len(message), MAX_MESSAGE_CHARS)
 		)
 
-	if not runtime_enabled():
-		frappe.throw(_("The agent runtime is switched off."))
-
+	# The same checks `start_conversation` makes, in one place: runtime on, agent
+	# readable, enabled, allowed to this user, and running as them.
+	agent_doc = _chat_agent(agent)
 	settings = frappe.get_cached_doc("Agent Settings")
-
-	frappe.has_permission("Agent", "read", doc=agent, throw=True)
-	agent_doc = frappe.get_doc("Agent", agent)
-
-	if not cint(agent_doc.enabled):
-		frappe.throw(_("Agent {0} is disabled.").format(agent_doc.name))
-
-	if not _user_may_use(agent_doc, set(frappe.get_roles())):
-		raise frappe.PermissionError(_("You are not allowed to use the agent {0}.").format(agent_doc.name))
-
-	if agent_doc.run_as != "Session User":
-		frappe.throw(
-			_("Agent {0} runs as a service user and cannot be started from chat.").format(agent_doc.name)
-		)
 
 	context_doctype, context_name = _validate_context(context_doctype, context_name)
 
