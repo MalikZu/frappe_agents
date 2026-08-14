@@ -54,9 +54,10 @@ The log follows the text down the page, unless you have scrolled up to read
 something earlier; then it stays where you put it.
 
 Anything the agent set in `code` — a File name, a fieldname, a doctype — copies
-when you click it, or when you reach it with the keyboard and press Enter. Hover
-an answer and a copy button appears in its corner: that one copies the whole
-message, as the markdown it was written in.
+when you click it. It stays ordinary text otherwise: select it, read it, leave
+it. Hover an answer and a copy button appears in its corner; that one copies the
+whole message, as the markdown it was written in, and it is the one the keyboard
+reaches.
 
 Some models think before they answer. That shows as a strip above the answer:
 open and running while it thinks, then folded into one line — **Thought for 4s**
