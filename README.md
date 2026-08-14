@@ -53,7 +53,7 @@ Early software — expect sharp edges and breaking changes. On a real site, pin
 a release: `main` moves whenever something lands.
 
 ```bash
-bench get-app --branch v0.4.0 https://github.com/MalikZu/frappe_agents
+bench get-app --branch v0.5.0 https://github.com/MalikZu/frappe_agents
 bench --site yoursite install-app frappe_agents
 ```
 
