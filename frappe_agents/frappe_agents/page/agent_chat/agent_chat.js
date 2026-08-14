@@ -29,20 +29,28 @@ const RAIL_STYLES = `
 		color: var(--text-muted); margin: 12px 6px 4px;
 	}
 	.agent-chat-rail-empty { color: var(--text-muted); font-size: var(--text-sm); padding: 10px 6px; }
-	.agent-chat-convo { padding: 6px 8px; border-radius: var(--border-radius-md, 6px); cursor: pointer; margin-bottom: 2px; }
+	.agent-chat-convo-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
+	.agent-chat-convo {
+		flex: 1; min-width: 0; padding: 6px 8px; text-align: start; font: inherit; color: inherit;
+		background: none; border: none; border-radius: var(--border-radius-md, 6px); cursor: pointer;
+	}
 	.agent-chat-convo:hover { background: var(--highlight-color); }
 	.agent-chat-convo.is-active { background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color); }
-	.agent-chat-convo-row { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+	.agent-chat-convo-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
 	.agent-chat-convo-agent { font-weight: 600; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.agent-chat-convo-when { flex: none; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
 	.agent-chat-convo-snippet { display: flex; align-items: baseline; gap: 6px; font-size: var(--text-sm); color: var(--text-muted); }
 	.agent-chat-convo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.agent-chat-convo-actions { flex: none; display: flex; align-items: center; }
 	.agent-chat-rename {
 		flex: none; opacity: 0; font: inherit; font-size: var(--text-xs); color: var(--text-muted);
-		border: none; background: none; padding: 0; cursor: pointer;
+		border: none; background: none; padding: 0 2px; cursor: pointer;
 	}
-	.agent-chat-convo:hover .agent-chat-rename,
+	.agent-chat-convo-row:hover .agent-chat-rename,
 	.agent-chat-rename:focus { opacity: 1; }
+	/* No hover to reveal it on a touch screen, and a control you cannot see but
+	   can hit by accident is worse than one always on show. */
+	@media (hover: none) { .agent-chat-rename { opacity: 1; } }
 	.agent-chat-pane { min-width: 0; padding-inline-start: 14px; }
 	@media (max-width: 720px) {
 		.agent-chat-layout, .agent-chat-layout.is-collapsed {
@@ -276,21 +284,19 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		this.mark_active();
 	}
 
+	/**
+	 * One conversation: a button, with its rename beside it rather than inside it.
+	 * A control within a control has no accessible reading, and the keys the inner
+	 * one answered used to switch the conversation underneath its own dialog.
+	 */
 	render_row(row, when) {
-		const $row = $("<div class='agent-chat-convo'></div>")
-			.attr({ "data-conversation": row.name, role: "button", tabindex: 0 })
+		const $wrapper = $("<div class='agent-chat-convo-row'></div>");
+		const $row = $("<button type='button' class='agent-chat-convo'></button>")
+			.attr("data-conversation", row.name)
 			.on("click", () => this.open_conversation(row.name))
-			.on("keydown", (e) => {
-				if (e.key !== "Enter" && e.key !== " ") return;
-				// The rename button sits inside the row and answers these keys
-				// itself. Without this the row switches conversations underneath
-				// the rename dialog it just opened.
-				if (e.target !== e.currentTarget) return;
-				e.preventDefault();
-				this.open_conversation(row.name);
-			});
+			.appendTo($wrapper);
 
-		const $line = $("<div class='agent-chat-convo-row'></div>").appendTo($row);
+		const $line = $("<div class='agent-chat-convo-head'></div>").appendTo($row);
 		$("<span class='agent-chat-convo-agent'></span>")
 			.text(row.agent_name || row.agent || "")
 			.appendTo($line);
@@ -303,17 +309,16 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		$("<span class='agent-chat-convo-text'></span>")
 			.text(row.snippet || __("No messages yet"))
 			.appendTo($snippet);
-		$("<button type='button' class='agent-chat-rename'></button>")
-			.text(`✎ ${__("rename")}`)
-			.attr("title", __("Rename this conversation"))
-			.on("click", (e) => {
-				// The row underneath switches conversations; renaming is not that.
-				e.stopPropagation();
-				this.rename(row);
-			})
-			.appendTo($snippet);
+		$("<div class='agent-chat-convo-actions'></div>")
+			.append(
+				$("<button type='button' class='agent-chat-rename'></button>")
+					.text(`✎ ${__("rename")}`)
+					.attr("title", __("Rename this conversation"))
+					.on("click", () => this.rename(row))
+			)
+			.appendTo($wrapper);
 
-		return $row;
+		return $wrapper;
 	}
 
 	/** A name the user gives it. No model ever writes a conversation's title. */
