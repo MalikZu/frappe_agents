@@ -8,8 +8,8 @@ opens inside a form, from the **Ask Agent** button.
 The rail on the left lists your own conversations, most recent first, under
 Today, Yesterday and Earlier. Each row names the agent, the first thing you
 said, and how long ago it happened. Click a row to carry on with it; the page
-does not reload. Hover the open one and click the pencil to give it a name of
-your own — no model ever writes a title. **New chat** sits at the top of the
+does not reload. Hover a row and click the pencil to give it a name of your
+own — no model ever writes a title. **New chat** sits at the top of the
 rail and at the top right of the page. The `«` button folds the rail away, and
 it stays folded until you open it again.
 
