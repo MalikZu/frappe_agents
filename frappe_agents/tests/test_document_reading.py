@@ -548,6 +548,41 @@ class TestOneCallStaysInsideTheCap(ReadingTestCase):
 		self.assertLess(len(result["read"]), result["total"])
 		self.assertIn("read_document again", result["note"])
 
+	def test_only_the_slides_that_fit_are_ever_parsed(self):
+		"""A deck is one zip member per slide, so reading them all is the cost.
+
+		The cap throws nearly all of a big deck away, so parsing it all first is
+		work nobody asked for — and because each member is read out of the archive
+		by name, doing it eagerly grows with the square of the slide count.
+		"""
+		total, slide = reader.pptx_slides(pptx_bytes([["s"]] * 2000))
+		self.assertEqual(total, 2000)
+
+		parsed = []
+
+		def counted(number: int):
+			parsed.append(number)
+			return slide(number)
+
+		reader._assemble((total, counted), None, reader.UNIT_SLIDE, reader.LANE_PPTX)
+
+		self.assertTrue(parsed)
+		self.assertLess(len(parsed), total)
+
+	def test_asking_for_one_slide_parses_one_slide(self):
+		total, slide = reader.pptx_slides(pptx_bytes([["one"], ["two"], ["three"]]))
+
+		parsed = []
+
+		def counted(number: int):
+			parsed.append(number)
+			return slide(number)
+
+		read = reader._assemble((total, counted), [3], reader.UNIT_SLIDE, reader.LANE_PPTX)
+
+		self.assertEqual(parsed, [3])
+		self.assertIn("three", read["text"])
+
 
 class TestReadingPlainText(ReadingTestCase):
 	"""csv, txt, md and json: the bytes, decoded, through the same caps."""
