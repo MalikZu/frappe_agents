@@ -32,6 +32,7 @@ reference, File's own read permission, then `require_provenance` for the anchor.
 import re
 import zipfile
 from io import BytesIO, StringIO
+from itertools import islice
 from typing import Any
 from xml.etree import ElementTree
 
@@ -42,6 +43,7 @@ from frappe.utils import cint, flt
 from frappe_agents.context.untrusted import wrap
 from frappe_agents.extraction.pipeline import (
 	DEFAULT_MAX_FILE_MB,
+	DEFAULT_MAX_PAGES,
 	pick_profile,
 	read_source,
 	require_provenance,
@@ -65,6 +67,17 @@ MAX_CELL_CHARS = 500
 # for a thousand pages of work that the character cap will throw away anyway.
 MAX_UNITS = 100
 
+# What a whole document may be, before any of it is read. The caps above bound
+# one page or one sheet; these bound the document, and they are the ones a
+# crafted file goes after: a file that is small on disk can still declare a
+# hundred thousand pages, sheets or zip members, and walking them is the work.
+# Every one of these is checked before the first unit is touched.
+MAX_TOTAL_UNITS = 20_000
+MAX_TOTAL_SHEETS = 500
+MAX_TOTAL_CELLS = 200_000
+# One sheet's full allowance, which is what the cell budget is spent in.
+SHEET_CELLS = (MAX_SHEET_ROWS + 1) * (MAX_SHEET_COLS + 1)
+
 # The blank line between two units, counted against the cap like everything else.
 SEPARATOR = "\n\n"
 SEPARATOR_CHARS = len(SEPARATOR)
@@ -78,6 +91,13 @@ TEXT_LAYER_MIN_CHARS = 8
 # A member of a docx or pptx is decompressed before it is parsed, so its own
 # declared size is checked first: a zip bomb is 40 KB on disk.
 MAX_XML_BYTES = 20 * 1024 * 1024
+
+# And the archive as a whole, because a bomb does not have to be one large
+# member: ten thousand small ones cost the same and pass every per-member check.
+# Both are read off the central directory before a single member is opened, and
+# the byte budget is spent again as members are actually read.
+MAX_ARCHIVE_MEMBERS = 25_000
+MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 
 FORMAT_PDF = "pdf"
 FORMAT_IMAGE = "image"
@@ -372,11 +392,24 @@ def _assemble(units: Any, wanted: list[int] | None, unit: str, lane: str, **extr
 			**extra,
 		)
 
-	numbers = wanted or list(range(1, total + 1))
-	beyond = [number for number in numbers if number > total]
-	if beyond and len(beyond) == len(numbers):
-		raise ValueError(f"This document has {total} {unit}(s), so there is no {unit} {beyond[0]}.")
-	numbers = [number for number in numbers if number <= total]
+	# Before the first unit is touched: a document that declares more units than
+	# this is not read at all. Walking them is the cost, whatever each one holds.
+	if total > MAX_TOTAL_UNITS:
+		raise ValueError(
+			f"This document declares {total} {unit}(s), and at most {MAX_TOTAL_UNITS} can be read."
+		)
+
+	if wanted:
+		beyond = [number for number in wanted if number > total]
+		if len(beyond) == len(wanted):
+			raise ValueError(f"This document has {total} {unit}(s), so there is no {unit} {beyond[0]}.")
+		numbers: Any = [number for number in wanted if number <= total]
+		asked = len(numbers)
+	else:
+		# A range, not a list of one: "as much as fits" must not cost a list of
+		# every unit in the document before it reads the first one.
+		numbers = range(1, total + 1)
+		asked = total
 
 	pieces: list[str] = []
 	read: list[int] = []
@@ -404,7 +437,7 @@ def _assemble(units: Any, wanted: list[int] | None, unit: str, lane: str, **extr
 		read.append(number)
 		budget -= cost
 
-	truncated = cut or len(read) < len(numbers) or (not wanted and len(read) < total)
+	truncated = cut or len(read) < asked
 	return dict(
 		text=SEPARATOR.join(pieces).strip(),
 		lane=lane,
@@ -412,12 +445,12 @@ def _assemble(units: Any, wanted: list[int] | None, unit: str, lane: str, **extr
 		read=read,
 		total=total,
 		truncated=truncated,
-		note=_note(unit, read, total, numbers, cut),
+		note=_note(unit, read, total, asked, cut),
 		**extra,
 	)
 
 
-def _note(unit: str, read: list[int], total: int, numbers: list[int], cut: bool) -> str:
+def _note(unit: str, read: list[int], total: int, asked: int, cut: bool) -> str:
 	"""One sentence about what came back, and how to ask for the rest."""
 	if not read:
 		return f"Nothing fitted in one call. Ask for one {unit} at a time."
@@ -426,13 +459,17 @@ def _note(unit: str, read: list[int], total: int, numbers: list[int], cut: bool)
 	if cut:
 		said += f" That {unit} was longer than one call holds and is cut off at the end."
 
-	remaining = [number for number in range(1, total + 1) if number not in read]
-	if not remaining:
+	if len(read) >= total:
 		return said if total > 1 else "The whole document."
-	if len(numbers) < total and read == numbers:
+	if asked < total and len(read) == asked:
 		# They asked for exactly this much and got it. Nothing to chase.
 		return said
-	return f"{said} Call read_document again with pages={_span(remaining[:MAX_UNITS])!r} for the rest."
+
+	# Only as many as the next call may ask for, found without building a list of
+	# every unit the document has.
+	seen = set(read)
+	remaining = list(islice((number for number in range(1, total + 1) if number not in seen), MAX_UNITS))
+	return f"{said} Call read_document again with pages={_span(remaining)!r} for the rest."
 
 
 def _span(numbers: list[int]) -> str:
@@ -490,6 +527,13 @@ def _read_pdf(file_doc: Any, content: bytes, settings: Any, wanted: list[int] | 
 		total = len(reader.pages)
 	except PdfReadError as exc:
 		raise ValueError(f"This PDF could not be read ({exc}).")
+
+	# The same page cap extraction enforces, on the same file. A PDF that carries
+	# its own text took the cheap lane, not a different document: whichever lane
+	# runs, the site's answer to "how big a PDF may this app open" is one number.
+	max_pages = cint(settings.get("max_extraction_pages")) or DEFAULT_MAX_PAGES
+	if total > max_pages:
+		raise ValueError(f"This PDF has {total} pages and reading is limited to {max_pages}.")
 
 	def page(number: int) -> tuple[str, str]:
 		try:
@@ -552,12 +596,56 @@ def _read_by_sight(file_doc: Any, settings: Any) -> dict:
 
 
 def _read_spreadsheet(document_format: str, content: bytes, wanted: list[int] | None) -> dict:
-	sheets = xlsx_sheets(content) if document_format == FORMAT_XLSX else xls_sheets(content)
-	return _assemble(sheets, wanted, UNIT_SHEET, LANE_SPREADSHEET)
+	total, sheet, close = xlsx_sheets(content) if document_format == FORMAT_XLSX else xls_sheets(content)
+	try:
+		return _assemble((total, sheet), wanted, UNIT_SHEET, LANE_SPREADSHEET)
+	finally:
+		close()
 
 
-def xlsx_sheets(content: bytes) -> list[tuple[str, str]]:
-	"""Every sheet as a bounded plain-text table. Values only — never formulas."""
+class _Cells:
+	"""What one reading may take out of a workbook, across all of its sheets.
+
+	Per-sheet caps bound a sheet. A workbook with five hundred sheets is five
+	hundred times that, so the whole reading gets one purse and every sheet spends
+	from it. A sheet that arrives with the purse empty comes back saying so rather
+	than costing another two hundred rows nobody will see.
+	"""
+
+	def __init__(self, budget: int | None = None):
+		self.left = MAX_TOTAL_CELLS if budget is None else budget
+
+	def rows(self) -> int:
+		"""A sheet's full allowance, or none of it.
+
+		Whole sheets rather than part of one: a table that says "only the first 200
+		rows are shown" has to mean it, and half an allowance would make that
+		sentence a lie in a case nobody would think to check.
+		"""
+		return MAX_SHEET_ROWS + 1 if self.left >= SHEET_CELLS else 0
+
+	def spend(self, rows: list[list[Any]]) -> None:
+		self.left = max(0, self.left - sum(len(row) for row in rows))
+
+
+SPENT_NOTE = "(the cell budget for one reading is used up before this sheet)"
+
+
+def _sheet_titles(titles: list[str]) -> list[str]:
+	if len(titles) > MAX_TOTAL_SHEETS:
+		raise ValueError(
+			f"This spreadsheet has {len(titles)} sheets, and at most {MAX_TOTAL_SHEETS} can be read."
+		)
+	return titles
+
+
+def xlsx_sheets(content: bytes) -> tuple[int, Any, Any]:
+	"""How many sheets the workbook has, and how to read any one of them.
+
+	Lazy, for the reason the deck lane is: reading every sheet up front is work
+	the character cap throws away, and "every sheet" is the number a crafted
+	workbook chooses. Values only — never formulas.
+	"""
 	import openpyxl
 
 	try:
@@ -567,24 +655,32 @@ def xlsx_sheets(content: bytes) -> list[tuple[str, str]]:
 	except Exception as exc:
 		raise ValueError(f"This spreadsheet could not be read ({exc}).")
 
-	sheets = []
 	try:
-		for index, title in enumerate(book.sheetnames, start=1):
-			sheet = book[title]
-			rows = [
-				list(row)
-				for row in sheet.iter_rows(
-					max_row=MAX_SHEET_ROWS + 1, max_col=MAX_SHEET_COLS + 1, values_only=True
-				)
-			]
-			sheets.append((f"{UNIT_SHEET} {index}: {title}", _table(rows)))
-	finally:
+		titles = _sheet_titles(list(book.sheetnames))
+	except ValueError:
 		book.close()
-	return sheets
+		raise
+
+	cells = _Cells()
+
+	def sheet(number: int) -> tuple[str, str]:
+		title = titles[number - 1]
+		label = f"{UNIT_SHEET} {number}: {title}"
+		allowed = cells.rows()
+		if not allowed:
+			return label, SPENT_NOTE
+		rows = [
+			list(row)
+			for row in book[title].iter_rows(max_row=allowed, max_col=MAX_SHEET_COLS + 1, values_only=True)
+		]
+		cells.spend(rows)
+		return label, _table(rows)
+
+	return len(titles), sheet, book.close
 
 
-def xls_sheets(content: bytes) -> list[tuple[str, str]]:
-	"""The same table from a legacy .xls, read by xlrd."""
+def xls_sheets(content: bytes) -> tuple[int, Any, Any]:
+	"""The same table from a legacy .xls, read by xlrd, and just as lazily."""
 	import xlrd
 
 	try:
@@ -594,18 +690,26 @@ def xls_sheets(content: bytes) -> list[tuple[str, str]]:
 	except Exception as exc:
 		raise ValueError(f"This spreadsheet could not be read ({exc}).")
 
-	sheets = []
-	for index, sheet in enumerate(book.sheets(), start=1):
-		rows = []
-		for row in range(min(sheet.nrows, MAX_SHEET_ROWS + 1)):
-			rows.append(
-				[
-					_xls_value(book, sheet.cell(row, column))
-					for column in range(min(sheet.ncols, MAX_SHEET_COLS + 1))
-				]
-			)
-		sheets.append((f"{UNIT_SHEET} {index}: {sheet.name}", _table(rows)))
-	return sheets
+	names = _sheet_titles(book.sheet_names())
+	cells = _Cells()
+
+	def sheet(number: int) -> tuple[str, str]:
+		table = book.sheet_by_index(number - 1)
+		label = f"{UNIT_SHEET} {number}: {names[number - 1]}"
+		allowed = cells.rows()
+		if not allowed:
+			return label, SPENT_NOTE
+		rows = [
+			[
+				_xls_value(book, table.cell(row, column))
+				for column in range(min(table.ncols, MAX_SHEET_COLS + 1))
+			]
+			for row in range(min(table.nrows, allowed))
+		]
+		cells.spend(rows)
+		return label, _table(rows)
+
+	return len(names), sheet, lambda: None
 
 
 def _xls_value(book: Any, cell: Any) -> Any:
@@ -670,7 +774,7 @@ SLIDE = re.compile(r"^ppt/slides/slide(\d+)\.xml$")
 
 def docx_text(content: bytes) -> str:
 	"""A Word document's paragraphs and tables, in the order they are written."""
-	root = _xml_member(_office_zip(content, "Word document"), "word/document.xml", "Word document")
+	root = _office_zip(content, "Word document").xml("word/document.xml")
 	body = root.find(f"{W}body")
 	if body is None:
 		return ""
@@ -719,11 +823,11 @@ def pptx_slides(content: bytes) -> tuple[int, Any]:
 	— and the cap throws nearly all of it away anyway.
 	"""
 	archive = _office_zip(content, "PowerPoint file")
-	names = [name for name in archive.namelist() if SLIDE.match(name)]
+	names = [name for name in archive.names() if SLIDE.match(name)]
 	names.sort(key=lambda name: int(SLIDE.match(name).group(1)))
 
 	def slide(number: int) -> tuple[str, str]:
-		root = _xml_member(archive, names[number - 1], "PowerPoint file")
+		root = archive.xml(names[number - 1])
 		lines = [
 			"".join(node.text or "" for node in paragraph.iter(f"{A}t")) for paragraph in root.iter(f"{A}p")
 		]
@@ -742,40 +846,74 @@ def _tidy(lines: list[str]) -> str:
 	return "\n".join(kept).strip()
 
 
-def _office_zip(content: bytes, what: str) -> zipfile.ZipFile:
-	"""An office file's archive, opened once. Its members are read from this one."""
-	try:
-		return zipfile.ZipFile(BytesIO(content))
-	except zipfile.BadZipFile:
-		raise ValueError(f"This {what} could not be opened.")
+class _OfficeArchive:
+	"""An office file's zip, opened once, with a budget for the whole reading.
 
+	The archive is checked before a member is opened: how many parts it declares,
+	and what they say they unpack to. A zip bomb does not have to be one enormous
+	member — ten thousand small ones cost the same and pass every per-member
+	check — so the count and the total are the checks that catch it, and both are
+	read off the central directory rather than by decompressing anything.
 
-def _xml_member(archive: zipfile.ZipFile, member: str, what: str) -> Any:
-	"""One XML part of an office file, opened defensively.
-
-	Two things are checked before anything is parsed, because both are cheap to
-	build and expensive to meet: the decompressed size of the member — a zip bomb
-	is small on disk and enormous in memory — and any DTD, which is how an XML
-	file asks a parser to expand itself or to go and fetch something.
+	The same total is then spent as members are actually read, because a central
+	directory is what the file says about itself, not what it does.
 	"""
-	try:
-		info = archive.getinfo(member)
-	except KeyError:
-		raise ValueError(f"This {what} has no {member} in it, so there is nothing to read.")
-	if info.file_size > MAX_XML_BYTES:
-		raise ValueError(f"This {what} is too large to read.")
-	try:
-		with archive.open(info) as handle:
-			raw = handle.read(MAX_XML_BYTES + 1)
-	except zipfile.BadZipFile:
-		raise ValueError(f"This {what} could not be opened.")
 
-	if len(raw) > MAX_XML_BYTES:
-		raise ValueError(f"This {what} is too large to read.")
-	if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:
-		raise ValueError(f"This {what} declares its own XML entities, which are not read here.")
+	def __init__(self, content: bytes, what: str):
+		try:
+			self.zip = zipfile.ZipFile(BytesIO(content))
+			infos = self.zip.infolist()
+		except zipfile.BadZipFile:
+			raise ValueError(f"This {what} could not be opened.")
 
-	try:
-		return ElementTree.fromstring(raw)
-	except ElementTree.ParseError as exc:
-		raise ValueError(f"This {what} is damaged and could not be read ({exc}).")
+		self.what = what
+		if len(infos) > MAX_ARCHIVE_MEMBERS:
+			raise ValueError(f"This {what} has {len(infos)} parts in it, which is too many to read.")
+		if sum(info.file_size for info in infos) > MAX_ARCHIVE_BYTES:
+			raise ValueError(f"This {what} unpacks to more than one reading can hold.")
+		self.left = MAX_ARCHIVE_BYTES
+
+	def names(self) -> list[str]:
+		return self.zip.namelist()
+
+	def xml(self, member: str) -> Any:
+		"""One XML part of an office file, opened defensively.
+
+		Three things are checked before anything is parsed, because all three are
+		cheap to build and expensive to meet: the decompressed size of the member —
+		a zip bomb is small on disk and enormous in memory — what this reading has
+		already unpacked, and any DTD, which is how an XML file asks a parser to
+		expand itself or to go and fetch something.
+		"""
+		what = self.what
+		try:
+			info = self.zip.getinfo(member)
+		except KeyError:
+			raise ValueError(f"This {what} has no {member} in it, so there is nothing to read.")
+		if info.file_size > MAX_XML_BYTES:
+			raise ValueError(f"This {what} is too large to read.")
+		if self.left <= 0:
+			raise ValueError(f"This {what} unpacks to more than one reading can hold.")
+
+		limit = min(MAX_XML_BYTES, self.left)
+		try:
+			with self.zip.open(info) as handle:
+				raw = handle.read(limit + 1)
+		except zipfile.BadZipFile:
+			raise ValueError(f"This {what} could not be opened.")
+
+		self.left -= len(raw)
+		if len(raw) > limit:
+			raise ValueError(f"This {what} is too large to read.")
+		if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:
+			raise ValueError(f"This {what} declares its own XML entities, which are not read here.")
+
+		try:
+			return ElementTree.fromstring(raw)
+		except ElementTree.ParseError as exc:
+			raise ValueError(f"This {what} is damaged and could not be read ({exc}).")
+
+
+def _office_zip(content: bytes, what: str) -> _OfficeArchive:
+	"""An office file's archive, opened once. Its members are read from this one."""
+	return _OfficeArchive(content, what)

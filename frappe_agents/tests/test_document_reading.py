@@ -33,6 +33,7 @@ from frappe_agents.tests.fixtures import (
 	ORDER_LIVE,
 	AgentTestCase,
 	call_tool,
+	extraction_settings,
 	make_pdf,
 	make_pdf_attachment,
 	make_run,
@@ -672,6 +673,104 @@ class TestReadingRefusals(ReadingTestCase):
 
 		self.assertFalse(payload["ok"])
 		self.assertIn("pages must be", payload["error"])
+
+
+def zip_bomb(members: int, member_bytes: int) -> bytes:
+	"""A deck that is nothing on disk and a great deal once it is unpacked."""
+	buffer = BytesIO()
+	with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+		archive.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+		for index in range(1, members + 1):
+			archive.writestr(f"ppt/slides/slide{index}.xml", "<a>" + "a" * member_bytes + "</a>")
+	return buffer.getvalue()
+
+
+class TestTotalDocumentComplexity(ReadingTestCase):
+	"""What a document may be in total, checked before any of it is walked.
+
+	The per-unit caps bound one page, one sheet, one zip member. None of them
+	bounds a file that stays small and legal on every one of those counts while
+	declaring a hundred thousand of them: the walk itself is the work, and a
+	document that is cheap to build must not be expensive to refuse.
+	"""
+
+	def test_reader_enforces_total_document_complexity(self):
+		# A PDF with more pages than this site will open. The text layer took the
+		# cheap lane, not a different document: the page cap is the same one.
+		with extraction_settings(max_extraction_pages=5):
+			payload, _ = self.read("long.pdf", text_pdf([f"Page {number}" for number in range(1, 7)]))
+		self.assertFalse(payload["ok"])
+		self.assertIn("6 pages", payload["error"])
+		self.assertIn("limited to 5", payload["error"])
+
+		# A workbook of more sheets than one reading may walk.
+		with patch.object(reader, "MAX_TOTAL_SHEETS", 3):
+			sheets = {f"Sheet {number}": [["x"]] for number in range(1, 6)}
+			payload, _ = self.read("many.xlsx", xlsx_bytes(sheets))
+		self.assertFalse(payload["ok"])
+		self.assertIn("5 sheets", payload["error"])
+		self.assertIn("at most 3", payload["error"])
+
+		# An office file whose members are small, many and enormous unpacked.
+		with patch.object(reader, "MAX_ARCHIVE_BYTES", 1024 * 1024):
+			content = zip_bomb(members=4, member_bytes=512 * 1024)
+			self.assertLess(len(content), 1024 * 1024)
+			payload, _ = self.read("bomb.pptx", content)
+		self.assertFalse(payload["ok"])
+		self.assertIn("unpacks to more", payload["error"])
+
+		# And the assembler itself: a declared unit count past the total cap is
+		# refused before a single unit is fetched, list of them never built.
+		touched = []
+
+		def counted(number: int) -> tuple[str, str]:
+			touched.append(number)
+			return f"{reader.UNIT_PAGE} {number}", ""
+
+		with self.assertRaises(ValueError) as caught:
+			reader._assemble(
+				(reader.MAX_TOTAL_UNITS + 1, counted),
+				None,
+				reader.UNIT_PAGE,
+				reader.LANE_TEXT_LAYER,
+			)
+		self.assertIn(str(reader.MAX_TOTAL_UNITS), str(caught.exception))
+		self.assertEqual(touched, [])
+
+	def test_an_archive_with_too_many_members_is_refused_by_the_count(self):
+		"""The other half of the same bomb: many members rather than large ones."""
+		with patch.object(reader, "MAX_ARCHIVE_MEMBERS", 3):
+			payload, _ = self.read("crowded.pptx", pptx_bytes([["s"]] * 5))
+
+		self.assertFalse(payload["ok"])
+		self.assertIn("too many to read", payload["error"])
+
+	def test_the_cell_budget_is_spent_across_the_workbook_not_per_sheet(self):
+		"""Two hundred rows is a sheet's allowance. It is not every sheet's allowance."""
+		rows = [[f"c{column}" for column in range(reader.MAX_SHEET_COLS)] for _ in range(200)]
+		content = xlsx_bytes({"One": rows, "Two": rows})
+
+		with patch.object(reader, "MAX_TOTAL_CELLS", reader.SHEET_CELLS):
+			total, sheet, close = reader.xlsx_sheets(content)
+			try:
+				first, second = sheet(1), sheet(2)
+			finally:
+				close()
+
+		self.assertEqual(total, 2)
+		self.assertIn("c0", first[1])
+		self.assertEqual(second[1], reader.SPENT_NOTE)
+
+	def test_a_workbook_inside_the_budget_still_reads_every_sheet_asked_for(self):
+		"""The budget is a ceiling, not a new limit on ordinary spreadsheets."""
+		content = xlsx_bytes({"First": [["one"]], "Second": [["two"]], "Third": [["three"]]})
+
+		result = self.result("small.xlsx", content, pages="1-3")
+
+		self.assertEqual(result["read"], [1, 2, 3])
+		body = self.body(result)
+		for word in ("one", "two", "three"):
+			self.assertIn(word, body)
 
 
 class TestReadingWritesNothing(ReadingTestCase):
