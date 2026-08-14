@@ -297,8 +297,12 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 			.appendTo($wrapper);
 
 		const $line = $("<div class='agent-chat-convo-head'></div>").appendTo($row);
+		// Both of these clip, and a clipped name with no way back to the whole of
+		// it is how two conversations stop being tellable apart.
+		const agent = row.agent_name || row.agent || "";
 		$("<span class='agent-chat-convo-agent'></span>")
-			.text(row.agent_name || row.agent || "")
+			.text(agent)
+			.attr("title", agent)
 			.appendTo($line);
 		$("<span class='agent-chat-convo-when'></span>")
 			.text(frappe.datetime.prettyDate(when, true))
@@ -306,8 +310,10 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 			.appendTo($line);
 
 		const $snippet = $("<div class='agent-chat-convo-snippet'></div>").appendTo($row);
+		const snippet = row.snippet || __("No messages yet");
 		$("<span class='agent-chat-convo-text'></span>")
-			.text(row.snippet || __("No messages yet"))
+			.text(snippet)
+			.attr("title", snippet)
 			.appendTo($snippet);
 		$("<div class='agent-chat-convo-actions'></div>")
 			.append(
