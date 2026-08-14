@@ -183,8 +183,12 @@ class TestToolAuditRedaction(AgentTestCase):
 			[call.tool for call in calls],
 			["create_draft", "update_draft", "search_documents", "update_draft"],
 		)
-		self.assertEqual([call.outcome for call in calls[:2]], ["Success", "Success"])
-		self.assertEqual(calls[3].outcome, "Error")
+		# Three that worked and one that did not. The outcome is the other half of
+		# what an auditor came for, so it survives redaction on all four.
+		self.assertEqual(
+			[call.outcome for call in calls],
+			["Success", "Success", "Success", "Error"],
+		)
 
 		secrets = (self.PASSWORD, self.TOKEN, VENDOR_IBAN, ALTERED_IBAN)
 		for call in calls:
