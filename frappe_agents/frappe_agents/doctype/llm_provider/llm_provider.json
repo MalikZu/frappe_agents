@@ -10,6 +10,7 @@
   "provider_name",
   "provider_type",
   "base_url",
+  "self_hosted",
   "api_key",
   "enabled"
  ],
@@ -37,6 +38,13 @@
    "label": "Base URL"
   },
   {
+   "default": "0",
+   "description": "This host receives your prompts and API key. Only enable for a provider you run yourself. Ticking this allows http:// and addresses on your own network.",
+   "fieldname": "self_hosted",
+   "fieldtype": "Check",
+   "label": "Self Hosted"
+  },
+  {
    "fieldname": "api_key",
    "fieldtype": "Password",
    "label": "API Key"
@@ -51,7 +59,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 12:40:00.000000",
+ "modified": "2026-08-14 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "LLM Provider",

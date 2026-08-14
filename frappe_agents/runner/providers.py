@@ -63,9 +63,11 @@ socket under the read and it ends there and then rather than at the idle timeout
 """
 
 import base64
+import ipaddress
 import json
 from collections.abc import Iterable, Iterator
 from typing import Any
+from urllib.parse import urlsplit
 
 import frappe
 import requests
@@ -164,6 +166,9 @@ EXTRACT_SYSTEM = (
 )
 
 
+SELF_HOSTED_HINT = "Tick Self Hosted on the provider if this is a host you run yourself."
+
+
 class ProviderError(Exception):
 	"""The model call could not be made or came back unusable."""
 
@@ -215,11 +220,86 @@ def _resolve_profile(profile: Any) -> tuple[Any, Any, str]:
 	if not cint(provider.enabled):
 		raise ProviderError(f"Provider {provider.name} is disabled.")
 
+	# Checked again here, not only when the row was saved. A base URL edited
+	# straight in the database, restored from a backup, or written before this
+	# check existed would otherwise get the prompts and the key anyway.
+	refusal = endpoint_refusal(provider.base_url, provider.get("self_hosted"))
+	if refusal:
+		raise ProviderError(
+			f"Provider {provider.name} has an unsafe Base URL, so nothing was sent. "
+			f"{refusal} Edit the LLM Provider to fix it."
+		)
+
 	api_key = provider.get_password("api_key", raise_exception=False)
 	if not api_key:
 		raise ProviderError(f"Provider {provider.name} has no API key set.")
 
 	return profile, provider, api_key
+
+
+def endpoint_refusal(base_url: Any, self_hosted: Any = 0) -> str | None:
+	"""Why this base URL is not a safe destination, or None when it is.
+
+	A provider's base URL is an outbound trust boundary: whatever host it names
+	receives the prompts and the API key. So the default is narrow, and widening
+	it is a deliberate tick of Self Hosted rather than a side effect of typing an
+	address.
+
+	Refused unless Self Hosted is set:
+
+	* any scheme other than https — http would put the key on the wire in clear;
+	* loopback, private (10/8, 172.16/12, 192.168/16), link-local (169.254/16,
+	  where cloud instance metadata lives) and unspecified addresses.
+
+	Refused either way: a `user:pass@host` form. That is never right for an API
+	base, and the credential would ride along in every request.
+
+	An empty base URL means "use the provider default", which is our own https
+	endpoint, so it passes.
+
+	This checks the literal host and nothing else. A hostname that merely
+	*resolves* into a private range still passes: catching that means resolving
+	here and then pinning the address the socket actually connects to, which is a
+	different piece of work from this one.
+	"""
+	base_url = (base_url or "").strip()
+	if not base_url:
+		return None
+
+	try:
+		parts = urlsplit(base_url)
+		host = (parts.hostname or "").lower()
+		userinfo = bool(parts.username or parts.password)
+	except ValueError:
+		return "The Base URL could not be read as a URL."
+
+	if userinfo:
+		return "The Base URL must not carry a username or password. Put the credential in API Key."
+
+	scheme = (parts.scheme or "").lower()
+	if scheme not in ("http", "https"):
+		return "The Base URL must start with https://."
+	if not host:
+		return "The Base URL names no host."
+
+	permissive = bool(cint(self_hosted))
+	if scheme == "http" and not permissive:
+		return f"The Base URL uses http://, which sends your prompts and API key in clear. {SELF_HOSTED_HINT}"
+	if _is_local_host(host) and not permissive:
+		return f"The Base URL points at {host}, which is on your own network. {SELF_HOSTED_HINT}"
+
+	return None
+
+
+def _is_local_host(host: str) -> bool:
+	"""Loopback, private, link-local or unspecified — as written, not as resolved."""
+	if host == "localhost" or host.endswith(".localhost"):
+		return True
+	try:
+		address = ipaddress.ip_address(host)
+	except ValueError:
+		return False
+	return bool(address.is_loopback or address.is_private or address.is_link_local or address.is_unspecified)
 
 
 def _call_openai(
@@ -606,13 +686,19 @@ def _stream_anthropic(
 
 
 def _open_stream(url: str, headers: dict, payload: dict, api_key: str) -> Any:
-	"""Open the response without reading it, and refuse anything but a 200."""
+	"""Open the response without reading it, and refuse anything but a 200.
+
+	`allow_redirects=False` for the same reason `_post` sets it: requests follows
+	a redirect on POST by default and would carry the key to wherever it pointed.
+	A 30x is a status code like any other here, so it lands on the refusal below.
+	"""
 	try:
 		response = requests.post(
 			url,
 			headers=headers,
 			json=payload,
 			stream=True,
+			allow_redirects=False,
 			timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
 		)
 	except requests.RequestException as exc:
@@ -1515,7 +1601,18 @@ def _post(url: str, headers: dict, payload: dict, api_key: str, timeout: int = R
 		# Streamed so that a refusal is read under a cap rather than downloaded
 		# whole and truncated afterwards. An answer is still read in full: that
 		# body is the reply we asked for, and it is what the caller parses.
-		response = requests.post(url, headers=headers, json=payload, timeout=timeout, stream=True)
+		#
+		# Redirects are not followed. The destination was checked before the call;
+		# a hop to somewhere else was not, and following one would hand the API key
+		# to a host nobody configured. A 30x comes back as an unexpected status.
+		response = requests.post(
+			url,
+			headers=headers,
+			json=payload,
+			timeout=timeout,
+			stream=True,
+			allow_redirects=False,
+		)
 	except requests.RequestException as exc:
 		raise ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
 

@@ -29,6 +29,7 @@ from frappe_agents.runner.providers import (
 	STREAM_IDLE_TIMEOUT,
 	TOOL_ARGUMENTS_LIMIT,
 	ProviderError,
+	call_model,
 	call_model_stream,
 	parse_anthropic_stream,
 	parse_openai_stream,
@@ -901,3 +902,82 @@ class TestStreamTransport(AgentTestCase):
 			next(stream)
 			stream.close()
 		self.assertTrue(response.closed)
+
+
+class TestProviderEndpoint(AgentTestCase):
+	"""Where a provider may send prompts and the API key.
+
+	A base URL is configuration, but it is also the outbound trust boundary: the
+	host it names gets the prompt and the key. So the form refuses an unsafe one,
+	the request refuses it again, and neither follows a redirect to somewhere the
+	administrator never wrote down.
+	"""
+
+	def provider_doc(self, base_url: str, self_hosted: int = 0):
+		doc = frappe.get_doc(
+			{
+				"doctype": "LLM Provider",
+				"provider_name": f"FA Endpoint {frappe.generate_hash(length=8)}",
+				"provider_type": "OpenAI Compatible",
+				"base_url": base_url,
+				"self_hosted": self_hosted,
+				"api_key": "fa-endpoint-key",
+				"enabled": 1,
+			}
+		)
+		doc.flags.ignore_permissions = True
+		return doc
+
+	def test_provider_endpoint_validation_rejects_unsafe_destinations(self):
+		refused = (
+			"http://api.example.com/v1",
+			"https://user:pass@api.example.com/v1",
+			"https://10.1.2.3/v1",
+			"https://172.16.4.5/v1",
+			"https://192.168.0.9/v1",
+			# The address a cloud instance's own credentials answer on.
+			"https://169.254.169.254/latest",
+			"https://127.0.0.1:8080/v1",
+			"https://localhost:11434/v1",
+			"ftp://api.example.com/v1",
+			"api.example.com/v1",
+		)
+		for base_url in refused:
+			with self.subTest(base_url=base_url):
+				with self.assertRaises(frappe.ValidationError):
+					self.provider_doc(base_url).insert(ignore_permissions=True)
+
+		# https to a host somebody else runs needs no flag, and the same private
+		# address is allowed once an administrator says they run it themselves.
+		self.provider_doc("https://api.example.com/v1").insert(ignore_permissions=True)
+		self.provider_doc("http://localhost:11434/v1", self_hosted=1).insert(ignore_permissions=True)
+
+		# A redirect is refused rather than followed — on both wire paths, because
+		# requests follows one on POST by default and would carry the key along.
+		for call in (
+			lambda: list(call_model_stream(PROFILE, MESSAGES)),
+			lambda: call_model(PROFILE, MESSAGES),
+		):
+			moved = FakeStream([], status_code=302, text="Moved to https://elsewhere.example.com")
+			with patch("frappe_agents.runner.providers.requests.post", return_value=moved) as post:
+				with self.assertRaises(ProviderError) as caught:
+					call()
+			self.assertFalse(post.call_args.kwargs["allow_redirects"])
+			self.assertIn("302", str(caught.exception))
+			self.assertNotIn("fa-test-key", str(caught.exception))
+
+		# And the request checks the destination itself: the fixture provider is
+		# only usable because it says it is self-hosted. Take that away and nothing
+		# goes out, with the key nowhere in what comes back.
+		frappe.db.set_value("LLM Provider", PROVIDER, "self_hosted", 0, update_modified=False)
+		frappe.clear_document_cache("LLM Provider", PROVIDER)
+		self.addCleanup(frappe.clear_document_cache, "LLM Provider", PROVIDER)
+
+		with patch("frappe_agents.runner.providers.requests.post") as post:
+			with self.assertRaises(ProviderError) as caught:
+				call_model_stream(PROFILE, MESSAGES)
+		post.assert_not_called()
+		message = str(caught.exception)
+		self.assertIn(PROVIDER, message)
+		self.assertIn("Edit the LLM Provider", message)
+		self.assertNotIn("fa-test-key", message)
