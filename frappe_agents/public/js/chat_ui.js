@@ -84,8 +84,27 @@ const STYLES = `
 	.agent-chat-bubble { max-width: 78%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; background: var(--control-bg); }
 	.agent-chat-row.is-user .agent-chat-bubble { background: var(--bg-light-gray, var(--control-bg)); }
 	.agent-chat-row.is-error .agent-chat-bubble { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
-	.agent-chat-tool { font-size: var(--text-sm); color: var(--text-muted); margin: 2px 0 6px 2px; cursor: pointer; font-family: var(--font-stack-mono, monospace); }
-	.agent-chat-tool-args { display: none; margin: 4px 0 8px 14px; padding: 6px 8px; background: var(--control-bg); border-radius: 6px; font-size: var(--text-sm); white-space: pre-wrap; }
+	.agent-chat-tool { margin: 2px 0 6px 2px; }
+	.agent-chat-tool-head {
+		display: inline-flex; align-items: flex-start; gap: 6px; max-width: 100%;
+		padding: 1px 0; border: none; background: none; text-align: left;
+		font: inherit; font-family: var(--font-stack-mono, monospace); font-size: var(--text-sm);
+		color: var(--text-muted); cursor: pointer;
+	}
+	.agent-chat-tool-head:hover { color: var(--text-color); }
+	.agent-chat-tool-caret { display: inline-block; font-size: 9px; padding-top: 3px; }
+	.agent-chat-tool.is-open .agent-chat-tool-caret { transform: rotate(90deg); }
+	.agent-chat-tool-detail { display: none; margin: 2px 0 8px 14px; }
+	.agent-chat-tool.is-open .agent-chat-tool-detail { display: block; }
+	.agent-chat-tool-label { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin-top: 6px; }
+	.agent-chat-tool-block {
+		max-height: 260px; overflow: auto; margin: 2px 0 0; padding: 6px 8px;
+		background: var(--control-bg); border-radius: 6px;
+		font-family: var(--font-stack-mono, monospace); font-size: var(--text-sm);
+		white-space: pre-wrap; word-break: break-word;
+	}
+	.agent-chat-tool-block.is-waiting { color: var(--text-muted); font-style: italic; }
+	.agent-chat-tool-block.is-error { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
 	.agent-chat-think { margin: 0 0 8px 2px; }
 	.agent-chat-think-head {
 		display: inline-flex; align-items: center; gap: 6px; padding: 1px 0;
@@ -1021,6 +1040,7 @@ frappe_agents.ChatUI = class ChatUI {
 			if (event.type !== "tool_execution_end") return;
 
 			this.finish_tool_line(this.tool_lines[tool_line_key(run, event.toolCallId)]);
+			this.record_tool_result(run, event);
 
 			const proposal = proposal_from_event(event);
 			if (!proposal) return;
@@ -1221,6 +1241,7 @@ frappe_agents.ChatUI = class ChatUI {
 			// Usually already finished by the legacy event just before this one.
 			// Not always: a tool the kill switch refused publishes no legacy event.
 			this.finish_tool_line(this.tool_lines[tool_line_key(data.run, event.toolCallId)]);
+			this.record_tool_result(data.run, event);
 		} else if (event.type === "message_end") {
 			this.finish_stream_message(data.run, event.message);
 		}
@@ -1360,8 +1381,7 @@ frappe_agents.ChatUI = class ChatUI {
 		if (!id || this.tool_lines[key]) return;
 
 		const line = this.make_tool_line(event.toolName || "tool", event.args || {}, true);
-		this.insert_before_pending(run, line.$line);
-		this.insert_before_pending(run, line.$args);
+		this.insert_before_pending(run, line.$el);
 
 		this.tool_lines[key] = line;
 		const waiting = tool_line_key(run, line.tool);
@@ -1382,17 +1402,75 @@ frappe_agents.ChatUI = class ChatUI {
 		}
 
 		const line = this.make_tool_line(tool, args, false);
-		this.insert_before_pending(data.run, line.$line);
-		this.insert_before_pending(data.run, line.$args);
+		// A line with no started event behind it will get no result event either.
+		// What this event says about the outcome is all there will ever be.
+		if (!data.ok && data.error) this.write_tool_result(line, data.error, true);
+		this.insert_before_pending(data.run, line.$el);
 	}
 
-	/** One tool line: the call, and its full arguments behind a click. */
+	/**
+	 * One tool line: the call, and behind a click the arguments it ran with and
+	 * what it handed back.
+	 *
+	 * Both halves are the same data the run's event log already gives this
+	 * person — the call ran under their own permissions — so opening a line
+	 * discloses nothing new; it saves a trip to another doctype to find out what
+	 * the agent actually did. The head is a button, so it opens from the keyboard
+	 * like the composer chips and the thinking strip.
+	 */
 	make_tool_line(tool, args, running) {
 		const pretty = pretty_args(args);
-		const $line = $("<div class='agent-chat-tool'></div>").text(tool_line_text(tool, pretty, running));
-		const $args = $("<pre class='agent-chat-tool-args'></pre>").text(pretty);
-		$line.on("click", () => $args.toggle());
-		return { $line: $line, $args: $args, tool: tool, args: args, done: !running };
+		const line = { tool: tool, args: args, done: !running };
+
+		line.$el = $("<div class='agent-chat-tool'></div>");
+		line.$head = $("<button type='button' class='agent-chat-tool-head'></button>")
+			.attr("aria-expanded", "false")
+			.appendTo(line.$el);
+		$("<span class='agent-chat-tool-caret'>▸</span>").appendTo(line.$head);
+		line.$text = $("<span></span>").text(tool_line_text(tool, pretty, running)).appendTo(line.$head);
+
+		const $detail = $("<div class='agent-chat-tool-detail'></div>").appendTo(line.$el);
+		$("<div class='agent-chat-tool-label'></div>").text(__("Arguments")).appendTo($detail);
+		line.$args = $("<pre class='agent-chat-tool-block'></pre>").text(pretty).appendTo($detail);
+		line.$result_label = $("<div class='agent-chat-tool-label'></div>")
+			.text(__("Result"))
+			.appendTo($detail);
+		line.$result = $("<pre class='agent-chat-tool-block is-waiting'></pre>")
+			.text(running ? __("Still running…") : __("Nothing was recorded for this call."))
+			.appendTo($detail);
+
+		line.$head.on("click", () => this.toggle_tool(line));
+		return line;
+	}
+
+	toggle_tool(line) {
+		const open = !line.$el.hasClass("is-open");
+		line.$el.toggleClass("is-open", open);
+		line.$head.attr("aria-expanded", open ? "true" : "false");
+	}
+
+	/**
+	 * What a finished tool handed back, written onto the line that called it.
+	 *
+	 * Separate from finishing the line because the two arrive separately: the
+	 * legacy tool_call event resolves the line and carries no result, so the
+	 * result usually lands on a line that is already done. The text is exactly
+	 * what was stored, truncation note and all — a result that was cut is a fact
+	 * about the run, not something to hide.
+	 */
+	record_tool_result(run, event) {
+		const line = this.tool_lines[tool_line_key(run, event.toolCallId)];
+		if (!line) return;
+		this.write_tool_result(line, result_text(event.result), Boolean(event.isError));
+	}
+
+	/** Fill in a line's result box. Empty text still says something happened. */
+	write_tool_result(line, text, failed) {
+		line.$result_label.text(failed ? __("Error") : __("Result"));
+		line.$result
+			.removeClass("is-waiting")
+			.toggleClass("is-error", Boolean(failed))
+			.text(text || __("It returned nothing."));
 	}
 
 	/** The oldest started line for this tool on this run that has not finished yet. */
@@ -1411,11 +1489,11 @@ frappe_agents.ChatUI = class ChatUI {
 		line.done = true;
 		if (args !== undefined) {
 			const pretty = pretty_args(args);
-			line.$line.text(tool_line_text(line.tool, pretty, false));
+			line.$text.text(tool_line_text(line.tool, pretty, false));
 			line.$args.text(pretty);
 			return;
 		}
-		line.$line.text(tool_line_text(line.tool, pretty_args(line.args), false));
+		line.$text.text(tool_line_text(line.tool, pretty_args(line.args), false));
 	}
 
 	/**
