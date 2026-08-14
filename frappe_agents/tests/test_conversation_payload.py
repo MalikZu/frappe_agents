@@ -20,17 +20,30 @@ from unittest.mock import patch
 
 import frappe
 
-from frappe_agents.api import get_conversation, start_run
+from frappe_agents.api import (
+	CONVERSATION_BYTE_BUDGET,
+	CONVERSATION_RUN_LIMIT,
+	get_conversation,
+	start_run,
+)
 from frappe_agents.tests.fixtures import (
 	AGENT,
 	RESTRICTED_USER,
 	AgentTestCase,
 	as_user,
+	make_conversation,
+	make_run,
 )
 
 # The payload as of 0.3.0, before the rail, the model chip and the context chip.
 LEGACY_KEYS = {"name", "agent", "title", "last_activity", "runs"}
 ADDED_KEYS = {"agent_name", "model_profile", "context"}
+# Added on purpose after the 2026-08-14 review found this endpoint returning
+# every run of a conversation, however long it had grown. `runs` is now the end
+# of the conversation rather than all of it, and these two keys are how a caller
+# is told so: `truncated` that older turns exist, `next_before` what to pass as
+# `before` to read them. A caller that ignores both still gets runs it can draw.
+PAGE_KEYS = {"truncated", "next_before"}
 LEGACY_RUN_KEYS = {
 	"name",
 	"status",
@@ -85,11 +98,20 @@ class TestConversationPayload(AgentTestCase):
 		self.assertFalse(payload["title"])
 		self.assertIsInstance(payload["runs"], list)
 
-	def test_nothing_was_added_beyond_the_three_new_keys(self):
+	def test_nothing_was_added_beyond_the_keys_that_were_meant_to_be(self):
 		"""A key nobody meant to add is a key someone will come to depend on."""
 		conversation, _ = self.legacy_conversation()
 
-		self.assertEqual(set(self.read(conversation)), LEGACY_KEYS | ADDED_KEYS)
+		self.assertEqual(set(self.read(conversation)), LEGACY_KEYS | ADDED_KEYS | PAGE_KEYS)
+
+	def test_a_short_conversation_says_it_is_all_there(self):
+		"""The paging keys are answers, not conditions: one turn is a whole page."""
+		conversation, _ = self.legacy_conversation()
+
+		payload = self.read(conversation)
+
+		self.assertFalse(payload["truncated"])
+		self.assertIsNone(payload["next_before"])
 
 	def test_the_new_keys_are_present_and_empty(self):
 		conversation, _ = self.legacy_conversation()
@@ -116,3 +138,94 @@ class TestConversationPayload(AgentTestCase):
 		self.assertEqual(rows[0]["event_log"], [])
 		# A run from before extraction existed read nothing, and says so.
 		self.assertEqual(rows[0]["extractions"], [])
+
+
+def big_log(chars: int, turn: int) -> str:
+	"""An event log of about `chars`, shaped the way the runner writes one."""
+	return frappe.as_json({"events": [{"type": "tool_result", "text": f"{turn}:" + "x" * chars}]})
+
+
+class TestConversationPaging(AgentTestCase):
+	"""A conversation nobody ever stops talking in still comes back as one answer.
+
+	Two bounds and not one: a run count, because a conversation has no ceiling,
+	and a byte budget, because one run's event log is allowed half a megabyte and
+	twenty of those are not an answer anybody can render. The page is the end of
+	the conversation — what a person came back to read — and it says what it left
+	out and how to ask for it.
+	"""
+
+	def long_conversation(self, turns: int, log_chars: int = 200) -> str:
+		"""`turns` runs in one conversation, on a timeline of their own.
+
+		The creations are written by hand so the order under test is the order the
+		test asked for, not whatever the clock did during a fast insert loop.
+		"""
+		conversation = make_conversation(RESTRICTED_USER, title="")
+		with as_user(RESTRICTED_USER):
+			for turn in range(1, turns + 1):
+				run = make_run(RESTRICTED_USER, conversation=conversation.name, message=f"Turn {turn}")
+				frappe.db.set_value(
+					"Agent Run",
+					run.name,
+					{
+						"status": "Completed",
+						"output_message": f"Answer {turn}",
+						"event_log": big_log(log_chars, turn),
+						"creation": f"2026-01-01 00:{turn // 60:02d}:{turn % 60:02d}",
+					},
+					update_modified=False,
+				)
+		return conversation.name
+
+	def read(self, conversation: str, **args) -> dict:
+		with as_user(RESTRICTED_USER):
+			return get_conversation(conversation, **args)
+
+	def test_conversation_payload_is_bounded_and_paginated(self):
+		turns = CONVERSATION_RUN_LIMIT + 5
+		# Big enough that the byte budget bites before the run count does, which is
+		# the case a run count alone would miss.
+		conversation = self.long_conversation(turns, log_chars=CONVERSATION_BYTE_BUDGET // 16)
+
+		payload = self.read(conversation)
+		runs = payload["runs"]
+
+		self.assertLessEqual(len(runs), CONVERSATION_RUN_LIMIT)
+		self.assertLess(len(runs), turns)
+		self.assertLessEqual(len(frappe.as_json(payload)), CONVERSATION_BYTE_BUDGET * 2)
+
+		# Oldest first, the way the surface draws them, and ending at the newest
+		# turn: what was dropped was dropped from the far end.
+		said = [run["input_message"] for run in runs]
+		self.assertEqual(said, sorted(said, key=lambda text: int(text.split()[1])))
+		self.assertEqual(said[-1], f"Turn {turns}")
+
+		self.assertTrue(payload["truncated"])
+		self.assertTrue(payload["next_before"])
+
+	def test_the_continuation_marker_reads_the_turns_above_the_page(self):
+		turns = CONVERSATION_RUN_LIMIT + 5
+		conversation = self.long_conversation(turns, log_chars=CONVERSATION_BYTE_BUDGET // 16)
+
+		page = self.read(conversation)
+		older = self.read(conversation, before=page["next_before"])
+
+		self.assertTrue(older["runs"])
+		# No turn is read twice and none is skipped: the two pages are the
+		# conversation, in order.
+		first = {run["name"] for run in page["runs"]}
+		second = {run["name"] for run in older["runs"]}
+		self.assertFalse(first & second)
+		self.assertEqual(len(first | second), turns)
+		self.assertFalse(older["truncated"])
+
+	def test_a_page_is_never_more_runs_than_the_limit(self):
+		"""The byte budget can leave a page short. The count can never leave it long."""
+		turns = CONVERSATION_RUN_LIMIT + 5
+		conversation = self.long_conversation(turns, log_chars=50)
+
+		payload = self.read(conversation)
+
+		self.assertEqual(len(payload["runs"]), CONVERSATION_RUN_LIMIT)
+		self.assertTrue(payload["truncated"])

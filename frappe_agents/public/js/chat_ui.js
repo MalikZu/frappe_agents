@@ -1113,6 +1113,14 @@ frappe_agents.ChatUI = class ChatUI {
 		if (!runs.length) {
 			this.show_empty(this.placeholder);
 		} else {
+			// The server returns the end of a long conversation, not all of it. Say
+			// so where the missing turns would have been, so a short log is a fact
+			// the reader was told rather than one they have to guess at.
+			if (data.truncated) {
+				this.$log.append(
+					$("<div class='agent-chat-status'></div>").text(__("Older messages are not shown."))
+				);
+			}
 			runs.forEach((run) => this.render_past_run(run));
 			this.replay_buffer();
 		}

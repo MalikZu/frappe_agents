@@ -45,6 +45,16 @@ AGENT_USER = "Agent User"
 # Conversation list, which is a list view with paging and filters already.
 CONVERSATION_LIMIT = 50
 
+# One page of a conversation: the last turns of it, and what they may weigh. A
+# conversation grows without limit, so a reload has to ask for an end of it
+# rather than all of it — and a run count bounds nothing on its own, because one
+# run's event log is allowed half a megabyte.
+CONVERSATION_RUN_LIMIT = 20
+CONVERSATION_BYTE_BUDGET = 1_000_000
+# How many extraction rows one page may carry, for the same reason. A page of
+# runs that each read a stack of documents is still one answer.
+CONVERSATION_EXTRACTION_LIMIT = 100
+
 
 @frappe.whitelist()
 def list_agents() -> list[dict]:
@@ -318,8 +328,21 @@ def start_run(
 
 
 @frappe.whitelist()
-def get_conversation(conversation: str) -> dict:
-	"""A conversation and its runs, as the session user is permitted to see them.
+def get_conversation(conversation: str, before: str | None = None, limit: Any = None) -> dict:
+	"""One page of a conversation, as the session user is permitted to see it.
+
+	A page is the end of the conversation: the newest runs, returned oldest first
+	the way they are read. A conversation has no ceiling — a person can talk to an
+	agent all year — so a reload asks for the last few turns and says so, rather
+	than growing into a query, a payload and a redraw that get more expensive
+	every time somebody sends a message.
+
+	Two bounds, because a run count alone bounds nothing: at most
+	`CONVERSATION_RUN_LIMIT` runs, and at most `CONVERSATION_BYTE_BUDGET` of run
+	text and event log. `truncated` says older turns were left out, and
+	`next_before` is what to pass as `before` to ask for the ones just above this
+	page. Whatever is dropped is dropped from the top: the newest turn is the one
+	a person came back to read.
 
 	Each run carries its `event_log` parsed into a list of events, oldest first.
 	That is what the chat surface redraws a proposal card from after a reload —
@@ -337,16 +360,10 @@ def get_conversation(conversation: str) -> dict:
 	frappe.has_permission("Agent Conversation", "read", doc=conversation, throw=True)
 	doc = frappe.get_doc("Agent Conversation", conversation)
 
-	runs = frappe.get_list(
-		"Agent Run",
-		filters={"conversation": doc.name},
-		fields=["name", "status", "input_message", "output_message", "error", "creation", "event_log"],
-		order_by="creation asc",
-		limit_page_length=0,
-	)
+	page = _run_page(doc.name, before, limit)
+	runs = page["runs"]
 	extractions = _run_extractions([run.name for run in runs])
 	for run in runs:
-		run["event_log"] = _run_events(run.get("event_log"))
 		run["extractions"] = extractions.get(run.name) or []
 
 	return {
@@ -358,7 +375,66 @@ def get_conversation(conversation: str) -> dict:
 		"context": _conversation_context(doc),
 		"last_activity": doc.last_activity,
 		"runs": runs,
+		"truncated": page["truncated"],
+		"next_before": page["next_before"],
 	}
+
+
+def _run_page(conversation: str, before: Any, limit: Any) -> dict:
+	"""The newest runs of a conversation that fit in one answer, oldest first.
+
+	Read newest first and turned round at the end. The byte budget is spent from
+	the newest run down, so a conversation whose last turn is enormous still comes
+	back with that turn in it and says the rest was left out.
+	"""
+	count = _run_limit(limit)
+	filters: dict = {"conversation": conversation}
+	if before:
+		filters["creation"] = ("<", get_datetime(before))
+
+	rows = frappe.get_list(
+		"Agent Run",
+		filters=filters,
+		fields=["name", "status", "input_message", "output_message", "error", "creation", "event_log"],
+		order_by="creation desc",
+		# One more than the page, which is how the answer knows there is an older
+		# turn to point at without counting the whole conversation.
+		limit_page_length=count + 1,
+	)
+	more = len(rows) > count
+	rows = rows[:count]
+
+	kept: list[Any] = []
+	spent = 0
+	for row in rows:
+		cost = _run_bytes(row)
+		if kept and spent + cost > CONVERSATION_BYTE_BUDGET:
+			more = True
+			break
+		# Parsed only for the runs that are being returned: a log that was dropped
+		# for weight is not worth the parse either.
+		row["event_log"] = _run_events(row.get("event_log"))
+		kept.append(row)
+		spent += cost
+
+	kept.reverse()
+	return {
+		"runs": kept,
+		"truncated": bool(more),
+		"next_before": str(kept[0].creation) if more and kept else None,
+	}
+
+
+def _run_limit(limit: Any) -> int:
+	limit = cint(limit) or CONVERSATION_RUN_LIMIT
+	return max(1, min(limit, CONVERSATION_RUN_LIMIT))
+
+
+def _run_bytes(row: Any) -> int:
+	"""What this run will weigh in the answer, counted before anything is parsed."""
+	return sum(
+		len(str(row.get(field) or "")) for field in ("input_message", "output_message", "error", "event_log")
+	)
 
 
 def _run_extractions(runs: list[str]) -> dict[str, list[dict]]:
@@ -380,9 +456,12 @@ def _run_extractions(runs: list[str]) -> dict[str, list[dict]]:
 		EXTRACTION,
 		filters={"agent_run": ("in", runs)},
 		fields=["name", "agent_run", "status", "target_doctype", "created_doc"],
-		order_by="creation asc",
-		limit_page_length=0,
+		# Newest first and turned round, for the reason the runs are: a page that
+		# cannot carry every reading should carry the most recent ones.
+		order_by="creation desc",
+		limit_page_length=CONVERSATION_EXTRACTION_LIMIT,
 	)
+	rows.reverse()
 
 	grouped: dict[str, list[dict]] = {}
 	for row in rows:
