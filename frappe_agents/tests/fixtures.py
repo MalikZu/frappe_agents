@@ -211,6 +211,10 @@ ORDER_ROLE_RIGHTS = {
 READ_ONLY_ROLES = (READER_ROLE, PERMLEVEL_ROLE)
 WRITE_RIGHTS = ("write", "create", "delete", "submit", "cancel", "amend")
 
+# Fixture rows this setup run found disabled and switched back on, newest last.
+# Read it with `enablement_changes`, undo it with `restore_enablement`.
+_ENABLEMENT_CHANGES: list[tuple[str, str]] = []
+
 WORKFLOW_NAME = "FA Test Order Workflow"
 WORKFLOW_DRAFT_STATE = "FA Workflow Draft"
 WORKFLOW_APPROVED_STATE = "FA Workflow Approved"
@@ -254,7 +258,13 @@ def as_user(user: str):
 
 
 def ensure_fixtures() -> None:
-	"""Create every fixture the tests need. Safe to call again."""
+	"""Create every fixture the tests need, and repair the ones that moved.
+
+	Safe to call again: everything here is get-or-create, and the rows that carry
+	an on/off switch are put back on. The record of what that repaired is this
+	run's, so it is emptied first.
+	"""
+	_ENABLEMENT_CHANGES.clear()
 	_ensure_roles()
 	_ensure_doctypes()
 	_ensure_read_only_roles()
@@ -1602,6 +1612,8 @@ def _ensure_provider() -> None:
 				"enabled": 1,
 			}
 		).insert(ignore_permissions=True)
+	else:
+		_ensure_enabled("LLM Provider", PROVIDER)
 
 	if not frappe.db.exists("LLM Model Profile", PROFILE):
 		frappe.get_doc(
@@ -1613,6 +1625,8 @@ def _ensure_provider() -> None:
 				"enabled": 1,
 			}
 		).insert(ignore_permissions=True)
+	else:
+		_ensure_enabled("LLM Model Profile", PROFILE)
 
 	if not frappe.db.exists("LLM Model Profile", EXTRACT_PROFILE):
 		frappe.get_doc(
@@ -1626,6 +1640,8 @@ def _ensure_provider() -> None:
 				"supports_images": 1,
 			}
 		).insert(ignore_permissions=True)
+	else:
+		_ensure_enabled("LLM Model Profile", EXTRACT_PROFILE)
 
 	if not frappe.db.exists("LLM Model Profile", ALT_PROFILE):
 		frappe.get_doc(
@@ -1637,6 +1653,8 @@ def _ensure_provider() -> None:
 				"enabled": 1,
 			}
 		).insert(ignore_permissions=True)
+	else:
+		_ensure_enabled("LLM Model Profile", ALT_PROFILE)
 
 	if not frappe.db.exists("LLM Model Profile", GATED_PROFILE):
 		frappe.get_doc(
@@ -1649,6 +1667,42 @@ def _ensure_provider() -> None:
 				"allowed_roles": [{"role": PERMLEVEL_ROLE}],
 			}
 		).insert(ignore_permissions=True)
+	else:
+		_ensure_enabled("LLM Model Profile", GATED_PROFILE)
+
+
+def _ensure_enabled(doctype: str, name: str) -> None:
+	"""Turn a fixture row that somebody switched off back on, and write it down.
+
+	Get-or-create is not enough for a shared site. A row left disabled — by a test
+	that died between flipping it and putting it back, or by a person clicking
+	around the site the suite runs on — makes every run that needs it fail on
+	state rather than on code, and the failure names the profile rather than the
+	cause. So setup restores the row it owns.
+
+	It is recorded rather than done quietly: `enablement_changes` says which rows
+	setup had to touch, and `restore_enablement` puts them back exactly as they
+	were. Silently enabling somebody else's provider and leaving it enabled is how
+	a test suite becomes a site's problem.
+	"""
+	if cint(frappe.db.get_value(doctype, name, "enabled")):
+		return
+	frappe.db.set_value(doctype, name, "enabled", 1, update_modified=False)
+	frappe.clear_document_cache(doctype, name)
+	_ENABLEMENT_CHANGES.append((doctype, name))
+
+
+def enablement_changes() -> list[tuple[str, str]]:
+	"""The rows fixture setup found switched off and switched back on."""
+	return list(_ENABLEMENT_CHANGES)
+
+
+def restore_enablement() -> None:
+	"""Put every row setup switched on back the way it was found."""
+	while _ENABLEMENT_CHANGES:
+		doctype, name = _ENABLEMENT_CHANGES.pop()
+		frappe.db.set_value(doctype, name, "enabled", 0, update_modified=False)
+		frappe.clear_document_cache(doctype, name)
 
 
 def _ensure_agent() -> None:
