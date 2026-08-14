@@ -197,6 +197,17 @@ const STYLES = `
 		.agent-chat-think.is-live .agent-chat-think-label { animation: none; }
 	}
 	.agent-chat-status { font-size: var(--text-sm); color: var(--text-muted); margin-bottom: 10px; }
+	/* A request that did not happen, and the way back from it. In the log, not in
+	   a toast: a toast is gone before the person has finished asking themselves
+	   whether the thing they clicked went through. */
+	.agent-chat-failure {
+		display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+		margin-bottom: 10px; padding: 8px 10px; border-radius: var(--border-radius-md, 10px);
+		background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color));
+		font-size: var(--text-sm);
+	}
+	.agent-chat-failure-text { min-width: 0; word-break: break-word; }
+	.agent-chat-retry { flex: none; margin-inline-start: auto; }
 	/* The only thing on an empty log, so it gets room around it and a measure of
 	   its own — several of these lines are a sentence, not a label. */
 	.agent-chat-empty {
@@ -346,6 +357,33 @@ function proposal_from_event(event) {
 	}
 	const result = payload && payload.ok ? payload.result : null;
 	return result && result.action ? result : null;
+}
+
+/**
+ * What the server said went wrong, in its own words.
+ *
+ * A refusal is worth more than "something failed": it says the agent is off, or
+ * the budget is spent, or the model is not one this user may pick — three
+ * different next steps. The messages arrive as JSON inside JSON, and they may
+ * carry markup, so they are read out as text and rendered with .text().
+ */
+function server_message(response, fallback) {
+	const payload = response || {};
+	const raw = payload._server_messages || (payload.responseJSON || {})._server_messages;
+	const lines = [];
+	try {
+		(JSON.parse(raw || "[]") || []).forEach((entry) => {
+			const parsed = typeof entry === "string" ? JSON.parse(entry) : entry;
+			const text = parsed && typeof parsed === "object" ? parsed.message : parsed;
+			// Tags out here rather than through a helper: this text is put on the
+			// page with .text(), and a refusal wrapped in <b> should read as words.
+			if (text) lines.push(String(text).replace(/<[^>]*>/g, " ").trim());
+		});
+	} catch (error) {
+		// Said in a shape we do not read. The fallback still says what happened.
+	}
+	if (!lines.length && typeof payload.message === "string") lines.push(payload.message);
+	return lines.filter(Boolean).join(" ") || fallback;
 }
 
 /** The paperclip on the attach button. */
@@ -760,14 +798,28 @@ frappe_agents.ChatUI = class ChatUI {
 			this.render_chips();
 			return;
 		}
+		const failed = (response) => {
+			// The chips are redrawn from what the conversation still runs on: the
+			// server refused, so nothing changed here either.
+			this.render_chips();
+			this.add_failure(server_message(response, __("The model was not changed.")), () =>
+				this.choose_model(profile)
+			);
+		};
+
 		frappe.call({
 			method: "frappe_agents.api.set_conversation_model",
 			args: { conversation: this.conversation, model_profile: profile },
 			callback: (r) => {
-				if (!r.message) return;
+				if (!r.message) {
+					failed(r);
+					return;
+				}
 				this.model_profile = r.message.model_profile || null;
 				this.render_chips();
+				this.announce(__("Model set to {0}.", [this.model_profile || profile]));
 			},
+			error: (response) => failed(response),
 		});
 	}
 
@@ -972,7 +1024,12 @@ frappe_agents.ChatUI = class ChatUI {
 		}
 		this.upload_anchor()
 			.then((anchor) => this.open_uploader(anchor))
-			.catch((error) => console.error("frappe_agents: could not open an upload", error));
+			.catch((error) => {
+				console.error("frappe_agents: could not open an upload", error);
+				this.add_failure(server_message(error, __("The file could not be attached.")), () =>
+					this.attach()
+				);
+			});
 	}
 
 	/** The record the upload attaches to, opening a conversation first if there is none. */
@@ -1317,8 +1374,13 @@ frappe_agents.ChatUI = class ChatUI {
 		}
 		if (!message) return;
 
+		// What the composer held, kept until the server has the run. A send that
+		// never happened puts the person back where they were — the text and the
+		// files they attached — instead of making them do it again.
+		const composed = { typed: this.$input.val() || "", uploads: this.uploads.slice() };
+
 		this.clear_empty();
-		this.add_bubble(message, "is-user");
+		const $bubble = this.add_bubble(message, "is-user");
 		this.$input.val("");
 		this.uploads = [];
 		this.render_files();
@@ -1337,13 +1399,22 @@ frappe_agents.ChatUI = class ChatUI {
 			args.context_name = this.context_name;
 		}
 
+		// One failure, one way back. The bubble goes with it: leaving a message on
+		// screen that no run was started for is the ambiguity this is here to end.
+		const failed = (response) => {
+			$pending.remove();
+			$bubble.remove();
+			this.restore_composer(composed);
+			this.update_busy();
+			this.add_failure(server_message(response, __("The message was not sent.")), () => this.send());
+		};
+
 		frappe.call({
 			method: "frappe_agents.api.start_run",
 			args: args,
 			callback: (r) => {
 				if (!r.message || !r.message.run) {
-					$pending.remove();
-					this.update_busy();
+					failed(r);
 					return;
 				}
 				const is_new = this.conversation !== r.message.conversation;
@@ -1353,12 +1424,44 @@ frappe_agents.ChatUI = class ChatUI {
 				this.update_busy();
 				if (is_new && this.on_conversation) this.on_conversation(this.conversation, null);
 			},
-			error: () => {
-				$pending.remove();
-				this.update_busy();
-			},
+			error: (response) => failed(response),
 			always: () => this.set_busy(false),
 		});
+	}
+
+	/** Put back what the composer held before a send that did not happen. */
+	restore_composer(composed) {
+		this.$input.val(composed.typed);
+		this.uploads = composed.uploads;
+		this.render_files();
+		this.focus();
+	}
+
+	/**
+	 * A request that failed, said in the log with one button that tries it again.
+	 *
+	 * The row is removed before the retry runs and nothing else can start it, so
+	 * one failure produces at most one more attempt — a person clicking Try again
+	 * twice cannot end up with two runs. The text goes through the status region
+	 * as well, because a failure nobody sees is the thing being fixed here.
+	 */
+	add_failure(text, retry) {
+		this.clear_empty();
+		const $row = $("<div class='agent-chat-failure'></div>");
+		$("<span class='agent-chat-failure-text'></span>").text(text).appendTo($row);
+		if (retry) {
+			$("<button type='button' class='btn btn-xs btn-default agent-chat-retry'></button>")
+				.text(__("Try again"))
+				.on("click", () => {
+					$row.remove();
+					retry();
+				})
+				.appendTo($row);
+		}
+		this.$log.append($row);
+		this.scroll_to_bottom();
+		this.announce(text);
+		return $row;
 	}
 
 	set_busy(busy) {
