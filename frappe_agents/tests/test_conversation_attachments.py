@@ -19,10 +19,13 @@ The permission story does not move. These are the conversation's own files, and
 a caller reaches them only through the conversation's own read gate.
 """
 
+from unittest.mock import patch
+
 import frappe
 
-from frappe_agents.api import get_conversation
+from frappe_agents.api import get_conversation, start_run
 from frappe_agents.context.attachments import ATTACHMENT_LIMIT
+from frappe_agents.runner.run import ATTACHMENTS_HEADING, build_system_prompt
 from frappe_agents.tests.fixtures import (
 	AGENT,
 	OPEN_USER,
@@ -139,3 +142,63 @@ class TestConversationAttachments(AgentTestCase):
 		# it was asked for from above.
 		self.assertEqual([run["input_message"] for run in older["runs"]], ["Turn 1", "Turn 2"])
 		self.assertLess(str(older["runs"][-1]["creation"]), str(page["runs"][0]["creation"]))
+
+
+class TestAttachmentPromptSection(AgentTestCase):
+	"""The same files, written into the system prompt at the start of every run."""
+
+	def prompt(self, run) -> str:
+		return build_system_prompt(frappe.get_doc("Agent", run.agent), run)
+
+	def run_on(self, conversation: str):
+		return make_run(RESTRICTED_USER, agent=AGENT, conversation=conversation)
+
+	def test_a_conversation_with_files_lists_every_id_exactly(self):
+		conversation = make_conversation(RESTRICTED_USER)
+		first = attach(conversation.name, "fa-cv.pdf")
+		second = attach(conversation.name, "fa-invoice.pdf")
+
+		prompt = self.prompt(self.run_on(conversation.name))
+
+		self.assertIn(ATTACHMENTS_HEADING, prompt)
+		self.assertIn(f"- fa-cv.pdf (File: {first})", prompt)
+		self.assertIn(f"- fa-invoice.pdf (File: {second})", prompt)
+
+	def test_a_conversation_with_no_files_gets_no_section(self):
+		conversation = make_conversation(RESTRICTED_USER)
+
+		self.assertNotIn(ATTACHMENTS_HEADING, self.prompt(self.run_on(conversation.name)))
+
+	def test_a_run_outside_any_conversation_gets_no_section(self):
+		self.assertNotIn(ATTACHMENTS_HEADING, self.prompt(make_run(RESTRICTED_USER, agent=AGENT)))
+
+	def test_the_section_is_capped_and_says_how_many_it_left_out(self):
+		conversation = make_conversation(RESTRICTED_USER)
+		extra = 3
+		names = [
+			attach(conversation.name, f"fa-{index:03d}.pdf") for index in range(ATTACHMENT_LIMIT + extra)
+		]
+
+		prompt = self.prompt(self.run_on(conversation.name))
+
+		self.assertEqual(prompt.count("(File: "), ATTACHMENT_LIMIT)
+		self.assertIn(f"- and {extra} older files, not listed here.", prompt)
+		# Capped from the old end: the newest file is named, the oldest is not.
+		self.assertIn(names[-1], prompt)
+		self.assertNotIn(names[0], prompt)
+
+	def test_the_section_survives_a_history_the_fitter_would_drop(self):
+		"""The point of the whole thing: the ids are rebuilt, never remembered.
+
+		The prompt is composed from the record at the start of the run, so a
+		transcript trimmed down to nothing still leaves every File id in front of
+		the model.
+		"""
+		conversation = make_conversation(RESTRICTED_USER)
+		name = attach(conversation.name, "fa-cv.pdf")
+		with as_user(RESTRICTED_USER), patch("frappe.enqueue"):
+			start_run(agent=AGENT, message="Read this.", conversation=conversation.name)
+
+		later = self.run_on(conversation.name)
+
+		self.assertIn(f"(File: {name})", self.prompt(later))
