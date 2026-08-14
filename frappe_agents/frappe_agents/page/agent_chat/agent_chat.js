@@ -132,7 +132,8 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 
 	make() {
 		add_rail_styles();
-		this.page.set_secondary_action(__("New Chat"), () => this.new_chat());
+		// The same words as the rail's own control, and one translation key.
+		this.page.set_secondary_action(__("New chat"), () => this.new_chat());
 
 		this.$layout = $(`
 			<div class="agent-chat-layout">
