@@ -5,6 +5,12 @@ nothing and can be corrected or deleted by any human who can see it, so the agen
 owns that space outright: `create_draft` and `update_draft` write straight through
 the effective user's own permissions, with no `ignore_permissions` anywhere.
 
+`create_drafts` is that same insert, many times in one call — a spreadsheet read
+in chat becomes forty drafts in the review queue without forty round trips. It
+adds no new authority: the create check runs once before anything is written, and
+every row then goes through the same strip-and-insert path a single draft does,
+each inside its own savepoint so one bad row costs that row and nothing else.
+
 Crossing the docstatus boundary is different. A submitted document is a commitment
 and a cancelled one is a reversal, so `propose_submit` and `propose_cancel` write
 no document at all — they insert one Agent Action row saying what the agent wants
@@ -44,6 +50,10 @@ STATUS_PENDING = "Pending"
 
 REASON_LIMIT = 2000
 MESSAGE_LIMIT = 10
+# One call, one queue of drafts for a human to work through. Past this many the
+# batch stops being a review queue and starts being an import, and an import is a
+# job for a person with a file, not for an agent in a chat.
+BULK_ROW_LIMIT = 200
 
 DRAFT = 0
 SUBMITTED = 1
@@ -80,22 +90,13 @@ def create_draft(payload: dict) -> dict:
 	values = _require_dict(payload, "values")
 	dry_run = _as_bool(payload.get("dry_run"))
 
-	meta = _writable_meta(doctype)
-	if not frappe.has_permission(doctype, "create"):
-		raise ToolDenied(f"You are not allowed to create {doctype}.")
-
-	clean, stripped = _strip_system_fields(meta, values)
-	# new_doc rather than a dict: it applies the doctype's own field defaults first,
-	# so the agent's values land on a document the desk would have handed a person.
-	doc = frappe.new_doc(doctype)
-	doc.update(clean)
+	meta = _creatable_meta(doctype)
 
 	if dry_run:
+		doc, stripped = _draft_doc(meta, doctype, values)
 		return dict(_dry_run(doc), doctype=doctype, stripped_keys=stripped)
 
-	frappe.clear_messages()
-	# No ignore_permissions: insert runs the create check itself, as the user.
-	doc.insert()
+	doc, stripped = _insert_draft(meta, doctype, values)
 
 	return {
 		"doctype": doctype,
@@ -105,6 +106,119 @@ def create_draft(payload: dict) -> dict:
 		"messages": _drain_messages(),
 		"_docs_touched": f"{doctype}: {doc.name}",
 	}
+
+
+def create_drafts(payload: dict) -> dict:
+	"""Insert many documents of one doctype at docstatus 0, as the effective user.
+
+	The create check runs once, before the first row: a doctype this user may not
+	create is refused whole rather than row by row after half the batch landed.
+	After that every row is its own small transaction — a row that fails reports
+	its error and the batch carries on, because a bad cell in row nine is not a
+	reason to throw away the other thirty-nine.
+	"""
+	doctype = _require_str(payload, "doctype")
+	rows = _require_rows(payload)
+	dry_run = _as_bool(payload.get("dry_run"))
+
+	meta = _creatable_meta(doctype)
+
+	outcomes: list[dict] = []
+	created: list[str] = []
+	stripped_keys: set[str] = set()
+	messages: list[str] = []
+
+	for index, values in enumerate(rows):
+		outcome, name, stripped, said = _bulk_row(meta, doctype, index, values, dry_run)
+		outcomes.append(outcome)
+		if name:
+			created.append(name)
+		stripped_keys.update(stripped)
+		messages.extend(said)
+
+	failed = [outcome for outcome in outcomes if outcome.get("error")]
+	result = {
+		"doctype": doctype,
+		"dry_run": dry_run,
+		"requested": len(rows),
+		"succeeded": len(rows) - len(failed),
+		"failed": len(failed),
+		"created": created,
+		"outcomes": outcomes,
+		"stripped_keys": sorted(stripped_keys),
+		"messages": messages[:MESSAGE_LIMIT],
+		"_result_summary": (
+			f"{len(rows) - len(failed)} of {len(rows)} row(s) "
+			f"{'would be created' if dry_run else 'created'}, {len(failed)} failed"
+		),
+	}
+	if created:
+		result["_docs_touched"] = f"{doctype}: {', '.join(created)}"
+	return result
+
+
+def _bulk_row(
+	meta: Any, doctype: str, index: int, values: Any, dry_run: bool
+) -> tuple[dict, str | None, list[str], list[str]]:
+	"""One row of a batch: its outcome, the draft it made, what was stripped and said.
+
+	The savepoint is what keeps a failed row from taking the batch with it. A row
+	rejected by the database — a duplicate name, a failed constraint — leaves the
+	transaction unusable until something rolls it back, and rolling the whole call
+	back would undo the rows that worked.
+	"""
+	if not isinstance(values, dict) or not values:
+		return _row_error(index, "Each row must be a non-empty object of fieldname to value."), None, [], []
+
+	save_point = f"agent_draft_row_{index}"
+	frappe.db.savepoint(save_point)
+	try:
+		if dry_run:
+			doc, stripped = _draft_doc(meta, doctype, values)
+			verdict = _dry_run(doc)
+			outcome = {"index": index, "would_insert": verdict["would_insert"]}
+			if verdict.get("validation_error"):
+				outcome["error"] = verdict["validation_error"]
+			return outcome, None, stripped, verdict.get("messages") or []
+
+		doc, stripped = _insert_draft(meta, doctype, values)
+	except Exception as exc:
+		frappe.db.rollback(save_point=save_point)
+		return _row_error(index, _text(exc)), None, [], _drain_messages()
+
+	frappe.db.release_savepoint(save_point)
+	return {"index": index, "name": doc.name}, doc.name, stripped, _drain_messages()
+
+
+def _row_error(index: int, error: str) -> dict:
+	return {"index": index, "error": error}
+
+
+def _creatable_meta(doctype: str) -> Any:
+	"""The doctype's meta, once it is something this user may create a draft of."""
+	meta = _writable_meta(doctype)
+	if not frappe.has_permission(doctype, "create"):
+		raise ToolDenied(f"You are not allowed to create {doctype}.")
+	return meta
+
+
+def _draft_doc(meta: Any, doctype: str, values: dict) -> tuple[Any, list[str]]:
+	"""An unsaved draft carrying what a tool payload is allowed to set."""
+	clean, stripped = _strip_system_fields(meta, values)
+	# new_doc rather than a dict: it applies the doctype's own field defaults first,
+	# so the agent's values land on a document the desk would have handed a person.
+	doc = frappe.new_doc(doctype)
+	doc.update(clean)
+	return doc, stripped
+
+
+def _insert_draft(meta: Any, doctype: str, values: dict) -> tuple[Any, list[str]]:
+	"""The one insert path. Both draft tools write through here and nowhere else."""
+	doc, stripped = _draft_doc(meta, doctype, values)
+	frappe.clear_messages()
+	# No ignore_permissions: insert runs the create check itself, as the user.
+	doc.insert()
+	return doc, stripped
 
 
 def update_draft(payload: dict) -> dict:
@@ -375,6 +489,19 @@ def _require_dict(payload: dict, key: str) -> dict:
 	return value
 
 
+def _require_rows(payload: dict) -> list:
+	rows = payload.get("rows")
+	if not isinstance(rows, list) or not rows:
+		raise ValueError("rows is required and must be a non-empty list of objects, one document per row.")
+	if len(rows) > BULK_ROW_LIMIT:
+		raise ValueError(
+			f"Too many rows: {len(rows)}, and {BULK_ROW_LIMIT} is the limit for one call. "
+			"Send the first "
+			f"{BULK_ROW_LIMIT} and the rest in a second call, or ask a person to import the file."
+		)
+	return rows
+
+
 def _as_bool(value: Any) -> bool:
 	if isinstance(value, str):
 		return value.strip().lower() in ("1", "true", "yes")
@@ -431,6 +558,43 @@ TOOLS = [
 				},
 			},
 			"required": ["doctype", "values"],
+		},
+	},
+	{
+		"tool_name": "create_drafts",
+		"handler_path": "frappe_agents.tools.draft_tools.create_drafts",
+		"capability": CAPABILITY_DRAFT,
+		"description": (
+			"Create many documents of one doctype as drafts in a single call — the tool to "
+			"use when a spreadsheet or a list becomes one record per row. Every row is "
+			"created with the current user's own create permission, exactly as create_draft "
+			f"does, and at most {BULK_ROW_LIMIT} rows go in one call. A row that fails does "
+			"not stop the others: the reply lists every row by index with the name it was "
+			"given or the error it hit. Pass dry_run to validate every row and write nothing. "
+			"Use create_draft for a single record."
+		),
+		"args_schema": {
+			"type": "object",
+			"properties": {
+				"doctype": {
+					"type": "string",
+					"description": "DocType to create. Every row is of this one doctype.",
+				},
+				"rows": {
+					"type": "array",
+					"description": (
+						'One object of fieldname to value per document, e.g. [{"subject": "Fix the '
+						'pump"}, {"subject": "Replace the seal"}]. Child tables take a list of rows '
+						"like they do in create_draft."
+					),
+					"items": {"type": "object"},
+				},
+				"dry_run": {
+					"type": "boolean",
+					"description": "Validate every row. Nothing is written. Default false.",
+				},
+			},
+			"required": ["doctype", "rows"],
 		},
 	},
 	{
