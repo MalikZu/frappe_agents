@@ -67,8 +67,17 @@ READ_DOCUMENT = "read_document"
 
 def execute() -> None:
 	"""Convert every agent that can be converted, and say what was left behind."""
+	left = 0
 	for name in frappe.get_all("Agent", pluck="name"):
-		convert_agent(frappe.get_doc("Agent", name))
+		agent = frappe.get_doc("Agent", name)
+		if generic_selection(agent) and not convert_agent(agent):
+			left += 1
+
+	if left:
+		print(
+			f"frappe_agents: {left} agent(s) still run on their tool selection. "
+			"Give each one access rules — until then they reach everything their user can."
+		)
 
 
 def convert_agent(agent: Any) -> bool:
