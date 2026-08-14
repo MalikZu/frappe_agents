@@ -99,6 +99,9 @@ const STYLES = `
 	.agent-chat-row { margin-bottom: 10px; display: flex; }
 	.agent-chat-row.is-user { justify-content: flex-end; }
 	.agent-chat-bubble { max-width: 78%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; background: var(--control-bg); }
+	/* The agent's answer is prose and the pane is wide, so cap its measure. What a
+	   person typed is their own line length and is left alone. */
+	.agent-chat-row:not(.is-user) .agent-chat-bubble { max-width: min(78%, 68ch); }
 	.agent-chat-row.is-user .agent-chat-bubble { background: var(--bg-light-gray, var(--control-bg)); }
 	.agent-chat-row.is-error .agent-chat-bubble { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
 	.agent-chat-tool { margin: 2px 0 6px; margin-inline-start: 2px; }
