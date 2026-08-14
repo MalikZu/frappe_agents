@@ -35,7 +35,7 @@ from frappe.model import no_value_fields
 from frappe.permissions import get_doctypes_with_read
 from frappe.utils import cint
 
-from frappe_agents.access.exclusions import exclusion_reason, is_excluded
+from frappe_agents.access.exclusions import is_excluded
 from frappe_agents.tools.base import (
 	CAPABILITY_READ,
 	ToolDenied,
@@ -44,6 +44,13 @@ from frappe_agents.tools.base import (
 
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 50
+
+# One answer to three questions: the doctype does not exist, no rule may ever
+# name it, or this user may not read it. Told apart, they are a way to map the
+# site by asking — the refusal that says "no such thing" confirms every other
+# name is a thing. So all three refuse in the same words, with the same
+# exception, and the difference stays inside the tool.
+NO_SUCH_DOCTYPE = "There is no DocType named {doctype} for you to describe."
 
 REPORT_FIELDS = ("name", "report_name", "report_type", "ref_doctype", "module", "disabled")
 
@@ -140,12 +147,15 @@ def describe_site_doctype(payload: dict) -> dict:
 	require_blueprint_drafting()
 
 	doctype = _require_str(payload, "doctype")
-	if is_excluded(doctype):
-		raise ToolDenied(exclusion_reason(doctype))
-	if not frappe.db.exists("DocType", doctype):
-		raise ValueError(f"No such DocType: {doctype}")
-	if not frappe.has_permission(doctype, "read"):
-		raise ToolDenied(f"You are not allowed to read {doctype}.")
+	# Order is cheapest first and says nothing: whichever of the three it was, the
+	# refusal is the same one. `db.exists` runs before the permission check because
+	# `has_permission` on a name that is not a doctype is not a question.
+	if (
+		is_excluded(doctype)
+		or not frappe.db.exists("DocType", doctype)
+		or not frappe.has_permission(doctype, "read")
+	):
+		raise ToolDenied(NO_SUCH_DOCTYPE.format(doctype=doctype))
 
 	meta = frappe.get_meta(doctype)
 
@@ -288,7 +298,9 @@ TOOLS = [
 			"Describe one doctype's fields — fieldname, label, fieldtype, options, required — "
 			"so a blueprint can say what the agent would actually work with. Reads no "
 			"documents. Fields above the base permission level are named under "
-			"restricted_fields and not described: an agent is never granted those."
+			"restricted_fields and not described: an agent is never granted those. "
+			"A doctype you cannot describe refuses in the same words whichever reason "
+			"it was, so do not read a refusal as evidence about the site."
 		),
 		"args_schema": {
 			"type": "object",

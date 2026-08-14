@@ -47,9 +47,10 @@ from frappe_agents.tests.fixtures import (
 	make_matrix_agent,
 	make_run,
 	rule,
+	tool_calls_for,
 )
 from frappe_agents.tools.base import RUN_FLAG, ToolDenied
-from frappe_agents.tools.builder_tools import list_site_doctypes
+from frappe_agents.tools.builder_tools import NO_SUCH_DOCTYPE, list_site_doctypes
 
 BUILDER_RULE = rule(BLUEPRINT, can_read=1, can_create_draft=1, can_update_draft=1)
 
@@ -179,20 +180,40 @@ class TestDescribingADoctype(BuilderCase):
 			self.assertNotIn(SECRET_FIELD, [field["fieldname"] for field in described["fields"]])
 			self.assertEqual(described["restricted_fields"], [SECRET_FIELD])
 
-	def test_an_excluded_doctype_is_refused_by_name(self):
-		error = self.refusal("describe_site_doctype", {"doctype": "Agent"})
+	def test_the_three_refusals_are_the_same_refusal(self):
+		"""Excluded, unreadable, or not there at all: one answer, word for word.
 
-		self.assertIn("agent framework", error)
+		A refusal that says which one it was is a probe. "No such DocType" on a
+		name nobody has confirms that every name it does not say that about is a
+		real doctype, and the builder could map the site by asking.
+		"""
+		refusals = {
+			doctype: self.refusal("describe_site_doctype", {"doctype": doctype})
+			for doctype in ("FA Nothing At All", "Agent", VAULT_DT)
+		}
 
-	def test_a_doctype_this_user_may_not_read_is_refused(self):
-		error = self.refusal("describe_site_doctype", {"doctype": VAULT_DT})
+		for doctype, error in refusals.items():
+			self.assertEqual(error, NO_SUCH_DOCTYPE.format(doctype=doctype))
 
-		self.assertIn("not allowed to read", error)
+		# The name the caller supplied is the only thing that differs between them.
+		self.assertEqual(
+			{error.replace(doctype, "X") for doctype, error in refusals.items()},
+			{NO_SUCH_DOCTYPE.format(doctype="X")},
+		)
 
-	def test_a_doctype_that_does_not_exist_says_so(self):
-		error = self.refusal("describe_site_doctype", {"doctype": "FA Nothing At All"})
+	def test_a_refusal_is_a_denial_and_not_an_error(self):
+		"""The outcome on the audit row must not tell them apart either."""
+		outcomes = set()
+		for doctype in ("FA Nothing At All", "Agent", VAULT_DT):
+			_, run = call_tool(
+				RESTRICTED_USER,
+				"describe_site_doctype",
+				{"doctype": doctype},
+				agent=self.builder().name,
+			)
+			outcomes |= {call.outcome for call in tool_calls_for(run.name)}
 
-		self.assertIn("No such DocType", error)
+		self.assertEqual(outcomes, {"Denied"})
 
 
 class TestListingReports(BuilderCase):
