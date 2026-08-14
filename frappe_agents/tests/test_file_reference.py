@@ -78,7 +78,7 @@ class TestFileReference(AgentTestCase):
 		with as_user(user):
 			return resolve_file(ref)
 
-	def refuse(self, ref: str, user: str = DRAFT_USER) -> str:
+	def refuse(self, ref: str | None, user: str = DRAFT_USER) -> str:
 		"""Resolve, and return the refusal. Not resolving is the test."""
 		with as_user(user), self.assertRaises(Exception) as caught:
 			resolve_file(ref)
@@ -110,6 +110,24 @@ class TestFileReference(AgentTestCase):
 	def test_the_query_string_a_link_carries_is_not_part_of_the_file(self):
 		self.assertEqual(self.resolve(f"{self.file.file_url}?v=2").name, self.file.name)
 
+	def test_a_public_file_is_named_by_the_link_a_public_file_has(self):
+		"""`/files/…` and `/private/files/…` are the same kind of reference."""
+		public = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": f"fa-logo-{frappe.generate_hash(length=6)}.pdf",
+				"attached_to_doctype": ORDER_DT,
+				"attached_to_name": ORDER_LIVE,
+				"is_private": 0,
+				"content": unique_pdf("logo"),
+			}
+		)
+		public.flags.ignore_permissions = True
+		public.insert(ignore_permissions=True)
+
+		self.assertTrue(public.file_url.startswith("/files/"))
+		self.assertEqual(self.resolve(public.file_url).name, public.name)
+
 	def test_the_tool_takes_a_link_where_it_used_to_take_a_name(self):
 		payload, _ = self.extract(self.file.file_url)
 
@@ -131,6 +149,8 @@ class TestFileReference(AgentTestCase):
 			f"https://{host}.evil.example.com{self.file.file_url}",
 			f"ftp://{host}{self.file.file_url}",
 			"file:///etc/passwd",
+			# No scheme at all is still a host, and still not this one.
+			f"//files.example.com{self.file.file_url}",
 		)
 
 		for ref in tricks:
@@ -182,8 +202,28 @@ class TestFileReference(AgentTestCase):
 	def test_a_folder_is_not_something_to_read(self):
 		self.assertIn("folder", self.refuse("Home"))
 
+	def test_a_file_whose_contents_live_elsewhere_is_still_not_readable_here(self):
+		"""A File row is not the file: this one only holds a link to another host."""
+		remote = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": f"fa-remote-{frappe.generate_hash(length=6)}.pdf",
+				"attached_to_doctype": ORDER_DT,
+				"attached_to_name": ORDER_LIVE,
+				"file_url": "https://files.example.com/fa-remote.pdf",
+			}
+		)
+		remote.flags.ignore_permissions = True
+		remote.insert(ignore_permissions=True)
+
+		for ref in (remote.name, remote.file_name):
+			with self.subTest(ref=ref):
+				self.assertIn("stored somewhere else", self.refuse(ref))
+
 	def test_nothing_is_not_a_reference(self):
-		self.assertIn("No file given", self.refuse("   "))
+		for ref in ("   ", "", None):
+			with self.subTest(ref=ref):
+				self.assertIn("No file given", self.refuse(ref))
 
 
 class TestFileReferenceProvenance(AgentTestCase):
