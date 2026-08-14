@@ -550,15 +550,14 @@ frappe_agents.ChatUI = class ChatUI {
 
 		const doctype = this.context.doctype;
 		const name = this.context.name;
+		// The label clips at 320px, and the document is the one fact this chip
+		// exists to carry, so the title holds the whole of it.
+		const label = `${__(doctype)}: ${this.context.title || name}`;
 		$("<a class='agent-chat-doc'></a>")
 			.attr("href", `/app/${frappe.router.slug(doctype)}/${encodeURIComponent(name)}`)
-			.attr("title", __("This conversation is about this document"))
+			.attr("title", label)
 			.append(doc_icon())
-			.append(
-				$("<span class='agent-chat-doc-label'></span>").text(
-					`${__(doctype)}: ${this.context.title || name}`
-				)
-			)
+			.append($("<span class='agent-chat-doc-label'></span>").text(label))
 			// Mounted in the form panel the route changes behind the dialog, so step
 			// out of the way and let the router carry on.
 			.on("click", () => this.$body.closest(".modal").modal("hide"))
