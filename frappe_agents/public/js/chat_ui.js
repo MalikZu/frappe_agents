@@ -133,8 +133,58 @@ frappe_agents.EXTRACTION_UPDATE_EVENT = "frappe_agents:extraction_update";
 // what a reopened conversation redraws its approval cards from.
 const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel"];
 
+// How much of a conversation is kept in memory, and how many conversations.
+// Oldest events go first: a run that is still going will write its own log the
+// moment it ends, and that log is what a reload reads.
+const BUFFER_EVENTS = 2000;
+const BUFFER_CONVERSATIONS = 20;
+
 // How far from the bottom the log may be scrolled and still follow new text.
 const FOLLOW_SLACK = 120;
+
+/**
+ * Every run event this page has heard, kept per conversation.
+ *
+ * A run only writes its event log when it ends, so a run still going has
+ * nothing on the server to redraw from: switch to another conversation and back
+ * and the tool lines, the thinking and the half-written answer were gone. They
+ * are kept here instead, for as long as the page is open, and replayed when the
+ * conversation comes back on screen.
+ *
+ * One listener for the whole page rather than one per chat, because two chats
+ * can be mounted at once — the Agent Chat page and a form panel — and both
+ * storing the same event would replay it twice.
+ */
+frappe_agents.run_buffer = {
+	conversations: new Map(),
+	listening: false,
+
+	listen() {
+		if (this.listening) return;
+		this.listening = true;
+		frappe.realtime.on(frappe_agents.RUN_UPDATE_EVENT, (data) => this.keep("run", data));
+		frappe.realtime.on(frappe_agents.EXTRACTION_UPDATE_EVENT, (data) => this.keep("extraction", data));
+	},
+
+	keep(channel, data) {
+		const conversation = data && data.conversation;
+		if (!conversation) return;
+		const kept = this.conversations.get(conversation) || [];
+		kept.push({ channel: channel, data: data });
+		if (kept.length > BUFFER_EVENTS) kept.splice(0, kept.length - BUFFER_EVENTS);
+		// Re-inserting moves the key to the end, so the map is ordered by the
+		// conversation that spoke least recently and that is the one dropped.
+		this.conversations.delete(conversation);
+		this.conversations.set(conversation, kept);
+		while (this.conversations.size > BUFFER_CONVERSATIONS) {
+			this.conversations.delete(this.conversations.keys().next().value);
+		}
+	},
+
+	events(conversation) {
+		return this.conversations.get(conversation) || [];
+	},
+};
 
 /** The content blocks an assistant message ended up with. */
 function message_blocks(message) {
@@ -369,6 +419,10 @@ frappe_agents.ChatUI = class ChatUI {
 		};
 		$(document).on("click", this.pop_dismiss_handler);
 		$(document).on("keydown", this.pop_escape_handler);
+
+		// The buffer listens for the whole page, whether a chat is mounted or not:
+		// a run that finishes while the panel is closed still has to be redrawable.
+		frappe_agents.run_buffer.listen();
 
 		// Kept on the instance so destroy() can unbind exactly this listener —
 		// otherwise every panel open leaves another one rendering into a dead log.
@@ -898,6 +952,7 @@ frappe_agents.ChatUI = class ChatUI {
 			this.show_empty(this.placeholder);
 		} else {
 			runs.forEach((run) => this.render_past_run(run));
+			this.replay_buffer();
 		}
 
 		if (this.on_conversation) this.on_conversation(this.conversation, data);
@@ -908,9 +963,19 @@ frappe_agents.ChatUI = class ChatUI {
 		if (run.input_message) {
 			this.$log.append(this.make_bubble(run.input_message, "is-user"));
 		}
-		this.replay_run_events(run);
+
+		// The log is the transcript: every tool call, every thinking block and
+		// every message the agent wrote, in the order they happened. A run from
+		// before the log was stored has only its final message to show.
+		const events = Array.isArray(run.event_log) ? run.event_log : [];
+		const said = events.length ? this.replay_run_events(run.name, events) : "";
+
 		if (run.output_message) {
-			this.$log.append(this.make_bubble(run.output_message, ""));
+			// Already on screen when the log carried it, which it does for every
+			// run that recorded one.
+			if (run.output_message !== said) {
+				this.$log.append(this.make_bubble(run.output_message, ""));
+			}
 			return;
 		}
 		if (run.error) {
@@ -928,36 +993,92 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	/**
-	 * Redraw what a finished run left behind that its own row does not hold.
+	 * Redraw a run from what it recorded.
 	 *
-	 * A proposal card is published while the run is going. Reopening the
-	 * conversation used to lose it, so a person came back to a chat that never
-	 * mentioned the thing waiting for their approval. The run's event log has it.
+	 * A reopened conversation used to show the questions and the answers and
+	 * nothing in between: the tool lines, the thinking and the proposal cards
+	 * were published while the run was going and never drawn again. All of it is
+	 * in the run's event log. Returns the last thing the agent said, which is how
+	 * the caller knows the stored answer is already on screen.
 	 */
-	replay_run_events(run) {
-		const events = Array.isArray(run.event_log) ? run.event_log : [];
+	replay_run_events(run, events) {
 		// The reason the agent gave is an argument of the call, not part of its
 		// result, so it is picked up when the call starts.
 		const reasons = {};
+		let said = "";
 
 		events.forEach((event) => {
 			if (!event || !event.type) return;
 			if (event.type === "tool_execution_start") {
 				reasons[event.toolCallId] = (event.args || {}).reason;
+				this.render_tool_started(run, event);
+				return;
+			}
+			if (event.type === "message_end") {
+				said = this.replay_message(run, event.message) || said;
 				return;
 			}
 			if (event.type !== "tool_execution_end") return;
 
+			this.finish_tool_line(this.tool_lines[tool_line_key(run, event.toolCallId)]);
+
 			const proposal = proposal_from_event(event);
 			if (!proposal) return;
 			this.render_action_proposed({
-				run: run.name,
+				run: run,
 				action: proposal.action,
 				action_type: proposal.action_type,
 				target_doctype: proposal.target_doctype,
 				target_name: proposal.target_name,
 				reason: reasons[event.toolCallId] || "",
 			});
+		});
+		return said;
+	}
+
+	/**
+	 * One stored message: what the model thought, then what it said.
+	 *
+	 * Only the agent's own messages. The question is drawn from the run's input
+	 * and a tool result is drawn as the tool line it belongs to.
+	 */
+	replay_message(run, message) {
+		const blocks = message_blocks(message);
+		if (!blocks.length) return "";
+
+		blocks.forEach((block) => {
+			if (!block || block.type !== "thinking" || !block.thinking) return;
+			this.clear_empty();
+			this.insert_before_pending(run, this.make_thinking_strip(block.thinking, false).$el);
+		});
+
+		const text = message_text(message);
+		if (text) {
+			this.clear_empty();
+			this.insert_before_pending(run, this.make_bubble(text, ""));
+		}
+		return text;
+	}
+
+	/**
+	 * Put back what arrived while this conversation was off screen.
+	 *
+	 * Only for the runs still going: a run that ended has been drawn already,
+	 * from its log or from its own row, and drawing it again would double every
+	 * line of it. Extraction progress is replayed whatever the run did — it is
+	 * not part of any log, so the buffer is the only place a card that was
+	 * published earlier can come back from.
+	 */
+	replay_buffer() {
+		if (!this.conversation) return;
+		const live = new Set(Object.keys(this.pending));
+		frappe_agents.run_buffer.events(this.conversation).forEach((entry) => {
+			if (entry.channel === "extraction") {
+				this.on_extraction_update(entry.data);
+				return;
+			}
+			if (!entry.data || !live.has(entry.data.run)) return;
+			this.apply_run_update(entry.data);
 		});
 	}
 
@@ -1032,6 +1153,18 @@ frappe_agents.ChatUI = class ChatUI {
 		if (data.conversation && this.conversation && data.conversation !== this.conversation) return;
 		if (!data.conversation && !this.pending[data.run]) return;
 
+		this.apply_run_update(data);
+		// Text arrives several times a second. Chasing it is right when the person
+		// is at the bottom of the log and wrong when they are reading further up.
+		if (data.type === "message_update") {
+			this.follow();
+		} else {
+			this.scroll_to_bottom();
+		}
+	}
+
+	/** Draw one run event. Replaying the buffer comes through here too. */
+	apply_run_update(data) {
 		switch (data.type) {
 			case "harness_event":
 				this.on_harness_event(data);
@@ -1053,13 +1186,6 @@ frappe_agents.ChatUI = class ChatUI {
 				break;
 			default:
 				this.render_status(data);
-		}
-		// Text arrives several times a second. Chasing it is right when the person
-		// is at the bottom of the log and wrong when they are reading further up.
-		if (data.type === "message_update") {
-			this.follow();
-		} else {
-			this.scroll_to_bottom();
 		}
 	}
 
