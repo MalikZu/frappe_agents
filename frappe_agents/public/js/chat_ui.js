@@ -173,8 +173,10 @@ const STYLES = `
 	.agent-chat-row.is-user .agent-chat-bubble { background: var(--bg-light-gray, var(--control-bg)); }
 	.agent-chat-row.is-error .agent-chat-bubble { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
 	/* Rendered markdown: block layout does the spacing, so pre-wrap must not.
-	   Positioned, because the copy control hangs in its corner. */
-	.agent-chat-bubble.agent-chat-rich { white-space: normal; position: relative; }
+	   Positioned, because the copy control hangs in its corner — and the corner
+	   is kept clear for it: 4px inset + 24px control + 4px, so the first line
+	   ends before the control rather than under it. */
+	.agent-chat-bubble.agent-chat-rich { white-space: normal; position: relative; padding-inline-end: 32px; }
 	/* Out of the way until it is wanted, and never out of the tab order: it fades
 	   rather than disappears, so a keyboard reaches it and focus brings it back. */
 	.agent-chat-copy {
