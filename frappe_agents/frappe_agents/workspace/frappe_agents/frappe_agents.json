@@ -11,7 +11,7 @@
  "icon": "review",
  "idx": 0,
  "is_hidden": 0,
- "label": "Frappe Agents",
+ "label": "Agents",
  "links": [
   {
    "hidden": 0,
@@ -253,6 +253,6 @@
    "icon": "book-open"
   }
  ],
- "title": "Frappe Agents",
+ "title": "Agents",
  "type": "Workspace"
 }
