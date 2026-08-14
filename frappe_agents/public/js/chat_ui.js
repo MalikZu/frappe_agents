@@ -95,7 +95,9 @@ const STYLES = `
 	.agent-chat-tool-caret { display: inline-block; font-size: 9px; padding-top: 3px; }
 	.agent-chat-tool.is-open .agent-chat-tool-caret { transform: rotate(90deg); }
 	.agent-chat-tool-detail { display: none; margin: 2px 0 8px 14px; }
-	.agent-chat-tool.is-open .agent-chat-tool-detail { display: block; }
+	.agent-chat-tool.is-open .agent-chat-tool-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+	.agent-chat-tool-col { min-width: 0; }
+	@media (max-width: 700px) { .agent-chat-tool.is-open .agent-chat-tool-detail { grid-template-columns: 1fr; } }
 	.agent-chat-tool-label { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin-top: 6px; }
 	.agent-chat-tool-block {
 		max-height: 260px; overflow: auto; margin: 2px 0 0; padding: 6px 8px;
@@ -1450,15 +1452,19 @@ frappe_agents.ChatUI = class ChatUI {
 		$("<span class='agent-chat-tool-caret'>▸</span>").appendTo(line.$head);
 		line.$text = $("<span></span>").text(tool_line_text(tool, pretty, running)).appendTo(line.$head);
 
+		// Arguments on the left, result on the right — what went in beside what
+		// came back. One column again on narrow screens.
 		const $detail = $("<div class='agent-chat-tool-detail'></div>").appendTo(line.$el);
-		$("<div class='agent-chat-tool-label'></div>").text(__("Arguments")).appendTo($detail);
-		line.$args = $("<pre class='agent-chat-tool-block'></pre>").text(pretty).appendTo($detail);
+		const $args_col = $("<div class='agent-chat-tool-col'></div>").appendTo($detail);
+		$("<div class='agent-chat-tool-label'></div>").text(__("Arguments")).appendTo($args_col);
+		line.$args = $("<pre class='agent-chat-tool-block'></pre>").text(pretty).appendTo($args_col);
+		const $result_col = $("<div class='agent-chat-tool-col'></div>").appendTo($detail);
 		line.$result_label = $("<div class='agent-chat-tool-label'></div>")
 			.text(__("Result"))
-			.appendTo($detail);
+			.appendTo($result_col);
 		line.$result = $("<pre class='agent-chat-tool-block is-waiting'></pre>")
 			.text(running ? __("Still running…") : __("Nothing was recorded for this call."))
-			.appendTo($detail);
+			.appendTo($result_col);
 
 		line.$head.on("click", () => this.toggle_tool(line));
 		return line;
