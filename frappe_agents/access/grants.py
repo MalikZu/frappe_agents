@@ -41,7 +41,7 @@ from typing import Any
 import frappe
 from frappe.utils import cint
 
-from frappe_agents.access.exclusions import exclusion_reason, is_excluded
+from frappe_agents.access.exclusions import BLUEPRINT, exclusion_reason, is_excluded
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
 	CAPABILITY_DRAFT,
@@ -89,13 +89,19 @@ DOCTYPE_TOOL_VERBS = {
 
 PROPOSE_TOOLS = frozenset({"propose_submit", "propose_cancel"})
 REPORT_TOOLS = frozenset({"run_report"})
+# The Agents Builder's meta tools. They answer with the shape of the site and
+# never with a document, so they ride the one grant that says the agent is here
+# to design other agents: may it draft an Agent Blueprint. That keeps the matrix
+# explicit — a builder needs no wildcard rule to suggest a doctype it was never
+# granted, because suggesting is not reaching.
+BUILDER_TOOLS = frozenset({"list_site_doctypes", "list_site_reports", "describe_site_doctype"})
 # File reading is chat-shaped, not doctype-shaped: it rides one flag on the
 # agent rather than a row per doctype.
 FILE_TOOLS = frozenset({"read_document"})
 
 # Every tool whose exposure the matrix decides. Anything else an agent holds —
 # a tool another app registered — keeps riding the selection table.
-GENERIC_TOOLS = frozenset(DOCTYPE_TOOL_VERBS) | REPORT_TOOLS | FILE_TOOLS
+GENERIC_TOOLS = frozenset(DOCTYPE_TOOL_VERBS) | REPORT_TOOLS | FILE_TOOLS | BUILDER_TOOLS
 
 
 def compiled_grants(agent: Any) -> dict:
@@ -202,6 +208,26 @@ def row_cap(target: str, tool_max: int, target_type: str = TARGET_DOCTYPE) -> in
 	return min(cap, tool_max) if cap > 0 else tool_max
 
 
+def require_blueprint_drafting() -> None:
+	"""Refuse the builder's meta tools unless the agent may draft blueprints.
+
+	The Agents Builder reads the site's shape — doctype names, modules,
+	fieldnames — to write a proposal about it. Nothing else has a reason to, so
+	the tools ride the grant that makes an agent a builder: `create_draft` on
+	Agent Blueprint. Exposure asks the same question, and this is the second ask,
+	for a handler reached any other way.
+	"""
+	agent = current_agent()
+	if agent is None or in_legacy_mode(agent):
+		return
+
+	if not grant_for(agent, BLUEPRINT).get(VERB_CREATE_DRAFT):
+		raise ToolDenied(
+			f"{agent.name} may not draft an {BLUEPRINT}, so it does not get to read the site's "
+			"doctypes and reports. This tool is for designing agents."
+		)
+
+
 def require_file_access() -> None:
 	"""Refuse file reading unless the agent carries `may_read_files`."""
 	agent = current_agent()
@@ -237,6 +263,8 @@ def exposed_tool_names(agent: Any) -> set[str]:
 		names |= REPORT_TOOLS
 	if cint(agent.get("may_read_files")):
 		names |= FILE_TOOLS
+	if cint((grants[TARGET_DOCTYPE].get(BLUEPRINT) or {}).get(VERB_CREATE_DRAFT)):
+		names |= BUILDER_TOOLS
 
 	return names | (selected - GENERIC_TOOLS)
 

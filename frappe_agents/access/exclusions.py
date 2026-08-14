@@ -67,9 +67,15 @@ def is_excluded(doctype: str | None) -> bool:
 
 
 def module_of(doctype: str) -> str | None:
-	"""The module a doctype belongs to, or None when there is no such doctype."""
+	"""The module a doctype belongs to, or None when there is no such doctype.
+
+	Read off the meta rather than the DocType document. Both are cached, but the
+	document is the whole definition — fields, permissions and all — and the
+	Agents Builder asks this question once per doctype on the site. On a stock
+	site that is the difference between two seconds and none.
+	"""
 	try:
-		return frappe.get_cached_value("DocType", doctype, "module")
+		return frappe.get_meta(doctype).module
 	except Exception:
 		return None
 

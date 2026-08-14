@@ -90,6 +90,11 @@ def require_file_access() -> None:
 	_grants().require_file_access()
 
 
+def require_blueprint_drafting() -> None:
+	"""Refuse the builder's meta tools unless the agent may draft Agent Blueprints."""
+	_grants().require_blueprint_drafting()
+
+
 def row_cap(target: str, tool_max: int, target_type: str = "DocType") -> int:
 	"""The tool's own row cap, narrowed by the rule's cap when it sets one."""
 	return _grants().row_cap(target, tool_max, target_type)
