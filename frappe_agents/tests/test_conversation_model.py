@@ -105,6 +105,51 @@ class TestConversationModel(AgentTestCase):
 				start_run(agent=AGENT, message="Carry on", conversation=started["conversation"])
 			enqueue.assert_not_called()
 
+	def test_a_pin_written_straight_to_the_database_is_still_checked(self):
+		"""`db.set_value` skips the controller entirely. The run door has to catch it.
+
+		The controller is the wall for anything that saves a document. Nothing saves
+		here — the value arrives as raw SQL, the way a patch or an import writes one —
+		so the only thing between it and a provider is the check the next turn makes.
+		"""
+		started = self.start()
+		frappe.db.set_value("Agent Conversation", started["conversation"], "model_profile", GATED_PROFILE)
+
+		with as_user(RESTRICTED_USER), patch("frappe.enqueue") as enqueue:
+			with self.assertRaises(frappe.PermissionError):
+				start_run(agent=AGENT, message="Carry on", conversation=started["conversation"])
+			enqueue.assert_not_called()
+
+		self.assertEqual(
+			frappe.db.count("Agent Run", {"conversation": started["conversation"]}),
+			1,
+			"the refused turn left a run behind",
+		)
+
+	def test_a_pin_the_agent_stopped_offering_refuses_the_next_turn(self):
+		"""The owner's half of the wall moves too, and a conversation is not exempt."""
+		started = self.start(model_profile=ALT_PROFILE)
+		self.set_alternates(AGENT, [])
+
+		with as_user(RESTRICTED_USER), patch("frappe.enqueue") as enqueue:
+			with self.assertRaises(frappe.ValidationError):
+				start_run(agent=AGENT, message="Carry on", conversation=started["conversation"])
+			enqueue.assert_not_called()
+
+	def set_alternates(self, agent: str, profiles: list[str]) -> None:
+		"""Rewrite an agent's alternates, and put them back afterwards."""
+		doc = frappe.get_doc("Agent", agent)
+		before = [row.model_profile for row in doc.get("alternate_profiles") or []]
+		self.addCleanup(self.write_alternates, agent, before)
+		self.write_alternates(agent, profiles)
+
+	def write_alternates(self, agent: str, profiles: list[str]) -> None:
+		doc = frappe.get_doc("Agent", agent)
+		doc.set("alternate_profiles", [{"model_profile": profile} for profile in profiles])
+		doc.flags.ignore_permissions = True
+		doc.save(ignore_permissions=True)
+		frappe.clear_document_cache("Agent", agent)
+
 	def gate_profile_on(self, profile: str, role: str) -> None:
 		"""Move a profile behind a role, and put it back afterwards."""
 		doc = frappe.get_doc("LLM Model Profile", profile)

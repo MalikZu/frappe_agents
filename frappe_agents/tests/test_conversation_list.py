@@ -46,6 +46,32 @@ class TestConversationList(AgentTestCase):
 		self.assertIn(theirs["conversation"], names)
 		self.assertNotIn(mine["conversation"], names)
 
+	def test_no_part_of_another_users_conversation_reaches_the_payload(self):
+		"""Not just a missing row: the whole answer is searched for their words.
+
+		A rail row is assembled from three places — the conversation, its agent and
+		its first run — and any of them could have been read without the filter that
+		the conversation itself passed through.
+		"""
+		theirs = self.start(OPEN_USER, "The vendor account is 4471 9930")
+		self.start(RESTRICTED_USER, "Mine")
+
+		blob = frappe.as_json(self.listed(RESTRICTED_USER))
+		self.assertNotIn(theirs["conversation"], blob)
+		self.assertNotIn("4471 9930", blob)
+
+	def test_a_row_whose_owner_and_user_disagree_belongs_to_neither(self):
+		"""Two filters, and a row has to pass both: the doctype's own if_owner rule
+		and the query's filter on the user field. Passing one is not enough."""
+		theirs = self.start(OPEN_USER, "Half theirs")
+		frappe.db.set_value(
+			"Agent Conversation", theirs["conversation"], "owner", RESTRICTED_USER, update_modified=False
+		)
+
+		for user in (RESTRICTED_USER, OPEN_USER):
+			names = {row["name"] for row in self.listed(user)}
+			self.assertNotIn(theirs["conversation"], names)
+
 	def test_a_row_carries_the_agent_name_and_a_snippet(self):
 		started = self.start(RESTRICTED_USER, "How many tickets are open?")
 
