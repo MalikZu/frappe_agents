@@ -65,6 +65,8 @@ LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
 
 - [Agent Chat](docs/chat.md) — conversations, the composer chips, and the
   document a conversation is about.
+- [Files in chat](docs/files-in-chat.md) — naming a file an agent may read,
+  uploading one, and where uploads live.
 - [The agent harness](docs/harness.md) — the vendored run loop.
 
 ## License
