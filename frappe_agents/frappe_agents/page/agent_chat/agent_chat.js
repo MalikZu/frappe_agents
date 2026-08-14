@@ -49,7 +49,10 @@ const RAIL_STYLES = `
 	   the rename can float over it. Both, or one of two different bugs. */
 	.agent-chat-convo-row { position: relative; display: flex; margin-bottom: 2px; }
 	.agent-chat-convo {
-		flex: 1; min-width: 0; padding: 6px 8px; text-align: start; font: inherit; color: inherit;
+		/* Inline-end reserve so the floated rename never sits on the timestamp —
+		   the same idiom the rich bubble uses for its copy control. */
+		flex: 1; min-width: 0; padding: 6px 8px; padding-inline-end: 32px;
+		text-align: start; font: inherit; color: inherit;
 		background: none; border-radius: var(--border-radius-md, 6px); cursor: pointer;
 		/* Carried by every row, so selecting one costs no space and the rows
 		   under it do not shift. */
