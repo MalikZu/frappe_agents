@@ -670,7 +670,7 @@ SLIDE = re.compile(r"^ppt/slides/slide(\d+)\.xml$")
 
 def docx_text(content: bytes) -> str:
 	"""A Word document's paragraphs and tables, in the order they are written."""
-	root = _xml_member(content, "word/document.xml", "Word document")
+	root = _xml_member(_office_zip(content, "Word document"), "word/document.xml", "Word document")
 	body = root.find(f"{W}body")
 	if body is None:
 		return ""
@@ -709,23 +709,27 @@ def _docx_table(node: Any) -> list[str]:
 	return lines
 
 
-def pptx_slides(content: bytes) -> list[tuple[str, str]]:
-	"""Every slide's text, in slide order — the deck's own numbering, not the zip's."""
-	try:
-		with zipfile.ZipFile(BytesIO(content)) as archive:
-			names = [name for name in archive.namelist() if SLIDE.match(name)]
-	except zipfile.BadZipFile:
-		raise ValueError("This PowerPoint file could not be opened.")
+def pptx_slides(content: bytes) -> tuple[int, Any]:
+	"""How many slides the deck has, and how to read any one of them.
 
+	The lazy form, for the reason the PDF lane uses it: a deck is one small zip
+	member per slide, so parsing every slide up front means opening the archive
+	once per slide and reading its whole index each time. That is quadratic in
+	the slide count — a two-megabyte deck of a few thousand slides costs minutes
+	— and the cap throws nearly all of it away anyway.
+	"""
+	archive = _office_zip(content, "PowerPoint file")
+	names = [name for name in archive.namelist() if SLIDE.match(name)]
 	names.sort(key=lambda name: int(SLIDE.match(name).group(1)))
-	slides = []
-	for index, name in enumerate(names, start=1):
-		root = _xml_member(content, name, "PowerPoint file")
+
+	def slide(number: int) -> tuple[str, str]:
+		root = _xml_member(archive, names[number - 1], "PowerPoint file")
 		lines = [
 			"".join(node.text or "" for node in paragraph.iter(f"{A}t")) for paragraph in root.iter(f"{A}p")
 		]
-		slides.append((f"{UNIT_SLIDE} {index}", _tidy(lines)))
-	return slides
+		return f"{UNIT_SLIDE} {number}", _tidy(lines)
+
+	return len(names), slide
 
 
 def _tidy(lines: list[str]) -> str:
@@ -738,7 +742,15 @@ def _tidy(lines: list[str]) -> str:
 	return "\n".join(kept).strip()
 
 
-def _xml_member(content: bytes, member: str, what: str) -> Any:
+def _office_zip(content: bytes, what: str) -> zipfile.ZipFile:
+	"""An office file's archive, opened once. Its members are read from this one."""
+	try:
+		return zipfile.ZipFile(BytesIO(content))
+	except zipfile.BadZipFile:
+		raise ValueError(f"This {what} could not be opened.")
+
+
+def _xml_member(archive: zipfile.ZipFile, member: str, what: str) -> Any:
 	"""One XML part of an office file, opened defensively.
 
 	Two things are checked before anything is parsed, because both are cheap to
@@ -747,15 +759,14 @@ def _xml_member(content: bytes, member: str, what: str) -> Any:
 	file asks a parser to expand itself or to go and fetch something.
 	"""
 	try:
-		with zipfile.ZipFile(BytesIO(content)) as archive:
-			try:
-				info = archive.getinfo(member)
-			except KeyError:
-				raise ValueError(f"This {what} has no {member} in it, so there is nothing to read.")
-			if info.file_size > MAX_XML_BYTES:
-				raise ValueError(f"This {what} is too large to read.")
-			with archive.open(info) as handle:
-				raw = handle.read(MAX_XML_BYTES + 1)
+		info = archive.getinfo(member)
+	except KeyError:
+		raise ValueError(f"This {what} has no {member} in it, so there is nothing to read.")
+	if info.file_size > MAX_XML_BYTES:
+		raise ValueError(f"This {what} is too large to read.")
+	try:
+		with archive.open(info) as handle:
+			raw = handle.read(MAX_XML_BYTES + 1)
 	except zipfile.BadZipFile:
 		raise ValueError(f"This {what} could not be opened.")
 
