@@ -230,7 +230,7 @@ def _readable_files(field: str, values: list[str]) -> list[str]:
 		filters={field: ("in", values), "is_folder": 0},
 		pluck="name",
 		order_by="creation asc",
-		limit_page_length=MAX_FILE_CANDIDATES,
+		limit=MAX_FILE_CANDIDATES,
 	)
 	return [name for name in names if frappe.has_permission("File", "read", doc=name)]
 
