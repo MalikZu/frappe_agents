@@ -42,6 +42,11 @@ docker exec fa-bench bash -lc "git config --global --replace-all safe.directory 
 # reachable from the mount because a worktree shares the main clone's object store
 docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench/apps/frappe_agents && git fetch /mnt/frappe_agents main && git reset --hard FETCH_HEAD'
 docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site migrate && bench --site test_site run-tests --app frappe_agents'
+
+# if a human is browsing the site, finish with a cache clear — a migrate or web
+# restart mid-session leaves them a stale boot payload (empty Desk sidebar is
+# the classic symptom; same per-user sidebar cache quirk as the AlYazeem box):
+docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site clear-cache'
 ```
 
 Rules: run tests against committed main, not the working tree — get-app clones from
