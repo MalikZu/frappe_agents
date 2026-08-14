@@ -40,6 +40,10 @@ MODEL_PROFILE = "LLM Model Profile"
 # reading the profile list can tell where a set of rules came from.
 PROFILE_SUFFIX = "Access"
 
+# The record of the human act. `create_agent` writes these three and nothing
+# else does — least of all the agent that drafted the proposal.
+MATERIALISATION_FIELDS = ("status", "created_agent", "created_profile")
+
 RULE_FIELDS = (
 	"target_type",
 	"target",
@@ -56,6 +60,31 @@ RULE_FIELDS = (
 class AgentBlueprint(Document):
 	def validate(self) -> None:
 		validate_rules(self, "suggested_rules")
+		self.protect_materialisation()
+
+	def protect_materialisation(self) -> None:
+		"""Keep the three fields that record the human act out of an agent's reach.
+
+		An agent drafts a blueprint and revises it; the draft tools write the
+		document as any other draft, which would let a model set `status` to
+		Applied and name an agent it did not create. That is precisely the claim
+		the Builder is told never to make, and a prompt is the wrong place to
+		enforce it — so a write made inside a run keeps whatever these three
+		already said.
+		"""
+		from frappe_agents.tools.base import current_run
+
+		if current_run() is None:
+			return
+
+		stored = (
+			frappe.db.get_value(self.doctype, self.name, MATERIALISATION_FIELDS, as_dict=True)
+			if not self.is_new()
+			else None
+		)
+		for field in MATERIALISATION_FIELDS:
+			self.set(field, stored.get(field) if stored else None)
+		self.status = self.status or STATUS_DRAFT
 
 	@frappe.whitelist()
 	def create_agent(self) -> dict:

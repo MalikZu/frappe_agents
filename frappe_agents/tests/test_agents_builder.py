@@ -254,6 +254,42 @@ class TestDraftingABlueprint(BuilderCase):
 
 		self.assertEqual(frappe.get_doc(BLUEPRINT, name).purpose, "Narrowed to open orders.")
 
+	def test_it_cannot_write_down_that_it_created_an_agent(self):
+		"""The three fields that record the human act are not the agent's to write.
+
+		Applied, and the names of what was made, are what `create_agent` leaves
+		behind. A model that could set them would be making exactly the claim the
+		Builder is told never to make, and on the record rather than in a sentence.
+		"""
+		name = self.draft("FA Blueprint Claim")
+
+		self.ask(
+			"update_draft",
+			{
+				"doctype": BLUEPRINT,
+				"name": name,
+				"values": {
+					"purpose": "Still a proposal.",
+					"status": STATUS_APPLIED,
+					"created_agent": BUILDER_AGENT,
+				},
+			},
+			user=SKILL_AUTHOR,
+		)
+
+		blueprint = frappe.get_doc(BLUEPRINT, name)
+		self.assertEqual(blueprint.status, STATUS_DRAFT)
+		self.assertIsNone(blueprint.created_agent)
+		self.assertEqual(blueprint.purpose, "Still a proposal.")
+
+	def test_a_draft_it_writes_starts_out_unapplied(self):
+		values = self.values("FA Blueprint Born Applied")
+		values["status"] = STATUS_APPLIED
+
+		result = self.ask("create_draft", {"doctype": BLUEPRINT, "values": values}, user=SKILL_AUTHOR)
+
+		self.assertEqual(frappe.get_doc(BLUEPRINT, result["name"]).status, STATUS_DRAFT)
+
 	def test_a_rule_the_matrix_refuses_is_refused_on_paper_too(self):
 		"""The blueprint runs the same validation, so a bad row never gets written down."""
 		values = self.values("FA Blueprint Excluded")
