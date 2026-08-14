@@ -53,6 +53,11 @@ says so where it was cut.
 The log follows the text down the page, unless you have scrolled up to read
 something earlier; then it stays where you put it.
 
+Anything the agent set in `code` — a File name, a fieldname, a doctype — copies
+when you click it, or when you reach it with the keyboard and press Enter. Hover
+an answer and a copy button appears in its corner: that one copies the whole
+message, as the markdown it was written in.
+
 Some models think before they answer. That shows as a strip above the answer:
 open and running while it thinks, then folded into one line — **Thought for 4s**
 — the moment it stops. Click the line to read it. The thinking is not the
@@ -73,9 +78,11 @@ agent thought, every tool it called, everything it said, and any approval still
 waiting. It comes from what the run recorded, so it survives a reload and a
 different browser.
 
-A long conversation comes back as its last turns, not all of them, and says
-**Older messages are not shown** where the rest would have been. Nothing is
-deleted — the runs are still in the Agent Run list, under the conversation.
+A long conversation comes back as its last turns, not all of them, with **Show
+earlier messages** above them. Click it and the turns before those are added on
+top, without moving what you were reading. Click again for the ones before
+those. The button goes when you reach the start of the conversation. Nothing was
+ever deleted — the runs are also in the Agent Run list, under the conversation.
 
 A document the agent was asked to turn into a draft comes back too, as the card
 it always was, in the state that extraction is in now — waiting for your review,
