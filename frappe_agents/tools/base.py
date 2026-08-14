@@ -316,7 +316,7 @@ def _log_call(
 		)
 
 
-def _sensitive_keys(args: Any) -> set[str]:
+def _sensitive_keys(payload: Any) -> set[str]:
 	"""Argument keys whose values must not become audit content, lowercased.
 
 	Three sources, in the order they are trusted:
@@ -334,7 +334,7 @@ def _sensitive_keys(args: Any) -> set[str]:
 	value with more steps, and the keys are matched at any depth.
 	"""
 	keys = set(FALLBACK_SENSITIVE_KEYS)
-	doctype = args.get("doctype") if isinstance(args, dict) else None
+	doctype = payload.get("doctype") if isinstance(payload, dict) else None
 	if not isinstance(doctype, str) or not doctype.strip():
 		return keys
 

@@ -268,7 +268,13 @@ def _same_file(target_doctype: str, content_hash: str | None, exclude: str | Non
 
 def _unique_collisions(target_doctype: str, values: dict, spec: dict) -> tuple[list[dict], int]:
 	meta = frappe.get_meta(target_doctype)
-	readable_doctype = bool(frappe.has_permission(target_doctype, "read"))
+	# The return value IS the decision: readable callers get names, unreadable
+	# callers get only a count. Raising here would break the generic-count lane.
+	readable_doctype = bool(
+		frappe.has_permission(  # nosemgrep: frappe-semgrep-rules.rules.unchecked-frappe-permission-call
+			target_doctype, "read"
+		)
+	)
 	collisions: list[dict] = []
 	hidden = 0
 	checked = 0
