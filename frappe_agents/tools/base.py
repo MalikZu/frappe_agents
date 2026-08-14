@@ -80,6 +80,11 @@ def require_grant(target: str, verb: str, target_type: str = "DocType") -> None:
 	_grants().require_grant(target, verb, target_type)
 
 
+def has_grant(target: str, verb: str, target_type: str = "DocType") -> bool:
+	"""Whether `require_grant` would pass, for a caller that omits rather than refuses."""
+	return _grants().has_grant(target, verb, target_type)
+
+
 def require_draft_ownership(doctype: str, doc: Any) -> None:
 	"""Refuse a draft somebody else created unless the rule allows any draft."""
 	_grants().require_draft_ownership(doctype, doc)

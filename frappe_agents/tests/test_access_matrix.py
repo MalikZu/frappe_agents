@@ -34,6 +34,8 @@ from frappe_agents.tests.fixtures import (
 	TICKET_DT,
 	TOOL_NAMES,
 	VAULT_DT,
+	VENDOR_ACME,
+	VENDOR_DT,
 	AgentTestCase,
 	as_user,
 	call_tool,
@@ -362,6 +364,86 @@ class TestDiscovery(AgentTestCase):
 		refused, _ = call_tool(RESTRICTED_USER, "get_doctype_meta", {"doctype": PROJECT_DT}, agent=agent.name)
 		self.assertFalse(refused["ok"])
 		self.assertIn("no access rule", refused["error"])
+
+
+class TestTheNeighbourhood(AgentTestCase):
+	"""The links slice walks off the focal document, and every hop asks the matrix.
+
+	A grant on the document in front of the agent is not a grant on whatever it
+	points at. The user's own permissions are the other half and stay where they
+	were — the cast here may read every record involved, so what is missing from
+	the answer is missing because of the rules and nothing else.
+	"""
+
+	def order_with_a_vendor(self) -> str:
+		"""One order pointing at a project and at a vendor, both readable by DRAFT_USER."""
+		order = make_order_draft(user=DRAFT_USER)
+		with as_user(DRAFT_USER):
+			order.vendor = VENDOR_ACME
+			order.save()
+		return order.name
+
+	def links(self, agent: str, doctype: str, name: str, direction: str) -> dict:
+		result, _ = call_tool(
+			DRAFT_USER,
+			"get_document_slice",
+			{"doctype": doctype, "name": name, "slice": "links", "direction": direction},
+			agent=agent,
+		)
+		self.assertTrue(result["ok"], result["error"])
+		return result["result"]
+
+	def doctypes_in(self, payload: dict, direction: str) -> set[str]:
+		return {group["doctype"] for group in payload[direction]}
+
+	def test_a_link_to_an_ungranted_doctype_is_absent(self):
+		"""Not redacted and not counted: the answer does not know that vendor exists."""
+		name = self.order_with_a_vendor()
+		agent = make_matrix_agent(
+			[rule(ORDER_DT, can_read=1), rule(PROJECT_DT, can_read=1)], autonomy="Suggest"
+		)
+
+		with as_user(DRAFT_USER):
+			self.assertTrue(frappe.has_permission(VENDOR_DT, "read"))
+
+		payload = self.links(agent.name, ORDER_DT, name, "up")
+
+		self.assertEqual(self.doctypes_in(payload, "up"), {PROJECT_DT})
+		self.assertNotIn(VENDOR_DT, payload["not_visible"]["doctypes"])
+		self.assertEqual(payload["not_visible"]["count"], 0)
+		self.assertNotIn(VENDOR_ACME, frappe.as_json(payload))
+
+	def test_the_same_link_appears_once_a_rule_names_it(self):
+		"""The positive control: the matrix dropped it, not the traversal."""
+		name = self.order_with_a_vendor()
+		agent = make_matrix_agent(
+			[rule(ORDER_DT, can_read=1), rule(PROJECT_DT, can_read=1), rule(VENDOR_DT, can_read=1)],
+			autonomy="Suggest",
+		)
+
+		payload = self.links(agent.name, ORDER_DT, name, "up")
+
+		self.assertEqual(self.doctypes_in(payload, "up"), {PROJECT_DT, VENDOR_DT})
+		vendors = next(group for group in payload["up"] if group["doctype"] == VENDOR_DT)
+		self.assertEqual([doc["name"] for doc in vendors["docs"]], [VENDOR_ACME])
+
+	def test_the_walk_downwards_asks_the_matrix_too(self):
+		"""Documents pointing at this one are still documents of another doctype."""
+		granted = make_matrix_agent(
+			[rule(PROJECT_DT, can_read=1), rule(ORDER_DT, can_read=1)], autonomy="Suggest"
+		)
+
+		payload = self.links(granted.name, PROJECT_DT, PROJECT_ALPHA, "down")
+		self.assertIn(ORDER_DT, self.doctypes_in(payload, "down"))
+		self.assertNotIn(TICKET_DT, self.doctypes_in(payload, "down"))
+
+		wider = make_matrix_agent(
+			[rule(PROJECT_DT, can_read=1), rule(ORDER_DT, can_read=1), rule(TICKET_DT, can_read=1)],
+			autonomy="Suggest",
+		)
+
+		payload = self.links(wider.name, PROJECT_DT, PROJECT_ALPHA, "down")
+		self.assertIn(TICKET_DT, self.doctypes_in(payload, "down"))
 
 
 class TestFileReading(AgentTestCase):

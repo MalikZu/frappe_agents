@@ -202,6 +202,21 @@ def require_grant(target: str, verb: str, target_type: str = TARGET_DOCTYPE) -> 
 		raise ToolDenied(_refusal(agent, target, verb, target_type))
 
 
+def has_grant(target: str, verb: str, target_type: str = TARGET_DOCTYPE) -> bool:
+	"""The question `require_grant` asks, answered instead of raised.
+
+	For the places where an ungranted target is *left out* rather than refused —
+	the neighbourhood of a document, where saying what was dropped would be the
+	leak. It calls the raising form so the two can never drift: same exclusions,
+	same legacy shim, same "outside a run there is no agent to check".
+	"""
+	try:
+		require_grant(target, verb, target_type)
+	except ToolDenied:
+		return False
+	return True
+
+
 def grant_for(agent: Any, target: str, target_type: str = TARGET_DOCTYPE) -> dict:
 	"""The compiled verbs for one target. An empty dict means no rule names it."""
 	return compiled_grants(agent).get(target_type, {}).get(target) or {}
