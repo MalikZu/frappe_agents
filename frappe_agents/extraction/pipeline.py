@@ -16,9 +16,10 @@ and the only code in the app that can write them into a document is
 `api.apply_extraction`, from a list of fieldnames a person named by hand.
 
 `resolve_file` sits here too, immediately above the permission check it hands
-every answer to. Any tool that takes a file uses it, so that a File name, a URL
-and a filename all mean the same thing, and so that turning what a person typed
-into a File row happens once rather than once per tool.
+every answer to, and `require_provenance` immediately below it. Any tool that
+takes a file uses both, so that a File name, a URL and a filename all mean the
+same thing, and so that turning what a person typed into a File row — and
+refusing one that hangs off nothing — happens once rather than once per tool.
 
 Caps use pypdf, Pillow and filetype — all pinned frappe core dependencies, so this
 adds nothing to install. There is no rasterisation anywhere: nothing in the frappe
@@ -254,6 +255,34 @@ def readable_file(file_name: str) -> Any:
 			)
 		)
 	return file_doc
+
+
+def require_provenance(file_doc: Any) -> None:
+	"""The file has to hang off a record, and one this user may read.
+
+	Readable is not the same as accountable. A loose private file says nothing
+	about where it came from, and a tool asking to open one is asking for
+	something it cannot explain to whoever reads the answer later.
+
+	An Agent Conversation is an acceptable anchor like any other record: it says
+	who supplied the file and in what context, which is what a reviewer needs.
+
+	This sits beside `resolve_file` because it is the second half of the same
+	door — every tool that takes a file resolves it here and anchors it here.
+	"""
+	if not file_doc.attached_to_doctype or not file_doc.attached_to_name:
+		raise frappe.PermissionError(
+			_(
+				"{0} is not attached to any record. Attach it to the document it belongs to "
+				"first, so a reviewer can see where it came from."
+			).format(file_doc.file_name or file_doc.name)
+		)
+	if not frappe.has_permission(file_doc.attached_to_doctype, "read", doc=file_doc.attached_to_name):
+		raise frappe.PermissionError(
+			_("You are not allowed to read {0} {1}, which this file is attached to.").format(
+				file_doc.attached_to_doctype, file_doc.attached_to_name
+			)
+		)
 
 
 def validate_target(target_doctype: str) -> str:

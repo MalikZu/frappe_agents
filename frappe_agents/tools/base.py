@@ -77,6 +77,7 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 		raise
 
 	docs_touched = None
+	summary = None
 	result: Any = None
 	# A handler that records something — a proposal, an audit row — has to say which
 	# run asked for it. The run is the caller's, not the handler's argument, so it
@@ -88,6 +89,9 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 		result = handler(args)
 		if isinstance(result, dict):
 			docs_touched = result.pop("_docs_touched", None)
+			# A handler that knows what its own row should say says so. Everything
+			# else is summarised from the shape of the result.
+			summary = result.pop("_result_summary", None)
 		outcome, error = OUTCOME_SUCCESS, None
 	except (ToolDenied, frappe.PermissionError) as exc:
 		outcome, result, error = OUTCOME_DENIED, None, _message(exc)
@@ -103,7 +107,7 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 		args,
 		outcome,
 		_elapsed_ms(started),
-		result_summary=_summarise(result) if outcome == OUTCOME_SUCCESS else None,
+		result_summary=(summary or _summarise(result)) if outcome == OUTCOME_SUCCESS else None,
 		docs_touched=docs_touched,
 		error=error,
 	)
@@ -125,6 +129,23 @@ def log_interrupted_call(run: Any, tool_name: str, args: dict | None = None) -> 
 def current_run() -> Any:
 	"""The Agent Run this tool call belongs to, or None outside a run."""
 	return frappe.flags.get(RUN_FLAG)
+
+
+def run_model_profile() -> str | None:
+	"""The model profile this run is on, or None outside a run.
+
+	A model call a tool makes on the user's behalf — reading a scan, extracting a
+	document — is the run's call, so it uses the run's model: the override if the
+	run carries one, otherwise the agent's own. None means nobody chose, and the
+	caller decides what to do about that.
+	"""
+	run = current_run()
+	if run is None or not run.get("agent"):
+		return None
+	if run.get("model_profile"):
+		return run.model_profile
+	agent = frappe.get_cached_doc("Agent", run.agent)
+	return agent.model_profile or None
 
 
 def runtime_enabled() -> bool:
