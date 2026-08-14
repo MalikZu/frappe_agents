@@ -76,7 +76,7 @@ const STYLES = `
 	.agent-chat-chip.is-static, .agent-chat-chip.is-static:hover { cursor: default; background: var(--control-bg); }
 	.agent-chat-chip-key { color: var(--text-muted); }
 	.agent-chat-chip-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.agent-chat-chip-caret { color: var(--text-light, var(--text-muted)); font-size: 9px; }
+	.agent-chat-chip-caret { color: var(--text-muted); font-size: var(--text-xs); }
 	.agent-chat-pop {
 		display: none; position: absolute; bottom: calc(100% + 6px); z-index: 10;
 		min-width: 250px; max-width: 340px; max-height: 300px; overflow-y: auto; padding: 6px;
@@ -112,7 +112,7 @@ const STYLES = `
 		color: var(--text-muted); cursor: pointer;
 	}
 	.agent-chat-tool-head:hover { color: var(--text-color); }
-	.agent-chat-tool-caret { display: inline-block; font-size: 9px; padding-top: 3px; }
+	.agent-chat-tool-caret { display: inline-block; font-size: var(--text-xs); padding-top: 2px; }
 	.agent-chat-tool.is-open .agent-chat-tool-caret { transform: rotate(90deg); }
 	.agent-chat-tool-detail { display: none; margin: 2px 0 8px; margin-inline-start: 14px; }
 	.agent-chat-tool.is-open .agent-chat-tool-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
@@ -134,7 +134,7 @@ const STYLES = `
 		color: var(--text-muted); cursor: pointer;
 	}
 	.agent-chat-think-head:hover { color: var(--text-color); }
-	.agent-chat-think-caret { display: inline-block; font-size: 9px; }
+	.agent-chat-think-caret { display: inline-block; font-size: var(--text-xs); }
 	.agent-chat-think.is-open .agent-chat-think-caret { transform: rotate(90deg); }
 	.agent-chat-think-body {
 		display: none; max-height: 220px; overflow-y: auto; margin: 4px 0 0; margin-inline-start: 14px;
