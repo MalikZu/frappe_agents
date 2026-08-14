@@ -7,6 +7,9 @@ const RAIL_STYLE_ID = "frappe-agents-rail-styles";
 // Remembered per browser, not per user record: which furniture is open is not
 // something to spend a server round trip on.
 const RAIL_COLLAPSED_KEY = "frappe_agents:rail_collapsed";
+// Below this the layout has one column, so the toggle stops collapsing the rail
+// and starts opening it over the chat.
+const RAIL_DRAWER_QUERY = "(max-width: 720px)";
 
 const RAIL_STYLES = `
 	.agent-chat-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); }
@@ -42,8 +45,26 @@ const RAIL_STYLES = `
 	.agent-chat-rename:focus { opacity: 1; }
 	.agent-chat-pane { min-width: 0; padding-left: 14px; }
 	@media (max-width: 720px) {
-		.agent-chat-layout, .agent-chat-layout.is-collapsed { grid-template-columns: minmax(0, 1fr); }
-		.agent-chat-rail { display: none; }
+		.agent-chat-layout, .agent-chat-layout.is-collapsed {
+			grid-template-columns: minmax(0, 1fr); position: relative;
+		}
+		/* No room for a column. The rail keeps its toggle and nothing else, and
+		   that toggle opens the list as a drawer over the chat — a width that
+		   hides the conversations still has to have a way back to them. */
+		.agent-chat-layout .agent-chat-rail,
+		.agent-chat-layout.is-collapsed .agent-chat-rail {
+			height: auto; min-height: 0; padding: 0 0 6px; border-right: none;
+		}
+		.agent-chat-layout .agent-chat-new,
+		.agent-chat-layout .agent-chat-rail-list { display: none; }
+		.agent-chat-layout.is-drawer .agent-chat-rail {
+			position: absolute; left: 0; top: 0; z-index: 20;
+			width: 250px; max-width: 86%; max-height: calc(100vh - 260px); padding: 6px 8px;
+			background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color);
+			border-radius: var(--border-radius-md, 6px); box-shadow: var(--shadow-lg);
+		}
+		.agent-chat-layout.is-drawer .agent-chat-new { display: flex; }
+		.agent-chat-layout.is-drawer .agent-chat-rail-list { display: block; }
 		.agent-chat-pane { padding-left: 0; }
 	}
 `;
@@ -107,9 +128,10 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 
 		this.$layout = $(`
 			<div class="agent-chat-layout">
-				<aside class="agent-chat-rail">
+				<aside class="agent-chat-rail" id="agent-chat-rail">
 					<div class="agent-chat-rail-top">
-						<button class="btn btn-default btn-xs agent-chat-rail-toggle"></button>
+						<button class="btn btn-default btn-xs agent-chat-rail-toggle"
+							aria-controls="agent-chat-rail"></button>
 						<button class="btn btn-default btn-xs agent-chat-new"></button>
 					</div>
 					<div class="agent-chat-rail-list"></div>
@@ -123,8 +145,13 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		const $new = this.$layout.find(".agent-chat-new").on("click", () => this.new_chat());
 		$("<span></span>").text(__("New chat")).appendTo($new);
 		$("<span></span>").text("+").appendTo($new);
-		this.$toggle.on("click", () => this.toggle_rail(!this.collapsed));
+		this.drawer_open = false;
+		this.$toggle.on("click", () => {
+			if (this.is_narrow()) this.toggle_drawer(!this.drawer_open);
+			else this.toggle_rail(!this.collapsed);
+		});
 		this.toggle_rail(localStorage.getItem(RAIL_COLLAPSED_KEY) === "1");
+		this.bind_drawer();
 
 		this.chat = new frappe_agents.ChatUI({
 			parent: this.$layout.find(".agent-chat-pane"),
@@ -136,10 +163,54 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 	toggle_rail(collapsed) {
 		this.collapsed = Boolean(collapsed);
 		this.$layout.toggleClass("is-collapsed", this.collapsed);
-		this.$toggle
-			.text(this.collapsed ? "»" : "«")
-			.attr("title", this.collapsed ? __("Show conversations") : __("Hide conversations"));
 		localStorage.setItem(RAIL_COLLAPSED_KEY, this.collapsed ? "1" : "0");
+		this.sync_toggle();
+	}
+
+	/** One column: the rail opens over the chat instead of beside it. */
+	is_narrow() {
+		return Boolean(window.matchMedia && window.matchMedia(RAIL_DRAWER_QUERY).matches);
+	}
+
+	toggle_drawer(open) {
+		this.drawer_open = Boolean(open);
+		this.$layout.toggleClass("is-drawer", this.drawer_open);
+		this.sync_toggle();
+	}
+
+	/** The same control either way, so it says what it will do either way. */
+	sync_toggle() {
+		const open = this.is_narrow() ? this.drawer_open : !this.collapsed;
+		const label = open ? __("Hide conversations") : __("Show conversations");
+		this.$toggle.text(open ? "«" : "»").attr({
+			title: label,
+			"aria-label": label,
+			"aria-expanded": open ? "true" : "false",
+		});
+	}
+
+	/** A drawer closes the way a drawer closes: click away, or Escape. */
+	bind_drawer() {
+		$(document).on("click.agent-chat-drawer", (e) => {
+			if (!this.drawer_open) return;
+			if ($(e.target).closest(".agent-chat-rail").length) return;
+			this.toggle_drawer(false);
+		});
+		$(document).on("keydown.agent-chat-drawer", (e) => {
+			if (e.key !== "Escape" || !this.drawer_open) return;
+			this.toggle_drawer(false);
+			this.$toggle.focus();
+		});
+
+		if (!window.matchMedia) return;
+		// Widened back out: the rail has its column again, so the overlay goes.
+		const query = window.matchMedia(RAIL_DRAWER_QUERY);
+		const on_change = () => {
+			if (this.is_narrow()) this.sync_toggle();
+			else this.toggle_drawer(false);
+		};
+		if (query.addEventListener) query.addEventListener("change", on_change);
+		else if (query.addListener) query.addListener(on_change);
 	}
 
 	refresh() {
@@ -278,6 +349,8 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 	/** Switch conversations in place: no reload, the route just follows along. */
 	open_conversation(name) {
 		if (!name || name === this.chat.conversation) return;
+		// Picking a row is what the drawer was opened for.
+		this.toggle_drawer(false);
 		this.chat.load_conversation(name);
 		this.mark_active();
 		if (this.route_conversation() !== name) frappe.set_route("agent-chat", name);
@@ -329,6 +402,7 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 	}
 
 	new_chat() {
+		this.toggle_drawer(false);
 		this.chat.reset();
 		this.chat.focus();
 		this.mark_active();
