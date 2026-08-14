@@ -76,6 +76,7 @@ const STYLES = `
 	.agent-chat-att-link:focus-visible,
 	.agent-chat-att-id:focus-visible,
 	.agent-chat-copy:focus-visible,
+	.agent-chat-older:focus-visible,
 	.agent-chat-rich code.is-copyable:focus-visible,
 	.agent-chat-think-head:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
 	/* Hover and open states arrive rather than snap. Colour and a caret's own
@@ -194,6 +195,15 @@ const STYLES = `
 	.agent-chat-copy.is-copied, .agent-chat-att-id.is-copied, .agent-chat-rich code.is-copied {
 		background: var(--bg-green, var(--control-bg)); color: var(--text-on-green, var(--text-color));
 	}
+	/* The way back up a conversation the server only sent the end of. */
+	.agent-chat-older-row { display: flex; justify-content: center; padding-block: 4px 10px; }
+	.agent-chat-older {
+		border: 1px solid var(--border-color); background: var(--control-bg);
+		border-radius: var(--border-radius-full, 999px); padding: 3px 14px;
+		font: inherit; font-size: var(--text-sm); color: var(--text-muted); cursor: pointer;
+	}
+	.agent-chat-older:hover { background: var(--highlight-color); color: var(--text-color); }
+	.agent-chat-older:disabled { cursor: default; opacity: 0.7; background: var(--control-bg); }
 	.agent-chat-rich > :first-child { margin-block-start: 0; }
 	.agent-chat-rich > :last-child { margin-block-end: 0; }
 	.agent-chat-rich h1, .agent-chat-rich h2, .agent-chat-rich h3,
@@ -565,6 +575,11 @@ frappe_agents.ChatUI = class ChatUI {
 		// The server sends the lot on every page, so this is replaced rather than
 		// accumulated — except by an upload, which is added the moment it lands.
 		this.attachments = [];
+		// The turn above the top of the transcript, and the control that asks for
+		// the page ending at it. Null once the conversation has been read to its start.
+		this.next_before = null;
+		this.$older_row = null;
+		this.older_loading = false;
 		// One card per extraction, redrawn in place as its status moves.
 		this.extractions = {};
 		// One card per proposal, so replaying a log cannot draw a second one.
@@ -1363,20 +1378,109 @@ frappe_agents.ChatUI = class ChatUI {
 		if (!runs.length) {
 			this.show_empty(this.placeholder);
 		} else {
-			// The server returns the end of a long conversation, not all of it. Say
-			// so where the missing turns would have been, so a short log is a fact
-			// the reader was told rather than one they have to guess at.
-			if (data.truncated) {
-				this.$log.append(
-					$("<div class='agent-chat-status'></div>").text(__("Older messages are not shown."))
-				);
-			}
 			runs.forEach((run) => this.render_past_run(run));
+			// The server returns the end of a long conversation, not all of it, and
+			// the way to the rest is a control rather than a sentence: being told
+			// that older turns exist and left with no way to read them is worse
+			// than not being told.
+			this.render_older(data.truncated ? data.next_before : null);
 			this.replay_buffer();
 		}
 
 		if (this.on_conversation) this.on_conversation(this.conversation, data);
 		this.scroll_to_bottom();
+	}
+
+	/**
+	 * The control at the top of the log that reads the page above this one.
+	 *
+	 * Drawn from `next_before`, which is the server's own answer to "what is above
+	 * here" — nothing on this side works out where the transcript starts. Called
+	 * again after every page: with a marker it moves the control back to the top,
+	 * without one it takes it away, and the conversation has been read to its start.
+	 */
+	render_older(before) {
+		this.next_before = before || null;
+		if (this.$older_row) {
+			this.$older_row.remove();
+			this.$older_row = null;
+			this.$older = null;
+		}
+		if (!this.next_before) return;
+
+		this.$older_row = $("<div class='agent-chat-older-row'></div>");
+		this.$older = $("<button type='button' class='agent-chat-older'></button>")
+			.text(__("Show earlier messages"))
+			.on("click", () => this.load_older())
+			.appendTo(this.$older_row);
+		this.$log.prepend(this.$older_row);
+	}
+
+	/** Ask for the page of turns ending just above the top of the transcript. */
+	load_older() {
+		if (this.older_loading || !this.next_before || !this.conversation) return;
+		this.older_loading = true;
+		const conversation = this.conversation;
+		const before = this.next_before;
+		if (this.$older) this.$older.prop("disabled", true).text(__("Loading earlier messages…"));
+
+		frappe.call({
+			method: "frappe_agents.api.get_conversation",
+			args: { conversation: conversation, before: before },
+			callback: (r) => {
+				// The reader may have switched conversation while this was in flight.
+				if (this.conversation !== conversation) return;
+				this.prepend_older(r.message);
+			},
+			error: () => {
+				if (this.conversation !== conversation) return;
+				this.older_loading = false;
+				if (this.$older) this.$older.prop("disabled", false).text(__("Show earlier messages"));
+				this.announce(__("Earlier messages could not be loaded."));
+			},
+		});
+	}
+
+	/**
+	 * Put an older page above the transcript without moving what is being read.
+	 *
+	 * Content arriving above the viewport pushes everything down by its own
+	 * height, so the scroll position is restored by that difference rather than
+	 * left alone — otherwise asking for the previous page throws the reader
+	 * several turns further down the one they were on.
+	 *
+	 * The page is drawn into a detached element first, because `render_past_run`
+	 * draws into `this.$log` and what it draws has to arrive above the transcript
+	 * in one piece rather than a run at a time.
+	 */
+	prepend_older(data) {
+		const runs = (data && data.runs) || [];
+		const log = this.$log[0];
+		const height_before = log ? log.scrollHeight : 0;
+		const top_before = log ? log.scrollTop : 0;
+
+		const $page = $("<div class='agent-chat-older-page'></div>");
+		const $live = this.$log;
+		this.$log = $page;
+		try {
+			runs.forEach((run) => this.render_past_run(run));
+		} finally {
+			this.$log = $live;
+		}
+
+		const $drawn = $page.children();
+		if (this.$older_row) this.$older_row.after($drawn);
+		else this.$log.prepend($drawn);
+
+		this.older_loading = false;
+		this.render_older(data && data.truncated ? data.next_before : null);
+		if (log) log.scrollTop = top_before + (log.scrollHeight - height_before);
+
+		this.announce(
+			runs.length
+				? __("{0} earlier messages loaded.", [runs.length])
+				: __("There are no earlier messages.")
+		);
 	}
 
 	render_past_run(run) {
