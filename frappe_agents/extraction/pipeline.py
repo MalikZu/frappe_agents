@@ -15,6 +15,11 @@ contain one. The extracted sensitive values go onto the extraction row, flagged,
 and the only code in the app that can write them into a document is
 `api.apply_extraction`, from a list of fieldnames a person named by hand.
 
+`resolve_file` sits here too, immediately above the permission check it hands
+every answer to. Any tool that takes a file uses it, so that a File name, a URL
+and a filename all mean the same thing, and so that turning what a person typed
+into a File row happens once rather than once per tool.
+
 Caps use pypdf, Pillow and filetype — all pinned frappe core dependencies, so this
 adds nothing to install. There is no rasterisation anywhere: nothing in the frappe
 environment can turn a PDF page into an image, so the document goes to the
@@ -23,11 +28,12 @@ provider as the document, or not at all.
 
 from io import BytesIO
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 
 import filetype
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, now_datetime, strip_html, today
+from frappe.utils import cint, flt, get_url, now_datetime, strip_html, today
 
 from frappe_agents.extraction import gate, resolve
 from frappe_agents.extraction.schema import build_extraction_schema, normalise_values, read_field_notes
@@ -61,6 +67,13 @@ MAX_IMAGE_PIXELS = 8000
 
 JOB_TIMEOUT = 900
 ERROR_CHARS = 500
+
+# What a reference to something that is not in this site gets back. One sentence,
+# because an agent repeating it to a person should be a sentence they can act on.
+EXTERNAL_REFERENCE = "Only files already in this system can be read. Upload it or attach it first."
+
+# How many File rows one reference may pull back before it is simply ambiguous.
+MAX_FILE_CANDIDATES = 20
 
 
 def queue_extraction(file_name: str, target_doctype: str, model_profile: str | None = None) -> str:
@@ -104,6 +117,122 @@ def queue_extraction(file_name: str, target_doctype: str, model_profile: str | N
 	)
 
 	return extraction.name
+
+
+def resolve_file(ref: str) -> Any:
+	"""The File a person meant, written any of the ways people write one.
+
+	A File record name, a site-relative URL (`/private/files/CV.pdf`), a full URL
+	whose host is this site's, or a stored filename that matches exactly one File.
+	Anything on another host is refused: nothing here fetches anything, so a file
+	that is not already in this system is not a file this system can read.
+
+	This is identifier sugar and nothing else. Whatever it finds goes through
+	`readable_file` exactly as a File name handed in directly would, and the callers
+	that require provenance still require it afterwards. A reference the user may
+	not read is refused, and one that names several Files is refused with their
+	names, so the model asks which was meant instead of picking one.
+	"""
+	ref = ref.strip() if isinstance(ref, str) else ""
+	if not ref:
+		frappe.throw(_("No file given."))
+
+	lookup = _file_lookup(ref)
+	if lookup is None:
+		return readable_file(ref)
+
+	field, values = lookup
+	names = _readable_files(field, values)
+	if not names:
+		# Not found and not readable answer the same way on purpose: a reference is a
+		# guess, and "no such file" must not become a way to ask whether one exists.
+		frappe.throw(_("No such file: {0}").format(ref))
+	if len(names) > 1:
+		frappe.throw(
+			_("More than one file matches {0}. Say which one by File name: {1}.").format(
+				ref, ", ".join(names)
+			)
+		)
+	return readable_file(names[0])
+
+
+def _file_lookup(ref: str) -> tuple[str, list[str]] | None:
+	"""What to look a reference up by, or None when it is already a File name.
+
+	The parsing is deliberately hostile-minded. A URL's host is read with
+	`urlsplit().hostname`, which is the only reading of it that survives
+	`https://this-site@evil.example/…`; a scheme that is not http(s) never reaches
+	the host comparison at all; and every path ends as an exact match against a
+	stored `file_url`, never as a path on disk — so a reference full of `..` finds
+	nothing rather than climbing out of the files directory.
+	"""
+	if "://" in ref or ref.startswith("//"):
+		split = urlsplit(ref)
+		if (split.scheme or "").lower() not in ("http", "https"):
+			frappe.throw(_(EXTERNAL_REFERENCE))
+		host = (split.hostname or "").lower().rstrip(".")
+		if not host or host not in _site_hosts():
+			frappe.throw(_(EXTERNAL_REFERENCE))
+		return "file_url", _ref_forms(split.path)
+
+	if ref.startswith("/"):
+		return "file_url", _ref_forms(urlsplit(ref).path)
+
+	if frappe.db.exists("File", ref):
+		return None
+	return "file_name", _ref_forms(ref)
+
+
+def _site_hosts() -> set[str]:
+	"""Every name this site answers to, lowercased and without its port.
+
+	`get_url` is what the site tells the world it is; `frappe.local.site` is what
+	bench calls it, which is the host in most development setups. A reference on
+	any other host is refused not because following it would be dangerous —
+	nothing follows it — but because there is no File row behind it.
+	"""
+	hosts = set()
+	for value in (get_url() or "", getattr(frappe.local, "site", "") or ""):
+		host = urlsplit(value).hostname if "://" in value else value.split(":")[0]
+		if host:
+			hosts.add(host.strip().lower().rstrip("."))
+	return hosts
+
+
+def _ref_forms(value: str) -> list[str]:
+	"""The forms one reference could be stored as, most literal first.
+
+	Frappe unquotes `file_url` before it saves it, so a URL copied out of a browser
+	arrives percent-encoded and matches nothing until it is decoded. The encoded
+	form is tried too, because a file saved with a literal `%20` in its name is a
+	different file from one saved with a space.
+	"""
+	forms = []
+	value = (value or "").strip()
+	decoded = unquote(value)
+	for form in (value, decoded, quote(decoded, safe="/")):
+		if form and form not in forms:
+			forms.append(form)
+	return forms
+
+
+def _readable_files(field: str, values: list[str]) -> list[str]:
+	"""Files matching the reference that this user may actually read.
+
+	`get_list` narrows to what the user may list, and every row is then re-checked
+	with `has_permission`, because `get_list` does not run File's own per-row hook —
+	and that hook is the whole permission model for a private file. Filtering before
+	the ambiguity message is the point: that list is shown to the model, so it may
+	only ever name files the user could have opened themselves.
+	"""
+	names = frappe.get_list(
+		"File",
+		filters={field: ("in", values), "is_folder": 0},
+		pluck="name",
+		order_by="creation asc",
+		limit_page_length=MAX_FILE_CANDIDATES,
+	)
+	return [name for name in names if frappe.has_permission("File", "read", doc=name)]
 
 
 def readable_file(file_name: str) -> Any:
