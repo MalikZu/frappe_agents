@@ -45,6 +45,7 @@ from frappe_agents.runner.providers import (
 	ProviderError,
 	call_model_extract,
 )
+from frappe_agents.tools.base import current_run
 
 EXTRACTION = "Document Extraction"
 EVENT = "frappe_agents:extraction_update"
@@ -103,6 +104,10 @@ def queue_extraction(file_name: str, target_doctype: str, model_profile: str | N
 			"target_doctype": target_doctype,
 			"status": STATUS_PENDING,
 			"model_profile": profile,
+			# Which run asked, when one did. Without it an extraction is an orphan:
+			# the chat that started it cannot find it again after a reload, and an
+			# auditor reading the row cannot get back to the conversation.
+			"agent_run": _asking_run(),
 		}
 	)
 	extraction.insert()
@@ -118,6 +123,17 @@ def queue_extraction(file_name: str, target_doctype: str, model_profile: str | N
 	)
 
 	return extraction.name
+
+
+def _asking_run() -> str | None:
+	"""The Agent Run this call belongs to, or None when a person asked directly.
+
+	Read from the flag `execute_tool` sets, never from an argument: the tool
+	payload is a file and a doctype, and nothing a model writes may decide which
+	run an extraction is recorded against.
+	"""
+	run = current_run()
+	return run.name if run is not None else None
 
 
 def resolve_file(ref: str) -> Any:
@@ -682,8 +698,23 @@ def publish_extraction(doc: Any, **payload: Any) -> None:
 		"target_doctype": doc.target_doctype,
 		"at": str(now_datetime()),
 	}
+	data.update(_origin(doc))
 	data.update(payload)
 	frappe.publish_realtime(EVENT, data, user=doc.owner)
+
+
+def _origin(doc: Any) -> dict:
+	"""The run that asked for this extraction and the conversation it happened in.
+
+	The card belongs to one conversation on screen, and the chat has no other way
+	to know which: extraction runs as its own job, long after the run that asked
+	for it has finished. Nothing about the conversation is disclosed beyond its
+	name, and the event only ever reaches the person who owns the extraction.
+	"""
+	run = doc.get("agent_run")
+	if not run:
+		return {}
+	return {"run": run, "conversation": frappe.db.get_value("Agent Run", run, "conversation")}
 
 
 def _text(exc: Exception) -> str:
