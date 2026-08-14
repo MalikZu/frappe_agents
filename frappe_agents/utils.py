@@ -18,5 +18,5 @@ APP_ROLES = frozenset(
 
 
 def has_app_permission() -> bool:
-	"""Return whether the session user should see the Frappe Agents tile."""
+	"""Return whether the session user should see the Agents tile."""
 	return not APP_ROLES.isdisjoint(frappe.get_roles())
