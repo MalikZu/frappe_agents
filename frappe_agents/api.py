@@ -311,6 +311,9 @@ def get_conversation(conversation: str) -> dict:
 	`context` is the document the conversation is about, for the same reason: the
 	chip beside the header is drawn from it, and a reload had nothing to draw it
 	from. That one IS a permission question, and it is asked again here.
+
+	`extractions` is there for the same reason again: an extraction is its own job
+	and its own record, so nothing a run wrote says how the reading ended.
 	"""
 	frappe.has_permission("Agent Conversation", "read", doc=conversation, throw=True)
 	doc = frappe.get_doc("Agent Conversation", conversation)
@@ -322,8 +325,10 @@ def get_conversation(conversation: str) -> dict:
 		order_by="creation asc",
 		limit_page_length=0,
 	)
+	extractions = _run_extractions([run.name for run in runs])
 	for run in runs:
 		run["event_log"] = _run_events(run.get("event_log"))
+		run["extractions"] = extractions.get(run.name) or []
 
 	return {
 		"name": doc.name,
@@ -335,6 +340,42 @@ def get_conversation(conversation: str) -> dict:
 		"last_activity": doc.last_activity,
 		"runs": runs,
 	}
+
+
+def _run_extractions(runs: list[str]) -> dict[str, list[dict]]:
+	"""How each run's extractions ended, grouped by run. One query for the lot.
+
+	Names and statuses only. The card in the chat says what is waiting for a
+	person and links to the extraction; the values it read are on the review form,
+	next to the source file, behind that form's own checks.
+
+	`get_list` carries the permission: Document Extraction is readable by its owner
+	and by the roles that audit the site, so a conversation whose runs extracted
+	somebody else's documents — which cannot happen, a run acts as its user — would
+	come back empty rather than summarised.
+	"""
+	if not runs:
+		return {}
+
+	rows = frappe.get_list(
+		EXTRACTION,
+		filters={"agent_run": ("in", runs)},
+		fields=["name", "agent_run", "status", "target_doctype", "created_doc"],
+		order_by="creation asc",
+		limit_page_length=0,
+	)
+
+	grouped: dict[str, list[dict]] = {}
+	for row in rows:
+		grouped.setdefault(row.agent_run, []).append(
+			{
+				"name": row.name,
+				"status": row.status,
+				"target_doctype": row.target_doctype,
+				"created_doc": row.created_doc,
+			}
+		)
+	return grouped
 
 
 def _conversation_context(doc: Any) -> dict | None:

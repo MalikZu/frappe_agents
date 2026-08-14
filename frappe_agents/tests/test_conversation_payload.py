@@ -40,6 +40,9 @@ LEGACY_RUN_KEYS = {
 	"creation",
 	"event_log",
 }
+# What a run says about the documents it had read. Added the same way and under
+# the same promise: present and empty for every run that read nothing.
+ADDED_RUN_KEYS = {"extractions"}
 
 
 class TestConversationPayload(AgentTestCase):
@@ -105,9 +108,11 @@ class TestConversationPayload(AgentTestCase):
 		rows = self.read(conversation)["runs"]
 
 		self.assertEqual(len(rows), 1)
-		self.assertEqual(set(rows[0]), LEGACY_RUN_KEYS)
+		self.assertEqual(set(rows[0]), LEGACY_RUN_KEYS | ADDED_RUN_KEYS)
 		self.assertEqual(rows[0]["name"], run)
 		self.assertEqual(rows[0]["input_message"], "How many tickets are open?")
 		self.assertEqual(rows[0]["output_message"], "Two of them.")
 		# Still parsed, still a list, still empty when the run never wrote a log.
 		self.assertEqual(rows[0]["event_log"], [])
+		# A run from before extraction existed read nothing, and says so.
+		self.assertEqual(rows[0]["extractions"], [])
