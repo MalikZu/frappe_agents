@@ -165,7 +165,9 @@ def _bulk_row(
 	The savepoint is what keeps a failed row from taking the batch with it. A row
 	rejected by the database — a duplicate name, a failed constraint — leaves the
 	transaction unusable until something rolls it back, and rolling the whole call
-	back would undo the rows that worked.
+	back would undo the rows that worked. A dry run rolls its savepoint back either
+	way: validation is meant to write nothing, and a controller that writes during
+	it must not turn a check into a change.
 	"""
 	if not isinstance(values, dict) or not values:
 		return _row_error(index, "Each row must be a non-empty object of fieldname to value."), None, [], []
@@ -179,15 +181,19 @@ def _bulk_row(
 			outcome = {"index": index, "would_insert": verdict["would_insert"]}
 			if verdict.get("validation_error"):
 				outcome["error"] = verdict["validation_error"]
-			return outcome, None, stripped, verdict.get("messages") or []
-
-		doc, stripped = _insert_draft(meta, doctype, values)
+			name, said = None, verdict.get("messages") or []
+		else:
+			doc, stripped = _insert_draft(meta, doctype, values)
+			outcome, name, said = {"index": index, "name": doc.name}, doc.name, _drain_messages()
 	except Exception as exc:
 		frappe.db.rollback(save_point=save_point)
 		return _row_error(index, _text(exc)), None, [], _drain_messages()
 
-	frappe.db.release_savepoint(save_point)
-	return {"index": index, "name": doc.name}, doc.name, stripped, _drain_messages()
+	if dry_run:
+		frappe.db.rollback(save_point=save_point)
+	else:
+		frappe.db.release_savepoint(save_point)
+	return outcome, name, stripped, said
 
 
 def _row_error(index: int, error: str) -> dict:
