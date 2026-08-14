@@ -129,6 +129,9 @@ VENDOR_ACME_HOLDINGS = "FA Acme Trading Holdings"
 # sensitive here because `Agent Settings.sensitive_fields` says so, on the parent
 # and on the child row, which is the same attack with more steps.
 IBAN_FIELD = "iban"
+# A Password field, sensitive because of its fieldtype rather than because
+# anybody configured it. Nothing marks it in Agent Settings.
+PASSWORD_FIELD = "portal_password"
 # What the master record says, and what a redirected invoice would print instead.
 # They differ in the account digits alone — the difference a reviewer cannot see
 # by reading and a comparison catches every time.
@@ -1195,6 +1198,14 @@ def _ensure_extraction_fields() -> None:
 				"fieldtype": "Select",
 				"label": "Payment Terms",
 				"options": "\nNet 30\nNet 60",
+			},
+			# A Password field on an ordinary business doctype. The audit tests need
+			# one: a fieldtype the framework never hands back in a query must not be
+			# copied into an audit row either.
+			{
+				"fieldname": PASSWORD_FIELD,
+				"fieldtype": "Password",
+				"label": "Portal Password",
 			},
 		],
 	)
