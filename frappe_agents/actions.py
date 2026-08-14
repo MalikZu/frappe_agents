@@ -41,6 +41,8 @@ from frappe import _
 from frappe.model.workflow import get_workflow_name
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime, strip_html
 
+from frappe_agents.tools.base import runtime_enabled
+
 APPROVER_ROLE = "Agent Approver"
 
 STATUS_PENDING = "Pending"
@@ -117,6 +119,12 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	frappe.clear_messages()
 	frappe.flags.error_message = None
+
+	# Read again, immediately before the only line in this module that changes a
+	# document. Everything between the first check and here is database work, and a
+	# switch thrown during it has to stop the apply — the check that matters is the
+	# last one before the write, not the first one after the request arrived.
+	_check_kill_switch()
 
 	frappe.db.savepoint(SAVEPOINT)
 	try:
@@ -296,9 +304,12 @@ def _check_kill_switch() -> None:
 
 	global_enabled = 0 means the site distrusts the runtime. A human applying agent
 	output during that state is still acting on agent output.
+
+	`runtime_enabled` is the one reader in the app, and it is the one reader for a
+	reason: a cached copy of Agent Settings is per process, so the same switch could
+	be off for a run and still on for the approval of what that run proposed.
 	"""
-	settings = frappe.get_cached_doc("Agent Settings")
-	if not cint(settings.global_enabled):
+	if not runtime_enabled():
 		frappe.throw(_("The agent runtime is switched off. Agent proposals cannot be applied."))
 
 
