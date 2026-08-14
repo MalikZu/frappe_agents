@@ -27,6 +27,7 @@
   "tokens_in",
   "tokens_out",
   "steps_taken",
+  "history_truncated",
   "event_log"
  ],
  "fields": [
@@ -151,6 +152,14 @@
    "fieldname": "steps_taken",
    "fieldtype": "Int",
    "label": "Steps Taken"
+  },
+  {
+   "default": "0",
+   "description": "Older turns of this conversation were left out to fit the model's context limit.",
+   "fieldname": "history_truncated",
+   "fieldtype": "Check",
+   "label": "History Truncated",
+   "read_only": 1
   },
   {
    "description": "Everything the agent loop emitted, oldest first. Long runs keep the start and the end.",
