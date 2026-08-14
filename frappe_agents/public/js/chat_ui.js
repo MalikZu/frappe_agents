@@ -26,7 +26,20 @@ const STYLES = `
 		border: 1px solid var(--border-color); border-radius: var(--border-radius-lg);
 	}
 	.agent-chat-input.form-control { border: none; background: transparent; resize: none; padding: 10px 12px 2px; }
+	/* The input is borderless inside the composer, so the composer wears the ring
+	   for it — Bootstrap's own focus shadow would sit in mid-air. */
 	.agent-chat-input.form-control:focus { box-shadow: none; }
+	.agent-chat-composer:focus-within { outline: 2px solid var(--text-color); outline-offset: 2px; }
+	/* Desk drops the browser's focus ring on links and buttons and puts one back
+	   only for .btn. Nothing on this screen is a .btn, so it puts its own back. */
+	.agent-chat-doc:focus-visible,
+	.agent-chat-action-link:focus-visible,
+	.agent-chat-chip:focus-visible,
+	.agent-chat-attach:focus-visible,
+	.agent-chat-file-drop:focus-visible,
+	.agent-chat-pop-opt:focus-visible,
+	.agent-chat-tool-head:focus-visible,
+	.agent-chat-think-head:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
 	.agent-chat-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
 	.agent-chat-chips { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 	.agent-chat-send { margin-left: auto; }
