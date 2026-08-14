@@ -68,6 +68,10 @@ UPDATE_EVENT = "message_update"
 # are loose: whichever comes first wins, and a block ending flushes anyway.
 STREAM_FLUSH_MS = 150
 STREAM_FLUSH_CHARS = 400
+# And the other end of it: how much one frame may carry. The two above are
+# floors — a single delta can be a megabyte, and one frame that size stalls the
+# browser and the socket both. A delta over this goes out in several frames.
+STREAM_FRAME_CHARS = 8_000
 
 # Which streamed block events the browser is told about, and what each one is.
 # Tool calls are not in here: their arguments arrive as raw JSON fragments, and
@@ -330,12 +334,22 @@ class RunCancellation:
 
 
 class StreamThrottle:
-	"""Streamed deltas, coalesced into updates a browser can keep up with.
+	"""Streamed blocks, coalesced into updates a browser can keep up with.
 
-	A delta is held until it is worth sending: `STREAM_FLUSH_CHARS` characters
-	have piled up, or `STREAM_FLUSH_MS` have passed since the first one was
-	held. Deltas only merge with deltas of the same kind in the same block, so
-	nothing is ever glued to text it does not belong to.
+	What is held back is held per kind — the answer in one buffer, the thinking
+	in another — and let go together: `STREAM_FLUSH_CHARS` characters have piled
+	up across them, or `STREAM_FLUSH_MS` have passed since the first was held.
+
+	Per kind rather than per block, because a stream is allowed to alternate. A
+	provider that sends a scrap of reasoning, a scrap of answer, a scrap of
+	reasoning opens and closes a block every few characters, and a throttle that
+	flushed on each change would send a frame per delta — which is the cost the
+	throttle exists to avoid. So a block that reopens before its close went out
+	simply carries on, and what the browser sees is one strip and one bubble.
+
+	Openings and closings are held the same way. They are what a kind change
+	costs, so sending them at once would leave the same hole. The order inside a
+	kind is exact: it opens, then its text, then it closes.
 
 	Whoever holds one must flush it before anything else goes out, or the
 	browser sees a block end before the text inside it.
@@ -344,29 +358,78 @@ class StreamThrottle:
 	def __init__(self, publish: Any, clock: Any = time.monotonic) -> None:
 		self.publish = publish
 		self.clock = clock
-		self.kind: str | None = None
-		self.index = 0
-		self.buffer = ""
+		# kind -> what is waiting to go out for it, in the order the kinds spoke.
+		self.pending: dict[str, dict] = {}
+		# kind -> the content index of the block the browser has open for it.
+		self.live: dict[str, int] = {}
 		self.held = 0.0
+		self.chars = 0
+
+	def start(self, kind: str, index: int) -> None:
+		"""A block opened. Only news if this kind has none open already."""
+		waiting = self.pending.get(kind)
+		if waiting is not None:
+			# It closed and reopened before either went out, so as far as the
+			# browser is concerned it never closed.
+			waiting["end"] = False
+		elif kind not in self.live:
+			self._hold(kind, index, start=True)
+		self._tick()
 
 	def add(self, kind: str, index: int, delta: str) -> None:
+		"""More text for a kind, joined to whatever of it is already held."""
 		if not delta:
 			return
-		if self.buffer and (kind, index) != (self.kind, self.index):
-			self.flush()
-		if not self.buffer:
-			self.kind, self.index, self.held = kind, index, self.clock()
+		waiting = self.pending.get(kind) or self._hold(kind, self.live.get(kind, index))
+		waiting["end"] = False
+		waiting["buffer"] += delta
+		self.chars += len(delta)
+		self._tick()
 
-		self.buffer += delta
-		enough = len(self.buffer) >= STREAM_FLUSH_CHARS
-		if enough or (self.clock() - self.held) * 1000 >= STREAM_FLUSH_MS:
-			self.flush()
+	def end(self, kind: str, index: int) -> None:
+		"""A block closed. Held like everything else, and undone by a reopening."""
+		waiting = self.pending.get(kind)
+		if waiting is None:
+			if kind not in self.live:
+				return
+			waiting = self._hold(kind, self.live[kind])
+		waiting["end"] = True
+		self._tick()
 
 	def flush(self) -> None:
-		if not self.buffer:
+		"""Everything held, kind by kind, in the order the kinds first spoke."""
+		if not self.pending:
 			return
-		buffer, self.buffer = self.buffer, ""
-		self.publish(self.kind, self.index, "delta", buffer)
+		pending, self.pending, self.chars = self.pending, {}, 0
+
+		for kind, waiting in pending.items():
+			index = waiting["index"]
+			if waiting["start"]:
+				self.live[kind] = index
+				self.publish(kind, index, "start", "")
+			for piece in _frames(waiting["buffer"]):
+				self.publish(kind, index, "delta", piece)
+			if waiting["end"]:
+				self.live.pop(kind, None)
+				self.publish(kind, index, "end", "")
+
+	def _hold(self, kind: str, index: int, start: bool = False) -> dict:
+		if not self.pending:
+			self.held = self.clock()
+		waiting = {"index": index, "start": start, "buffer": "", "end": False}
+		self.pending[kind] = waiting
+		return waiting
+
+	def _tick(self) -> None:
+		if self.chars >= STREAM_FLUSH_CHARS or (self.clock() - self.held) * 1000 >= STREAM_FLUSH_MS:
+			self.flush()
+
+
+def _frames(buffer: str) -> list[str]:
+	"""One buffer as the frames it may go out in. A short one is a single frame."""
+	if len(buffer) <= STREAM_FRAME_CHARS:
+		return [buffer] if buffer else []
+	return [buffer[at : at + STREAM_FRAME_CHARS] for at in range(0, len(buffer), STREAM_FRAME_CHARS)]
 
 
 class RunEvents:
@@ -428,11 +491,11 @@ class RunEvents:
 		return f"Stopped after {self.steps} steps without a final answer."
 
 	def _stream(self, event: Any) -> None:
-		"""One streamed block event, on its way to the browser.
+		"""One streamed block event, held by the throttle until it is worth sending.
 
-		A delta joins whatever is being held. A block opening or closing is news
-		on its own — the thinking strip closes on one — so it flushes first and
-		then goes out immediately.
+		Openings and closings go through it too, and not only deltas: a stream
+		may change kind on every delta, and a boundary that went out at once
+		would be a frame per delta however well the text between them coalesced.
 		"""
 		streamed = STREAM_EVENTS.get(type(event))
 		if streamed is None:
@@ -441,10 +504,10 @@ class RunEvents:
 		kind, phase = streamed
 		if phase == "delta":
 			self.updates.add(kind, event.content_index, event.delta)
-			return
-
-		self.updates.flush()
-		self._publish_update(kind, event.content_index, phase, "")
+		elif phase == "start":
+			self.updates.start(kind, event.content_index)
+		else:
+			self.updates.end(kind, event.content_index)
 
 	def _publish_update(self, kind: str, index: int, phase: str, delta: str) -> None:
 		publish_event(self.run, UPDATE_EVENT, kind=kind, index=index, phase=phase, delta=delta)

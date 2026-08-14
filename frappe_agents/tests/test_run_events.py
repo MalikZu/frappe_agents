@@ -25,6 +25,8 @@ from frappe_agents.runner.run import (
 	EVENT_LOG_HEAD,
 	EVENT_LOG_TAIL,
 	STREAM_FLUSH_CHARS,
+	STREAM_FLUSH_MS,
+	STREAM_FRAME_CHARS,
 	StreamThrottle,
 	_event_log,
 )
@@ -433,14 +435,18 @@ class TestStreamThrottle(AgentTestCase):
 		self.assertEqual(self.sent, [("text", 0, "delta", "Three tickets")])
 
 	def test_one_block_is_never_glued_to_another(self):
+		"""Two kinds are held side by side, and come out as two updates."""
 		throttle = self.throttle()
 
 		throttle.add("thinking", 0, "counting them")
 		throttle.add("text", 1, "Three")
+		self.assertEqual(self.sent, [])
 
-		self.assertEqual(self.sent, [("thinking", 0, "delta", "counting them")])
 		throttle.flush()
-		self.assertEqual(self.sent[1], ("text", 1, "delta", "Three"))
+		self.assertEqual(
+			self.sent,
+			[("thinking", 0, "delta", "counting them"), ("text", 1, "delta", "Three")],
+		)
 
 	def test_flushing_nothing_sends_nothing(self):
 		throttle = self.throttle()
@@ -450,3 +456,82 @@ class TestStreamThrottle(AgentTestCase):
 		throttle.flush()
 
 		self.assertEqual(self.sent, [])
+
+	# --- the boundaries, held the same way ----------------------------------
+
+	def test_a_block_opens_says_its_piece_and_closes_in_that_order(self):
+		throttle = self.throttle()
+
+		throttle.start("text", 0)
+		throttle.add("text", 0, "Three.")
+		throttle.end("text", 0)
+		throttle.flush()
+
+		self.assertEqual(
+			self.sent,
+			[("text", 0, "start", ""), ("text", 0, "delta", "Three."), ("text", 0, "end", "")],
+		)
+
+	def test_a_block_that_reopens_before_its_close_went_out_stays_one_block(self):
+		"""The browser was never told it closed, so it never closed."""
+		throttle = self.throttle()
+
+		throttle.start("thinking", 0)
+		throttle.add("thinking", 0, "counting")
+		throttle.end("thinking", 0)
+		throttle.start("thinking", 2)
+		throttle.add("thinking", 2, " them")
+		throttle.flush()
+
+		self.assertEqual(
+			self.sent,
+			[("thinking", 0, "start", ""), ("thinking", 0, "delta", "counting them")],
+		)
+
+	def test_alternating_kinds_cannot_force_a_frame_each(self):
+		"""The attack: a stream that changes kind on every single delta.
+
+		One SSE frame may carry reasoning and answer both, so a provider can
+		alternate them for as long as it likes. Coalescing per block would flush
+		on every change and send a frame per delta — the exact cost the throttle
+		exists to avoid. Per kind, alternation is free: what goes out is bounded
+		by the clock and by how much was written, never by how often the kind
+		changed.
+		"""
+		throttle = self.throttle()
+		throttle.start("thinking", 0)
+		throttle.start("text", 1)
+
+		for _ in range(1000):
+			throttle.add("thinking", 0, "t")
+			throttle.add("text", 1, "x")
+			# A millisecond a pair: one second of a very talkative model.
+			self.now += 0.001
+		throttle.flush()
+
+		# One flush per STREAM_FLUSH_MS and one per STREAM_FLUSH_CHARS, and each
+		# flush is at most an open, a delta and a close for each of two kinds.
+		flushes = 1000 / STREAM_FLUSH_MS + 2000 / STREAM_FLUSH_CHARS + 1
+		self.assertLessEqual(len(self.sent), 3 * 2 * flushes)
+		# Unthrottled this is 2000 deltas and 4000 boundary events.
+		self.assertLess(len(self.sent), 50)
+
+		written = {"thinking": "", "text": ""}
+		for kind, _index, phase, delta in self.sent:
+			if phase == "delta":
+				written[kind] += delta
+		self.assertEqual(written, {"thinking": "t" * 1000, "text": "x" * 1000})
+
+	def test_one_enormous_delta_goes_out_in_frames_a_socket_can_carry(self):
+		"""The flush size is a floor. Without a ceiling one frame is the answer."""
+		throttle = self.throttle()
+
+		throttle.add("text", 0, "x" * 100_000)
+		throttle.flush()
+
+		self.assertGreater(len(self.sent), 1)
+		self.assertTrue(all(len(delta) <= STREAM_FRAME_CHARS for *_, delta in self.sent))
+		self.assertEqual(
+			{(kind, index, phase) for kind, index, phase, _ in self.sent}, {("text", 0, "delta")}
+		)
+		self.assertEqual("".join(delta for *_, delta in self.sent), "x" * 100_000)
