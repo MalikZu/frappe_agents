@@ -21,6 +21,10 @@ const STYLES = `
 	.agent-chat-doc-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.agent-chat-doc svg { flex: none; }
 	.agent-chat-log { flex: 1; overflow-y: auto; padding: 8px 0; }
+	.agent-chat-sr {
+		position: absolute; width: 1px; height: 1px; overflow: hidden;
+		clip-path: inset(50%); white-space: nowrap;
+	}
 	.agent-chat-composer {
 		position: relative; margin-top: 8px; background: var(--card-bg, var(--control-bg));
 		border: 1px solid var(--border-color); border-radius: var(--border-radius-lg);
@@ -386,6 +390,7 @@ frappe_agents.ChatUI = class ChatUI {
 		// What each run is writing right now: the message on screen, the text
 		// accumulated for it, and the thinking strips open beside it.
 		this.streams = {};
+		this.update_busy();
 	}
 
 	make() {
@@ -404,6 +409,7 @@ frappe_agents.ChatUI = class ChatUI {
 					<span class="agent-chat-context"></span>
 				</div>
 				<div class="agent-chat-log"></div>
+				<div class="agent-chat-sr" role="status"></div>
 				<div class="agent-chat-composer">
 					<textarea class="form-control agent-chat-input" rows="2"></textarea>
 					<div class="agent-chat-files"></div>
@@ -423,6 +429,7 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$title = this.$body.find(".agent-chat-title");
 		this.$context = this.$body.find(".agent-chat-context");
 		this.$log = this.$body.find(".agent-chat-log");
+		this.$sr = this.$body.find(".agent-chat-sr");
 		this.$input = this.$body.find(".agent-chat-input");
 		this.$files = this.$body.find(".agent-chat-files");
 		this.$chips = this.$body.find(".agent-chat-chips");
@@ -1072,6 +1079,7 @@ frappe_agents.ChatUI = class ChatUI {
 				.attr("data-run", run.name);
 			this.$log.append($pending);
 			this.pending[run.name] = $pending;
+			this.update_busy();
 		}
 
 		this.replay_extractions(run);
@@ -1191,6 +1199,25 @@ frappe_agents.ChatUI = class ChatUI {
 		});
 	}
 
+	/**
+	 * Say what just happened, once, to anyone not watching the log.
+	 *
+	 * Outcomes only — the answer streams in several words a second, and a live
+	 * region reading every delta is unusable. "The agent replied" is the news;
+	 * the words themselves are in the transcript to read at leisure.
+	 */
+	announce(text) {
+		if (!this.$sr || !text) return;
+		this.$sr.text(text);
+	}
+
+	/** The log is busy for as long as a run on it has not landed. */
+	update_busy(starting) {
+		if (!this.$log) return;
+		const busy = Boolean(starting) || Object.keys(this.pending).length > 0;
+		this.$log.attr("aria-busy", busy ? "true" : "false");
+	}
+
 	show_empty(text) {
 		this.$log.empty().append($("<div class='agent-chat-empty'></div>").text(text));
 	}
@@ -1222,6 +1249,7 @@ frappe_agents.ChatUI = class ChatUI {
 		this.set_busy(true);
 
 		const $pending = this.add_status(__("Queued…"));
+		this.update_busy(true);
 
 		const args = { agent: this.agent, message: message };
 		if (this.conversation) args.conversation = this.conversation;
@@ -1239,15 +1267,20 @@ frappe_agents.ChatUI = class ChatUI {
 			callback: (r) => {
 				if (!r.message || !r.message.run) {
 					$pending.remove();
+					this.update_busy();
 					return;
 				}
 				const is_new = this.conversation !== r.message.conversation;
 				this.conversation = r.message.conversation;
 				$pending.attr("data-run", r.message.run);
 				this.pending[r.message.run] = $pending;
+				this.update_busy();
 				if (is_new && this.on_conversation) this.on_conversation(this.conversation, null);
 			},
-			error: () => $pending.remove(),
+			error: () => {
+				$pending.remove();
+				this.update_busy();
+			},
 			always: () => this.set_busy(false),
 		});
 	}
@@ -1306,14 +1339,18 @@ frappe_agents.ChatUI = class ChatUI {
 				if (status === "Completed") {
 					$pending.remove();
 				} else {
-					$pending.text(__("Run {0}", [__(status)]));
+					const text = __("Run {0}", [__(status)]);
+					$pending.text(text);
+					this.announce(text);
 				}
 			}
 			delete this.pending[data.run];
+			this.update_busy();
 			return;
 		}
 		if ($pending && status) {
 			$pending.text(`${__(status)}…`);
+			this.announce(__(status));
 		}
 	}
 
@@ -1390,6 +1427,7 @@ frappe_agents.ChatUI = class ChatUI {
 		if (text) {
 			this.write_stream_text(run, state, text);
 			state.said = text;
+			this.announce(__("The agent replied."));
 		} else if (state.$row) {
 			// It ended up saying nothing — a turn that only called a tool.
 			state.$row.remove();
@@ -1564,6 +1602,9 @@ frappe_agents.ChatUI = class ChatUI {
 			.removeClass("is-waiting")
 			.toggleClass("is-error", Boolean(failed))
 			.text(text || __("It returned nothing."));
+		this.announce(
+			failed ? __("{0} failed.", [line.tool]) : __("{0} finished.", [line.tool])
+		);
 	}
 
 	/** The oldest started line for this tool on this run that has not finished yet. */
@@ -1741,6 +1782,7 @@ frappe_agents.ChatUI = class ChatUI {
 			$pending.remove();
 			delete this.pending[data.run];
 		}
+		this.update_busy();
 	}
 
 	render_error(data) {
@@ -1752,6 +1794,8 @@ frappe_agents.ChatUI = class ChatUI {
 			$pending.remove();
 			delete this.pending[data.run];
 		}
+		this.announce(__("The run failed."));
+		this.update_busy();
 	}
 
 	make_bubble(text, cls) {
