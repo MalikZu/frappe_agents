@@ -3,6 +3,7 @@
 
 import frappe
 
+from frappe_agents.access.builder import seed_agents_builder
 from frappe_agents.access.default_profiles import seed_default_profiles
 
 # Every role needs the Desk: managers configure agents, users chat, approvers review
@@ -18,6 +19,7 @@ AGENT_ROLES = (
 def after_install() -> None:
 	create_roles()
 	seed_default_profiles()
+	seed_agents_builder()
 	build_workspace_sidebar()
 
 
