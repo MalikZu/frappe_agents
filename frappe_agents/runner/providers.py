@@ -3,8 +3,10 @@
 Three entry points, over two wire formats — OpenAI-compatible chat completions
 and Anthropic messages:
 
-* `call_model` — the agent loop. Messages in, text and tool calls out.
-* `call_model_stream` — the same call, answered as it is written.
+* `call_model` — one chat call, answered whole. Messages in, text and tool calls
+  out. Kept as the plain form of the call; the agent loop no longer uses it.
+* `call_model_stream` — the same call, answered as it is written. This is what
+  the agent loop runs on.
 * `call_model_extract` — one document in, schema-conforming JSON out, with no
   tools bound under any circumstances. It builds its own payload rather than
   reusing the chat builders, which flatten content to a string. Extraction is
@@ -364,6 +366,9 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
 
 		if role == "assistant":
 			blocks: list[dict] = []
+			# Thinking leads the turn, because that is the order it was written in
+			# and the order the API demands it back in.
+			blocks.extend(_thinking_blocks(message))
 			if message.get("content"):
 				blocks.append({"type": "text", "text": message["content"]})
 			for call in message.get("tool_calls") or []:
@@ -384,6 +389,29 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
 		)
 
 	return "\n\n".join(system_parts), converted
+
+
+def _thinking_blocks(message: dict) -> list[dict]:
+	"""An assistant turn's reasoning, in the shape Anthropic hands it back.
+
+	A turn that asked for a tool has to return the thinking that led to it, with
+	the signature exactly as it arrived — the API verifies it byte for byte and
+	rejects the whole turn if it does not match. A redacted block is ciphertext
+	the model cannot read either; it still has to come back.
+
+	Only the Anthropic builder reads this. The OpenAI-compatible one has no place
+	to put it and leaves it behind, which is what that format wants.
+	"""
+	blocks = []
+	for block in message.get("thinking") or []:
+		text = block.get("thinking") or ""
+		if not text:
+			continue
+		if block.get("redacted"):
+			blocks.append({"type": "redacted_thinking", "data": text})
+		elif block.get("signature"):
+			blocks.append({"type": "thinking", "thinking": text, "signature": block["signature"]})
+	return blocks
 
 
 def _is_tool_result(message: dict) -> bool:
