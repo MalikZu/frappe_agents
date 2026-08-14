@@ -45,7 +45,7 @@ const RAIL_STYLES = `
 	/* The gap belongs between one day and the next, not above the first one. */
 	.agent-chat-rail-group:first-child { margin-block-start: 0; }
 	.agent-chat-rail-empty { color: var(--text-muted); font-size: var(--text-sm); padding: 10px 6px; }
-	.agent-chat-convo-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
+	.agent-chat-convo-row { position: relative; margin-bottom: 2px; }
 	.agent-chat-convo {
 		flex: 1; min-width: 0; padding: 6px 8px; text-align: start; font: inherit; color: inherit;
 		background: none; border-radius: var(--border-radius-md, 6px); cursor: pointer;
@@ -64,10 +64,17 @@ const RAIL_STYLES = `
 	.agent-chat-convo-when { flex: none; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
 	.agent-chat-convo-snippet { display: flex; align-items: baseline; gap: 6px; font-size: var(--text-sm); color: var(--text-muted); }
 	.agent-chat-convo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.agent-chat-convo-actions { flex: none; display: flex; align-items: center; }
+	/* The rename floats over the row's trailing edge instead of costing every
+	   row a column: a sibling for accessibility, an overlay for geometry. */
+	.agent-chat-convo-actions {
+		position: absolute; inset-inline-end: 4px; inset-block-start: 4px;
+		display: flex; align-items: center;
+	}
 	.agent-chat-rename {
 		flex: none; opacity: 0; font: inherit; font-size: var(--text-xs); color: var(--text-muted);
-		border: none; background: none; padding: 2px 4px; cursor: pointer;
+		border: none; border-radius: var(--border-radius-tiny); background: var(--card-bg);
+		min-width: 24px; min-height: 24px; display: inline-grid; place-items: center;
+		padding: 0 4px; cursor: pointer; box-shadow: 0 0 0 1px var(--border-color);
 		transition: opacity var(--agent-chat-quick) var(--agent-chat-ease);
 	}
 	.agent-chat-convo-row:hover .agent-chat-rename,
@@ -374,7 +381,8 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		$("<div class='agent-chat-convo-actions'></div>")
 			.append(
 				$("<button type='button' class='agent-chat-rename'></button>")
-					.text(`✎ ${__("rename")}`)
+					.text("✎")
+					.attr("aria-label", __("Rename this conversation"))
 					.attr("title", __("Rename this conversation"))
 					.on("click", () => this.rename(row))
 			)
