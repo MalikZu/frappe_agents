@@ -60,4 +60,4 @@ rebuilds them, then every request 500s on ModuleNotFoundError. Canary with
 `frappe.enqueue("frappe.ping")` before burning real model calls.
 Tear down with `docker rm -f fa-db fa-bench` when done; nothing in it is precious.
 
-Last verified: 2026-08-14 — 504 tests green on Frappe v16 / Python 3.14.2.
+Last verified: 2026-08-14 — 505 tests green on Frappe v16 / Python 3.14.2.
