@@ -55,8 +55,11 @@ silence, so the flat total is replaced by a connect timeout plus a per-chunk idl
 timeout — `STREAM_IDLE_TIMEOUT` seconds with no bytes and the stream is dropped
 with a plain error.
 
-Abandoning the generator closes the connection. That is the cancellation path:
-the caller stops pulling, and the socket goes away with it.
+Abandoning the generator closes the connection. That is the cancellation path
+when the caller is between chunks: it stops pulling, and the socket goes away
+with it. A caller blocked *inside* a chunk has nothing to stop doing, so the
+stream hands out the response as well — `ProviderStream.close_response` drops the
+socket under the read and it ends there and then rather than at the idle timeout.
 """
 
 import base64
@@ -441,9 +444,74 @@ def _is_tool_result(message: dict) -> bool:
 # --- streaming ---------------------------------------------------------------
 
 
+class ProviderStream:
+	"""The normalized chunk stream, with the socket behind it still reachable.
+
+	Iterating it is iterating the generator and closing it closes the generator,
+	which unwinds the `with` holding the response and drops the connection —
+	exactly what abandoning the generator has always done.
+
+	`close_response` is the other half, and it exists for cancellation. A read
+	blocked on a socket cannot be interrupted from the thread that wants it to
+	stop; what that thread can do is take the socket away. The read then ends at
+	once instead of at the idle timeout, and the worker thread holding it is free
+	a minute earlier.
+	"""
+
+	def __init__(self) -> None:
+		self._chunks: Iterator[dict] | None = None
+		self._response: Any = None
+		self._released = False
+
+	def pulling(self, chunks: Iterator[dict]) -> "ProviderStream":
+		self._chunks = chunks
+		return self
+
+	def opened(self, response: Any) -> None:
+		"""The generator has a live response. Called on whichever thread pulls it."""
+		self._response = response
+		if self._released:
+			# Cancelled before the socket was even open. It is not wanted now either.
+			self._drop_response()
+
+	def __iter__(self) -> "ProviderStream":
+		return self
+
+	def __next__(self) -> dict:
+		if self._chunks is None:
+			raise StopIteration
+		return next(self._chunks)
+
+	def close(self) -> None:
+		chunks, self._chunks = self._chunks, None
+		close = getattr(chunks, "close", None)
+		if close is not None:
+			try:
+				close()
+			except Exception:
+				# A generator caught mid-pull refuses to close. The response goes
+				# anyway, which is what the socket cares about.
+				pass
+		self._drop_response()
+
+	def close_response(self) -> None:
+		"""Let go of the socket now, wherever the generator has got to."""
+		self._released = True
+		self._drop_response()
+
+	def _drop_response(self) -> None:
+		response, self._response = self._response, None
+		if response is None:
+			return
+		try:
+			response.close()
+		except Exception:
+			pass
+
+
 def call_model_stream(
 	profile: Any, messages: list[dict], tool_schemas: list[dict] | None = None
-) -> Iterator[dict]:
+) -> ProviderStream:
 	"""Call the model and yield the answer as it is written.
 
 	Same inputs as `call_model`, same two wire formats, same key handling. What
@@ -457,13 +525,18 @@ def call_model_stream(
 	profile, provider, api_key = _resolve_profile(profile)
 	tool_schemas = tool_schemas or []
 
-	if provider.provider_type == PROVIDER_ANTHROPIC:
-		return _stream_anthropic(provider, profile, messages, tool_schemas, api_key)
-	return _stream_openai(provider, profile, messages, tool_schemas, api_key)
+	stream = ProviderStream()
+	build = _stream_anthropic if provider.provider_type == PROVIDER_ANTHROPIC else _stream_openai
+	return stream.pulling(build(provider, profile, messages, tool_schemas, api_key, stream))
 
 
 def _stream_openai(
-	provider: Any, profile: Any, messages: list[dict], tool_schemas: list[dict], api_key: str
+	provider: Any,
+	profile: Any,
+	messages: list[dict],
+	tool_schemas: list[dict],
+	api_key: str,
+	stream: ProviderStream,
 ) -> Iterator[dict]:
 	url = f"{(provider.base_url or OPENAI_BASE_URL).rstrip('/')}/chat/completions"
 	payload: dict[str, Any] = {
@@ -490,11 +563,17 @@ def _stream_openai(
 
 	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 	with _open_stream(url, headers, payload, api_key) as response:
+		stream.opened(response)
 		yield from parse_openai_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
 
 
 def _stream_anthropic(
-	provider: Any, profile: Any, messages: list[dict], tool_schemas: list[dict], api_key: str
+	provider: Any,
+	profile: Any,
+	messages: list[dict],
+	tool_schemas: list[dict],
+	api_key: str,
+	stream: ProviderStream,
 ) -> Iterator[dict]:
 	url = f"{(provider.base_url or ANTHROPIC_BASE_URL).rstrip('/')}/v1/messages"
 	system, converted = _anthropic_messages(messages)
@@ -522,6 +601,7 @@ def _stream_anthropic(
 		"Content-Type": "application/json",
 	}
 	with _open_stream(url, headers, payload, api_key) as response:
+		stream.opened(response)
 		yield from parse_anthropic_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
 
 

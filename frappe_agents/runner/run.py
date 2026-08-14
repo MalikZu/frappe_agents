@@ -340,20 +340,55 @@ class RunCancellation:
 	turn boundary and cancels this token, and a tool that hits the switch inside
 	`execute_tool` cancels it too. The loop then stops before the next model call
 	and before the next tool call, which is the whole job of the switch.
+
+	It also lets go of what a stopped run is still holding. Being cancelled is
+	answered by whoever asks, and a turn waiting on a provider socket is not
+	asking — it is blocked in a read. `on_cancel` is how that turn hears about it
+	in time to close its own connection.
 	"""
 
 	def __init__(self) -> None:
 		self._cancelled = False
 		self.reason: str | None = None
+		self._releases: list[Any] = []
 
 	def cancel(self, reason: str) -> None:
 		"""Stop the run. The first reason given is the one the run records."""
-		if not self._cancelled:
-			self._cancelled = True
-			self.reason = reason
+		if self._cancelled:
+			return
+		self._cancelled = True
+		self.reason = reason
+		self._release()
 
 	def is_cancelled(self) -> bool:
 		return self._cancelled
+
+	def on_cancel(self, release: Any) -> None:
+		"""Register something to let go of the moment this run is stopped.
+
+		Called on the thread that cancels, not the one that is blocked — that is
+		the point of it. Registering after the fact runs it straight away, so a
+		turn that starts on an already-cancelled run lets go immediately.
+		"""
+		if self._cancelled:
+			release()
+			return
+		self._releases.append(release)
+
+	def forget_cancel(self, release: Any) -> None:
+		"""Stop holding what has ended by itself — a turn's stream, once it is done."""
+		if release in self._releases:
+			self._releases.remove(release)
+
+	def _release(self) -> None:
+		releases, self._releases = self._releases, []
+		for release in releases:
+			try:
+				release()
+			except Exception:
+				frappe.logger("frappe_agents").error(
+					"could not let go of a cancelled run's provider stream", exc_info=True
+				)
 
 
 class StreamThrottle:

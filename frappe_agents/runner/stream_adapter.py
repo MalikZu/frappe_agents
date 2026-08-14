@@ -26,6 +26,12 @@ socket blocks and the event loop is running the rest of the turn. Between chunks
 the cancellation token is read: on cancel the connection is closed and the turn
 ends as aborted. A request already on the wire cannot be taken back, so this is
 the earliest honest place to stop.
+
+Between chunks is not the only place a run is stopped, though — a cancellation
+can arrive while the worker thread sits inside a read that will not return until
+the provider says something or the idle timeout does. So the turn also asks the
+token to tell it when it trips, and closes the response from there: the blocked
+read ends on a dead socket, the thread comes back, and the turn aborts.
 """
 
 from __future__ import annotations
@@ -111,6 +117,20 @@ class ModelProfileProvider:
 		counted_in = 0
 		counted_out = 0
 		finished = False
+		released = False
+
+		def release() -> None:
+			"""Cancelled: take the socket away so a blocked read ends now."""
+			nonlocal released
+			released = True
+			_close_response(chunks)
+
+		# A cancellation that arrives while this turn is waiting on the socket has
+		# nothing to interrupt — the check below only runs between chunks. So the
+		# token is asked to say when it trips, and what it trips is the connection.
+		watch = getattr(signal, "on_cancel", None)
+		if watch is not None:
+			watch(release)
 
 		try:
 			while True:
@@ -120,7 +140,21 @@ class ModelProfileProvider:
 
 				# One chunk at a time, off the event loop: reading the socket
 				# blocks, and the turn has other work waiting on this thread.
-				chunk = await asyncio.to_thread(next, chunks, _EXHAUSTED)
+				try:
+					chunk = await asyncio.to_thread(next, chunks, _EXHAUSTED)
+				except Exception:
+					# A read that ended because the cancellation closed the socket
+					# under it. The turn was stopped, not broken.
+					if not released:
+						raise
+					chunk = _EXHAUSTED
+
+				if released:
+					# Whatever this was, it arrived after the run was stopped, and
+					# a stopped run keeps none of it.
+					yield AssistantErrorEvent(reason="aborted", error=answer.aborted())
+					return
+
 				if chunk is _EXHAUSTED:
 					break
 
@@ -142,6 +176,9 @@ class ModelProfileProvider:
 				for event in answer.translate(chunk):
 					yield event
 		finally:
+			forget = getattr(signal, "forget_cancel", None)
+			if forget is not None:
+				forget(release)
 			_close(chunks)
 
 		if not finished:
@@ -328,6 +365,21 @@ def _has_content(block: AssistantContent) -> bool:
 	if isinstance(block, ThinkingContent):
 		return bool(block.thinking)
 	return True
+
+
+def _close_response(chunks: Any) -> None:
+	"""Drop the socket under a read that is blocked on it, if the stream has one.
+
+	Only `ProviderStream` does. A test's scripted stream and a plain generator do
+	not, and for them cancellation stays what it was: noticed between chunks.
+	"""
+	close = getattr(chunks, "close_response", None)
+	if close is None:
+		return
+	try:
+		close()
+	except Exception:
+		pass
 
 
 def _close(chunks: Any) -> None:
