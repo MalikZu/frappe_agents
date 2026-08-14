@@ -57,6 +57,7 @@ READ_FAMILY = {
 	"find_doctypes",
 }
 REPORT = TEST_REPORT
+OTHER_REPORT = "FA Test Project Register"
 
 
 class TestToolExposure(AgentTestCase):
@@ -173,6 +174,62 @@ class TestIntersection(AgentTestCase):
 
 		self.assertTrue(payload["ok"], payload["error"])
 		self.assertTrue(payload["result"]["rows"])
+
+
+class TestRunningReports(AgentTestCase):
+	"""run_report used to ride tool selection. A Report row is the whole grant now.
+
+	Both halves are asserted through the tool layer, because the regression this
+	guards against is a report that stopped running at all when the selection
+	retired — not only one that runs when it should not.
+	"""
+
+	def setUp(self) -> None:
+		super().setUp()
+		# A second report, so "ungranted" can be asserted on an agent that holds
+		# run_report at all — the interesting refusal is the target, not the tool.
+		if not frappe.db.exists("Report", OTHER_REPORT):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": OTHER_REPORT,
+					"ref_doctype": PROJECT_DT,
+					"report_type": "Report Builder",
+					"module": "Custom",
+					"is_standard": "No",
+				}
+			).insert(ignore_permissions=True)
+
+	def runner(self, target: str = REPORT):
+		return make_matrix_agent(
+			[rule(ORDER_DT, can_read=1), rule(target, target_type="Report", can_read=1)],
+			autonomy="Suggest",
+		)
+
+	def test_a_granted_report_runs(self):
+		payload, _ = call_tool(DRAFT_USER, "run_report", {"report_name": REPORT}, agent=self.runner().name)
+
+		self.assertTrue(payload["ok"], payload["error"])
+		self.assertEqual(payload["result"]["report"], REPORT)
+
+	def test_an_ungranted_report_is_refused(self):
+		agent = self.runner(OTHER_REPORT)
+
+		self.assertIn("run_report", exposed_tool_names(agent))
+
+		payload, _ = call_tool(DRAFT_USER, "run_report", {"report_name": REPORT}, agent=agent.name)
+
+		self.assertFalse(payload["ok"])
+		self.assertIn("no access rule", payload["error"])
+
+	def test_a_doctype_rule_alone_does_not_run_a_report(self):
+		"""The read rule on the doctype the report reads is not a grant to run it."""
+		agent = make_matrix_agent([rule(ORDER_DT, can_read=1)], autonomy="Suggest")
+
+		self.assertNotIn("run_report", exposed_tool_names(agent))
+
+		payload, _ = call_tool(DRAFT_USER, "run_report", {"report_name": REPORT}, agent=agent.name)
+		self.assertFalse(payload["ok"])
 
 
 class TestNarrowingCaps(AgentTestCase):
