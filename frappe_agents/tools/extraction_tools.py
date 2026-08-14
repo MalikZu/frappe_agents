@@ -15,12 +15,8 @@ Two narrowings that are not in the general File permission model:
   fixed in `pipeline.py`.
 """
 
-from typing import Any
-
-import frappe
-
-from frappe_agents.extraction.pipeline import queue_extraction, resolve_file
-from frappe_agents.tools.base import CAPABILITY_DRAFT, ToolDenied, current_run
+from frappe_agents.extraction.pipeline import queue_extraction, require_provenance, resolve_file
+from frappe_agents.tools.base import CAPABILITY_DRAFT, run_model_profile
 
 
 def extract_document(payload: dict) -> dict:
@@ -31,9 +27,9 @@ def extract_document(payload: dict) -> dict:
 	# A File name, a link to a file on this site, or the filename itself — all three
 	# end as one File row, checked for permission the way a File name always was.
 	file_doc = resolve_file(file_ref)
-	_require_provenance(file_doc)
+	require_provenance(file_doc)
 
-	name = queue_extraction(file_doc.name, target_doctype, model_profile=_run_profile())
+	name = queue_extraction(file_doc.name, target_doctype, model_profile=run_model_profile())
 
 	return {
 		"extraction": name,
@@ -46,35 +42,6 @@ def extract_document(payload: dict) -> dict:
 		),
 		"_docs_touched": f"Document Extraction: {name}",
 	}
-
-
-def _require_provenance(file_doc: Any) -> None:
-	"""The file has to hang off a record, and one this user may read.
-
-	An Agent Conversation is an acceptable anchor like any other record: it says who
-	supplied the file and in what context, which is what a reviewer needs to check.
-	"""
-	if not file_doc.attached_to_doctype or not file_doc.attached_to_name:
-		raise ToolDenied(
-			f"{file_doc.file_name or file_doc.name} is not attached to any record. Attach it to "
-			"the document it belongs to first, so a reviewer can see where it came from."
-		)
-	if not frappe.has_permission(file_doc.attached_to_doctype, "read", doc=file_doc.attached_to_name):
-		raise ToolDenied(
-			f"You are not allowed to read {file_doc.attached_to_doctype} "
-			f"{file_doc.attached_to_name}, which this file is attached to."
-		)
-
-
-def _run_profile() -> str | None:
-	"""Extract with the model this run is on, which is the agent's unless it was overridden."""
-	run = current_run()
-	if run is None or not run.get("agent"):
-		return None
-	if run.get("model_profile"):
-		return run.model_profile
-	agent = frappe.get_cached_doc("Agent", run.agent)
-	return agent.model_profile or None
 
 
 def _require_str(payload: dict, key: str) -> str:
