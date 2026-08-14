@@ -25,6 +25,7 @@ from frappe_agents.extraction.pipeline import (
 	publish_extraction,
 	queue_extraction,
 	record_fields,
+	stored_status,
 )
 from frappe_agents.extraction.schema import build_extraction_schema
 from frappe_agents.model_profiles import check_profile, profile_choices
@@ -676,10 +677,12 @@ def apply_extraction(name: str, values: Any = None, confirmed: Any = None) -> di
 	`values` but not in `confirmed` is dropped and named in the answer.
 	"""
 	doc = _extraction_for_review(name)
-	if doc.status != STATUS_NEEDS_REVIEW:
-		frappe.throw(
-			_("This extraction is {0}. Only one waiting for review can be accepted.").format(doc.status)
-		)
+	# Locked, not read: the status decides whether this request may write, so it is
+	# taken from the row itself and held for the rest of the request. A worker
+	# finishing at the same moment waits its turn and then finds the row decided.
+	status = stored_status(doc)
+	if status != STATUS_NEEDS_REVIEW:
+		frappe.throw(_("This extraction is {0}. Only one waiting for review can be accepted.").format(status))
 	if not doc.created_doc:
 		frappe.throw(_("This extraction has no draft to apply to."))
 
@@ -733,10 +736,18 @@ def apply_extraction(name: str, values: Any = None, confirmed: Any = None) -> di
 
 @frappe.whitelist(methods=["POST"])
 def discard_extraction(name: str) -> dict:
-	"""Close an extraction without applying it. Terminal."""
+	"""Close an extraction without applying it. Terminal.
+
+	A Pending or Running extraction may be discarded: cancelling a reading somebody
+	no longer wants is the point of the button, and refusing until the worker
+	finished would make the wait the user's problem. The worker is what makes that
+	safe — it re-reads this status before it writes anything, so a discard lands
+	whether or not the model has answered yet.
+	"""
 	doc = _extraction_for_review(name)
-	if doc.status in (STATUS_ACCEPTED, STATUS_DISCARDED):
-		frappe.throw(_("This extraction is already {0}.").format(doc.status))
+	status = stored_status(doc)
+	if status in (STATUS_ACCEPTED, STATUS_DISCARDED):
+		frappe.throw(_("This extraction is already {0}.").format(status))
 
 	record_fields(doc, {"status": STATUS_DISCARDED, "reviewed_by": frappe.session.user})
 	publish_extraction(doc, status=STATUS_DISCARDED)
