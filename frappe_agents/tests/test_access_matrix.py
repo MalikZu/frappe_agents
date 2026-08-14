@@ -367,12 +367,16 @@ class TestDiscovery(AgentTestCase):
 
 
 class TestTheNeighbourhood(AgentTestCase):
-	"""The links slice walks off the focal document, and every hop asks the matrix.
+	"""The context tools walk off the focal document, and every hop asks the matrix.
 
 	A grant on the document in front of the agent is not a grant on whatever it
 	points at. The user's own permissions are the other half and stay where they
 	were — the cast here may read every record involved, so what is missing from
 	the answer is missing because of the rules and nothing else.
+
+	The manifest and the slice have to agree. A count in the manifest is a promise
+	the slice can be asked next, and "6 of those point at this document" is already
+	a fact about a doctype nobody granted.
 	"""
 
 	def order_with_a_vendor(self) -> str:
@@ -444,6 +448,43 @@ class TestTheNeighbourhood(AgentTestCase):
 
 		payload = self.links(wider.name, PROJECT_DT, PROJECT_ALPHA, "down")
 		self.assertIn(TICKET_DT, self.doctypes_in(payload, "down"))
+
+	def manifest(self, agent: str, doctype: str, name: str) -> dict:
+		result, _ = call_tool(
+			DRAFT_USER, "get_document_context", {"doctype": doctype, "name": name}, agent=agent
+		)
+		self.assertTrue(result["ok"], result["error"])
+		return result["result"]
+
+	def test_the_manifest_does_not_count_an_ungranted_neighbour(self):
+		"""A count is a fact about the site too, so it goes the way the group went."""
+		agent = make_matrix_agent(
+			[rule(PROJECT_DT, can_read=1), rule(ORDER_DT, can_read=1)], autonomy="Suggest"
+		)
+
+		with as_user(DRAFT_USER):
+			self.assertTrue(frappe.has_permission(TICKET_DT, "read"))
+
+		manifest = self.manifest(agent.name, PROJECT_DT, PROJECT_ALPHA)
+
+		self.assertEqual(set(manifest["slices"]["links"]), {ORDER_DT})
+		self.assertNotIn(TICKET_DT, manifest["not_visible"]["doctypes"])
+		self.assertEqual(manifest["not_visible"]["count"], 0)
+
+	def test_the_manifest_counts_it_once_a_rule_names_it(self):
+		"""The positive control, and the agreement: counted here, openable there."""
+		agent = make_matrix_agent(
+			[rule(PROJECT_DT, can_read=1), rule(ORDER_DT, can_read=1), rule(TICKET_DT, can_read=1)],
+			autonomy="Suggest",
+		)
+
+		manifest = self.manifest(agent.name, PROJECT_DT, PROJECT_ALPHA)
+
+		self.assertEqual(set(manifest["slices"]["links"]), {ORDER_DT, TICKET_DT})
+		self.assertEqual(manifest["slices"]["links"][TICKET_DT]["visible_count"], 1)
+
+		payload = self.links(agent.name, PROJECT_DT, PROJECT_ALPHA, "down")
+		self.assertEqual(self.doctypes_in(payload, "down"), set(manifest["slices"]["links"]))
 
 
 class TestFileReading(AgentTestCase):
