@@ -155,6 +155,9 @@ class TestConversationList(AgentTestCase):
 				self.start(
 					RESTRICTED_USER, f"Later line {number}.{turn}", conversation=started["conversation"]
 				)
+			# Untitled, which is the case that needs a preview at all: a titled
+			# conversation is its own snippet and reads no run.
+			frappe.db.set_value("Agent Conversation", started["conversation"], "title", "")
 
 		read = []
 		original = frappe.db.sql
