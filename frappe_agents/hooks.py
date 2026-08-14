@@ -15,7 +15,7 @@ add_to_apps_screen = [
 		"name": "frappe_agents",
 		"logo": "/assets/frappe_agents/images/logo.svg",
 		"title": "Agents",
-		"route": "/desk/frappe-agents",
+		"route": "/desk/agents",
 		"has_permission": "frappe_agents.utils.has_app_permission",
 	}
 ]

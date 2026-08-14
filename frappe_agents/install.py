@@ -33,8 +33,15 @@ def create_roles() -> None:
 		role.insert(ignore_permissions=True)
 
 
+# The one display name, everywhere a route or a lookup derives from it. The desk
+# resolves the desktop tile by matching Desktop Icon.label against the Workspace
+# Sidebar's name (lowercased), and routes the workspace by slugging its record
+# name — so the workspace name, its title, the sidebar name, and the tile label
+# must all be this same word or the tile 404s (the v0.5.0 regression).
+WORKSPACE = "Agents"
+
 SIDEBAR = (
-	("Link", "Home", "Workspace", "Frappe Agents", "home", 0),
+	("Link", "Home", "Workspace", WORKSPACE, "home", 0),
 	("Link", "Agent Chat", "Page", "agent-chat", "messages-square", 0),
 	("Section Break", "Review", None, None, "check-check", 0),
 	("Link", "Pending Actions", "DocType", "Agent Action", None, 1),
@@ -61,10 +68,10 @@ def build_workspace_sidebar():
 	time someone opens the workspace, so building here, at install time, wins
 	the race — and an existing sidebar is the user's to keep, never stomped.
 	"""
-	if frappe.db.exists("Workspace Sidebar", "Frappe Agents"):
+	if frappe.db.exists("Workspace Sidebar", WORKSPACE):
 		return
 	doc = frappe.new_doc("Workspace Sidebar")
-	doc.name = "Frappe Agents"
+	doc.title = WORKSPACE
 	for type_, label, link_type, link_to, icon, child in SIDEBAR:
 		row = {"type": type_, "label": label, "child": child, "collapsible": 1}
 		if type_ == "Section Break":
@@ -75,4 +82,4 @@ def build_workspace_sidebar():
 				row["icon"] = icon
 		doc.append("items", row)
 	doc.flags.ignore_permissions = True
-	doc.insert(ignore_permissions=True, set_name="Frappe Agents")
+	doc.insert(ignore_permissions=True, set_name=WORKSPACE)

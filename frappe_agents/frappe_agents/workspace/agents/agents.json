@@ -23,47 +23,47 @@
   },
   {
    "hidden": 0,
+   "icon": "bot",
    "is_query_report": 0,
    "label": "Agent",
    "link_count": 0,
    "link_to": "Agent",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "bot"
+   "type": "Link"
   },
   {
    "hidden": 0,
+   "icon": "graduation-cap",
    "is_query_report": 0,
    "label": "Agent Skill",
    "link_count": 0,
    "link_to": "Agent Skill",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "graduation-cap"
+   "type": "Link"
   },
   {
    "hidden": 0,
+   "icon": "wrench",
    "is_query_report": 0,
    "label": "Agent Tool",
    "link_count": 0,
    "link_to": "Agent Tool",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "wrench"
+   "type": "Link"
   },
   {
    "hidden": 0,
+   "icon": "settings-2",
    "is_query_report": 0,
    "label": "Agent Settings",
    "link_count": 0,
    "link_to": "Agent Settings",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "settings-2"
+   "type": "Link"
   },
   {
    "hidden": 0,
@@ -75,25 +75,25 @@
   },
   {
    "hidden": 0,
+   "icon": "plug",
    "is_query_report": 0,
    "label": "LLM Provider",
    "link_count": 0,
    "link_to": "LLM Provider",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "plug"
+   "type": "Link"
   },
   {
    "hidden": 0,
+   "icon": "sliders-horizontal",
    "is_query_report": 0,
    "label": "LLM Model Profile",
    "link_count": 0,
    "link_to": "LLM Model Profile",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "sliders-horizontal"
+   "type": "Link"
   },
   {
    "hidden": 0,
@@ -105,47 +105,47 @@
   },
   {
    "hidden": 0,
+   "icon": "message-circle",
    "is_query_report": 0,
    "label": "Agent Conversation",
    "link_count": 0,
    "link_to": "Agent Conversation",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "message-circle"
+   "type": "Link"
   },
   {
    "hidden": 0,
+   "icon": "activity",
    "is_query_report": 0,
    "label": "Agent Run",
    "link_count": 0,
    "link_to": "Agent Run",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "activity"
+   "type": "Link"
   },
   {
    "hidden": 0,
+   "icon": "check-check",
    "is_query_report": 0,
    "label": "Agent Action",
    "link_count": 0,
    "link_to": "Agent Action",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "check-check"
+   "type": "Link"
   },
   {
    "hidden": 0,
+   "icon": "scan-text",
    "is_query_report": 0,
    "label": "Document Extraction",
    "link_count": 0,
    "link_to": "Document Extraction",
    "link_type": "DocType",
    "onboard": 0,
-   "type": "Link",
-   "icon": "scan-text"
+   "type": "Link"
   },
   {
    "hidden": 0,
@@ -157,20 +157,20 @@
   },
   {
    "hidden": 0,
+   "icon": "book-open",
    "is_query_report": 1,
    "label": "Agent Action Review Quality",
    "link_count": 0,
    "link_to": "Agent Action Review Quality",
    "link_type": "Report",
    "onboard": 0,
-   "type": "Link",
-   "icon": "book-open"
+   "type": "Link"
   }
  ],
- "modified": "2026-08-13 17:20:00.000000",
+ "modified": "2026-08-15 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
- "name": "Frappe Agents",
+ "name": "Agents",
  "number_cards": [],
  "owner": "Administrator",
  "parent_page": "",
@@ -180,77 +180,77 @@
  "sequence_id": 20.0,
  "shortcuts": [
   {
+   "icon": "messages-square",
    "label": "Agent Chat",
    "link_to": "agent-chat",
-   "type": "Page",
-   "icon": "messages-square"
+   "type": "Page"
   },
   {
    "color": "Orange",
    "doc_view": "List",
    "format": "{} Pending",
+   "icon": "check-check",
    "label": "Pending Actions",
    "link_to": "Agent Action",
    "stats_filter": "{\"status\": \"Pending\"}",
-   "type": "DocType",
-   "icon": "check-check"
+   "type": "DocType"
   },
   {
    "color": "Orange",
    "doc_view": "List",
    "format": "{} Needs Review",
+   "icon": "scan-text",
    "label": "Needs Review",
    "link_to": "Document Extraction",
    "stats_filter": "{\"status\": \"Needs Review\"}",
-   "type": "DocType",
-   "icon": "scan-text"
+   "type": "DocType"
   },
   {
    "doc_view": "List",
+   "icon": "bot",
    "label": "Agents",
    "link_to": "Agent",
    "stats_filter": "[]",
-   "type": "DocType",
-   "icon": "bot"
+   "type": "DocType"
   },
   {
    "doc_view": "List",
+   "icon": "graduation-cap",
    "label": "Skills",
    "link_to": "Agent Skill",
    "stats_filter": "[]",
-   "type": "DocType",
-   "icon": "graduation-cap"
+   "type": "DocType"
   },
   {
    "doc_view": "List",
+   "icon": "message-circle",
    "label": "Conversations",
    "link_to": "Agent Conversation",
    "stats_filter": "[]",
-   "type": "DocType",
-   "icon": "message-circle"
+   "type": "DocType"
   },
   {
    "doc_view": "List",
+   "icon": "plug",
    "label": "LLM Providers",
    "link_to": "LLM Provider",
    "stats_filter": "[]",
-   "type": "DocType",
-   "icon": "plug"
+   "type": "DocType"
   },
   {
    "doc_view": "List",
+   "icon": "sliders-horizontal",
    "label": "Model Profiles",
    "link_to": "LLM Model Profile",
    "stats_filter": "[]",
-   "type": "DocType",
-   "icon": "sliders-horizontal"
+   "type": "DocType"
   },
   {
+   "icon": "book-open",
    "label": "Review Quality",
    "link_to": "Agent Action Review Quality",
    "report_ref_doctype": "Agent Action",
-   "type": "Report",
-   "icon": "book-open"
+   "type": "Report"
   }
  ],
  "title": "Agents",
