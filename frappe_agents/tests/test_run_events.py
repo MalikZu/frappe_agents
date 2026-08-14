@@ -250,6 +250,17 @@ class TestRunEvents(AgentTestCase):
 		said = "".join(block.get("text") or "" for block in content if block.get("type") == "text")
 		self.assertEqual(said, frappe.db.get_value("Agent Run", name, "output_message"))
 
+	def test_every_stored_event_carries_the_number_it_went_out_with(self):
+		"""Log order is draw order, and the number says so out loud.
+
+		The live frame has always carried a seq. The stored copy left it to the
+		reader to infer from the position in a list whose middle can be dropped.
+		"""
+		name = self.run_once()
+
+		stored = run_events(name)
+		self.assertEqual([event["seq"] for event in stored], list(range(1, len(stored) + 1)))
+
 	def test_a_stored_log_is_json_the_reader_can_parse(self):
 		name = self.run_once()
 

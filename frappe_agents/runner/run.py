@@ -476,6 +476,10 @@ class RunEvents:
 
 		self.seq += 1
 		payload = _payload(event)
+		# The number the live frame carries, on the stored copy too: a reader of
+		# the log should not have to infer order from the position in a list that
+		# has had its middle dropped.
+		payload["seq"] = self.seq
 		self.entries.append(payload)
 		publish_event(self.run, HARNESS_EVENT, seq=self.seq, event=payload)
 
