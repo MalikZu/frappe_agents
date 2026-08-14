@@ -44,7 +44,12 @@ are versioned.
 ## Watching the agent work
 
 The answer appears a few words at a time, as the model writes it. Under it sit
-the tool calls, one line each — click a line to see the arguments it ran with.
+the tool calls, one line each. Click a line — or reach it with the keyboard and
+press Enter — and it opens: the arguments the call ran with, and what it handed
+back. That is the same call your own permissions carried, so it shows you
+exactly what ran on your behalf. A long result is stored cut short, and the box
+says so where it was cut.
+
 The log follows the text down the page, unless you have scrolled up to read
 something earlier; then it stays where you put it.
 
@@ -59,6 +64,11 @@ A conversation you reopen is drawn again in full: what you asked, what the agent
 thought, every tool it called, everything it said, and any approval still
 waiting. It comes from what the run recorded, so it survives a reload and a
 different browser.
+
+A document the agent had read comes back too, as the card it always was, in the
+state the reading is in now — waiting for your review, accepted, or still being
+read. That card is a record, not a message: switching conversations while a
+document is being read no longer loses it.
 
 A run that is still going has not recorded anything yet — it writes its history
 when it ends. Until then the page remembers it for you, so switching to another
