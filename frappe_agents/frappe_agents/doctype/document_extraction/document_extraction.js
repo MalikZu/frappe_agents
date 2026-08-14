@@ -21,6 +21,9 @@
 	const STYLE_ID = "frappe-agents-extraction-styles";
 	const APPLY_METHOD = "frappe_agents.api.apply_extraction";
 	const DISCARD_METHOD = "frappe_agents.api.discard_extraction";
+	// The one role the server lets review somebody else's extraction.
+	const SYSTEM_MANAGER = "System Manager";
+	const NEEDS_REVIEW = "Needs Review";
 
 	// The desk bundle defines it; the literal keeps this form working if the
 	// bundle ever stops being loaded on every page.
@@ -197,6 +200,19 @@
 		return lines;
 	}
 
+	/**
+	 * Whether this user may review this extraction — the same rule the server
+	 * applies: the person who started it, or a System Manager.
+	 *
+	 * An auditor can read every extraction on the site and may review none of
+	 * them. Drawing Accept and Discard for them offers a decision the server will
+	 * refuse, which reads as a broken app rather than as a boundary.
+	 */
+	function may_review(frm) {
+		if (frm.doc.owner && frm.doc.owner === frappe.session.user) return true;
+		return (frappe.user_roles || []).includes(SYSTEM_MANAGER);
+	}
+
 	function read_state(frm) {
 		const state = frm.__fa_extract;
 		state.values = parse_json(frm.doc.extracted_json);
@@ -204,7 +220,7 @@
 		state.sensitive = parse_json(frm.doc.sensitive_flags);
 		state.duplicates = parse_json(frm.doc.duplicate_flags);
 		state.candidates = parse_json(frm.doc.link_candidates);
-		state.editable = frm.doc.status === "Needs Review";
+		state.editable = frm.doc.status === NEEDS_REVIEW && may_review(frm);
 		state.controls = {};
 	}
 
@@ -759,6 +775,17 @@
 		}
 		if (["Pending", "Running"].includes(frm.doc.status)) {
 			frm.set_intro(__("Reading the document. This page updates when it is done."), "blue");
+			return;
+		}
+		if (frm.doc.status === NEEDS_REVIEW && !may_review(frm)) {
+			// Read-only, and said in words rather than by a button that fails.
+			frm.set_intro(
+				__(
+					"Waiting for review by {0}. You can read what was extracted here; accepting or discarding it is theirs to do, or a System Manager's.",
+					[frm.doc.owner || ""]
+				),
+				"blue"
+			);
 			return;
 		}
 		if (frm.doc.status === "Accepted") {
