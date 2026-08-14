@@ -121,6 +121,8 @@ const STYLES = `
 	@keyframes agent-chat-pop-in { from { opacity: 0; transform: translateY(3px); } }
 	.agent-chat-pop.is-open { display: block; animation: agent-chat-pop-in var(--agent-chat-enter) var(--agent-chat-ease); }
 	.agent-chat-pop-label { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); padding: 6px 10px 4px; }
+	/* The one radius here that is not a desk token: 6px is the popover's own
+	   radius less its padding, which is what keeps the two curves concentric. */
 	.agent-chat-pop-opt { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border-radius: 6px; font-size: var(--text-sm); }
 	.agent-chat-pop-opt.is-clickable { cursor: pointer; }
 	.agent-chat-pop-opt.is-clickable:hover { background: var(--highlight-color); }
@@ -183,7 +185,7 @@ const STYLES = `
 	.agent-chat-think.is-live .agent-chat-think-label { animation: agent-chat-think-pulse 1.4s ease-in-out infinite; }
 	/* Everything this screen animates is a colour, an opacity or a small
 	   transform, so a person who has asked for less motion loses nothing: they
-	   get the same states, arrived at at once. Scoped to the widget rather than
+	   get the same states, arrived at instantly. Scoped to the widget rather than
 	   written as *, because this sheet is injected into the whole desk and the
 	   rest of the desk is not ours to quieten. */
 	@media (prefers-reduced-motion: reduce) {
