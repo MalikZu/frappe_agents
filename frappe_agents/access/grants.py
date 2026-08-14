@@ -70,6 +70,10 @@ VERBS = {
 # Reports have one verb: may run it.
 REPORT_VERBS = (VERB_READ,)
 
+# What a rule row written on the agent itself, rather than in a profile, is
+# called when something has to name where a grant came from.
+LOCAL_SOURCE = "This agent"
+
 # Which grant each generic tool needs before the model is even told it exists.
 # A tool the compiled grant could never let the agent use is not offered: an
 # offered tool is a promise, and one that always refuses is a broken one.
@@ -124,13 +128,25 @@ def compiled_grants(agent: Any) -> dict:
 
 def rule_rows(agent: Any) -> list:
 	"""The agent's rule rows: every attached profile's, then its own."""
+	return [row for _source, row in rule_rows_with_source(agent)]
+
+
+def rule_rows_with_source(agent: Any) -> list[tuple[str, Any]]:
+	"""The same rows, each paired with where it came from.
+
+	The compiled grant deliberately forgets which profile granted what — a verb
+	is granted or it is not. A person asking why their agent can read something
+	needs the memory back, so the pairing lives here rather than being rebuilt by
+	whoever asks.
+	"""
 	agent = _agent_doc(agent)
-	rows = []
+	rows: list[tuple[str, Any]] = []
 	for link in agent.get("access_profiles") or []:
-		profile = _profile(link.get("access_profile"))
+		name = link.get("access_profile")
+		profile = _profile(name)
 		if profile is not None:
-			rows.extend(profile.get("rules") or [])
-	rows.extend(agent.get("access_rules") or [])
+			rows.extend((name, row) for row in profile.get("rules") or [])
+	rows.extend((LOCAL_SOURCE, row) for row in agent.get("access_rules") or [])
 	return rows
 
 

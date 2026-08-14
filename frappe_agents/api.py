@@ -17,6 +17,7 @@ from frappe import _
 from frappe.query_builder.functions import Min, Sum
 from frappe.utils import cint, get_datetime, now_datetime, today
 
+from frappe_agents.access.preview import effective_access as access_preview
 from frappe_agents.actions import APPROVER_ROLE, separation_of_duties_block
 from frappe_agents.context.attachments import conversation_attachments
 from frappe_agents.extraction.pipeline import (
@@ -43,6 +44,7 @@ DEFAULT_PENDING_LIMIT = 50
 MAX_PENDING_LIMIT = 200
 
 AGENT_USER = "Agent User"
+MANAGER_ROLE = "Agent Manager"
 # One rail's worth of conversations. Older ones are reachable from the Agent
 # Conversation list, which is a list view with paging and filters already.
 CONVERSATION_LIMIT = 50
@@ -133,6 +135,28 @@ def _tool(name: str | None) -> Any:
 		return frappe.get_cached_doc("Agent Tool", name)
 	except frappe.DoesNotExistError:
 		return None
+
+
+@frappe.whitelist()
+def effective_access(agent: str) -> dict:
+	"""What an agent's access rules come to, for the manager looking at them.
+
+	The Agent form's read-only preview. It grants nothing and changes nothing —
+	it reads the compiled matrix and says, for each target, whether the person
+	asking could use that rule at all. A rule is an intersection with the user's
+	own permissions, so the same agent honestly reads differently to two managers.
+
+	Manager-only, because it is a configuration answer rather than a chat one: an
+	Agent User may read the Agent record but has no business being handed a map of
+	what the site's managers have wired up.
+	"""
+	if not ({MANAGER_ROLE, SYSTEM_MANAGER} & set(frappe.get_roles())):
+		raise frappe.PermissionError(
+			_("You need the {0} role to see an agent's effective access.").format(MANAGER_ROLE)
+		)
+
+	frappe.has_permission("Agent", "read", doc=agent, throw=True)
+	return access_preview(agent)
 
 
 @frappe.whitelist()
