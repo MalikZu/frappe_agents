@@ -10,14 +10,17 @@ that way is Cancelled, not Failed, and it leaves the same audit trail behind as
 one that ran to the end.
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.utils import cint
 
 from frappe_agents.api import start_run
 from frappe_agents.harness.events import TurnStartEvent
-from frappe_agents.runner.run import KILL_SWITCH_MESSAGE, RunCancellation, RunEvents
+from frappe_agents.runner.run import KILL_SWITCH_MESSAGE, RunCancellation, RunEvents, execute_run
 from frappe_agents.tests.fixtures import (
 	AGENT,
+	PROFILE,
 	RESTRICTED_USER,
 	TICKET_DT,
 	AgentTestCase,
@@ -25,6 +28,7 @@ from frappe_agents.tests.fixtures import (
 	make_run,
 	model_calls,
 	model_says,
+	run_events,
 	run_with_model,
 	set_kill_switch,
 	tool_calls_for,
@@ -41,6 +45,51 @@ from frappe_agents.tools.base import (
 )
 
 SEARCH = model_calls(tool_request("search_documents", {"doctype": TICKET_DT}), tokens_in=10, tokens_out=5)
+
+ARGUMENTS = f'{{"doctype": "{TICKET_DT}"}}'
+
+
+def mid_stream(seen: list, flip, calls: bool = True):
+	"""One streamed turn, with the switch thrown while the answer is arriving.
+
+	Streaming opened a window that did not exist before: a model call used to be
+	one atomic request, and it is now a socket held open for as long as the model
+	writes. `flip` runs between two deltas, which is the middle of that window.
+	"""
+
+	def chunks(*_args, **_kwargs):
+		def stream():
+			for chunk in _script(flip, calls):
+				seen.append(chunk)
+				yield chunk
+
+		return stream()
+
+	return chunks
+
+
+def _script(flip, calls: bool):
+	yield {"type": "message_start", "model": PROFILE}
+	yield {"type": "usage", "tokens_in": 120, "tokens_out": 40}
+	yield {"type": "text_start", "index": 0}
+	yield {"type": "text_delta", "index": 0, "text": "Let me count "}
+	flip()
+	yield {"type": "text_delta", "index": 0, "text": "the open tickets."}
+	yield {"type": "text_end", "index": 0, "text": "Let me count the open tickets."}
+	if not calls:
+		yield {"type": "message_end", "reason": "stop"}
+		return
+	yield {"type": "toolcall_start", "index": 1, "id": "call_1", "name": "search_documents"}
+	yield {"type": "toolcall_delta", "index": 1, "text": ARGUMENTS}
+	yield {
+		"type": "toolcall_end",
+		"index": 1,
+		"id": "call_1",
+		"name": "search_documents",
+		"args": {"doctype": TICKET_DT},
+		"arguments": ARGUMENTS,
+	}
+	yield {"type": "message_end", "reason": "toolUse"}
 
 
 class TestKillSwitch(AgentTestCase):
@@ -147,6 +196,83 @@ class TestKillSwitch(AgentTestCase):
 		# One row per attempt, and both attempts are on the record.
 		calls = tool_calls_for(run.name)
 		self.assertEqual([call.outcome for call in calls], ["Success", "Denied"])
+
+	# --- thrown while the answer is streaming --------------------------------
+
+	def throw_it_mid_stream(self):
+		"""Publish the switch the way saving Agent Settings publishes it.
+
+		The stream is pulled on a worker thread, so the flip has to happen there
+		too — and only the published copy is touched, because a `frappe.db` read
+		belongs to the thread that opened it. Publishing alone is enough: the
+		runtime is on only when nothing says it is off.
+		"""
+		cache = frappe.cache
+		self.addCleanup(set_kill_switch, 1)
+		return lambda: cache.set_value(KILL_SWITCH_KEY, 0)
+
+	def test_a_switch_thrown_mid_stream_still_stops_the_tool_and_the_next_call(self):
+		"""The window streaming opened, closed at the points that always closed it.
+
+		The request is already on the wire when the switch goes, so the answer is
+		read to its end — there is nothing honest to do with half of it. What the
+		model asked for afterwards is refused, the run is cancelled, and the
+		second model call never happens. The audit is whole either way.
+		"""
+		run = make_run(effective_user=RESTRICTED_USER)
+		seen: list = []
+
+		with patch(
+			"frappe_agents.runner.stream_adapter.call_model_stream",
+			side_effect=mid_stream(seen, self.throw_it_mid_stream()),
+		) as call:
+			execute_run(run.name)
+
+		# Read to the end: a socket already open is not something to abandon.
+		self.assertEqual(seen[-1], {"type": "message_end", "reason": "toolUse"})
+		self.assertEqual(call.call_count, 1)
+
+		values = frappe.db.get_value(
+			"Agent Run",
+			run.name,
+			["status", "error", "tokens_in", "tokens_out", "steps_taken"],
+			as_dict=True,
+		)
+		self.assertEqual(values.status, "Cancelled")
+		self.assertEqual(values.error, KILL_SWITCH_MESSAGE)
+
+		# What the call cost is recorded even though the run was stopped: it was
+		# billed. So is the step, the tool's refusal, and the run's own events.
+		self.assertEqual(cint(values.tokens_in), 120)
+		self.assertEqual(cint(values.tokens_out), 40)
+		self.assertEqual(cint(values.steps_taken), 1)
+		self.assertEqual([one.outcome for one in tool_calls_for(run.name)], ["Denied"])
+		self.assertTrue(run_events(run.name))
+
+	def test_an_answer_already_streaming_when_the_switch_goes_is_still_delivered(self):
+		"""The boundary of the rule, stated so it cannot drift.
+
+		The switch stops what has not happened yet. A turn that asked for nothing
+		leaves nothing to stop: the answer was written and billed before the
+		switch moved, and throwing it away would lose paid work and prevent
+		nothing. The next run is refused at the door, which is where it belongs.
+		"""
+		run = make_run(effective_user=RESTRICTED_USER)
+		seen: list = []
+
+		with patch(
+			"frappe_agents.runner.stream_adapter.call_model_stream",
+			side_effect=mid_stream(seen, self.throw_it_mid_stream(), calls=False),
+		):
+			execute_run(run.name)
+
+		values = frappe.db.get_value(
+			"Agent Run", run.name, ["status", "output_message", "tokens_out"], as_dict=True
+		)
+		self.assertEqual(values.status, "Completed")
+		self.assertEqual(values.output_message, "Let me count the open tickets.")
+		self.assertEqual(cint(values.tokens_out), 40)
+		self.assertFalse(runtime_enabled())
 
 	def test_a_turn_boundary_reads_the_switch(self):
 		"""The enforcement point between two model calls, on its own.
