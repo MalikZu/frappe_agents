@@ -58,6 +58,14 @@ open and running while it thinks, then folded into one line — **Thought for 4s
 — the moment it stops. Click the line to read it. The thinking is not the
 answer, and it is never what the conversation is stored with.
 
+## When something does not go through
+
+A message that could not be sent says so in the log, in the server's own words,
+with **Try again** beside it. What you typed and the files you attached go back
+into the composer, so nothing is retyped, and one failure offers one retry —
+you cannot end up with the same message running twice. A file that could not be
+attached and a model the server would not switch to are said the same way.
+
 ## Coming back to a conversation
 
 A conversation you reopen is drawn again from its end: what you asked, what the
@@ -80,6 +88,17 @@ when it ends. Until then the page remembers it for you, so switching to another
 conversation and back picks the run up where it was and carries on live.
 Reloading the page in the middle of a run loses that much; the answer lands on
 the run either way, and the conversation shows it all once the run ends.
+
+## How much of the conversation the agent reads
+
+Every model has a context limit, and a long conversation walks past it. So the
+agent is sent the end of the conversation rather than all of it: the oldest
+turns are left out until the rest fits, and what you just asked is always sent.
+A run that left turns out ticks **History Truncated** on the Agent Run, which is
+how you tell a conversation that was cut from a model that forgot.
+
+The limit comes from the model profile the conversation runs on. A profile with
+no limit set sends the last twenty turns, as it always has.
 
 ## The document a conversation is about
 
