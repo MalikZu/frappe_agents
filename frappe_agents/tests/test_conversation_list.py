@@ -139,6 +139,48 @@ class TestConversationList(AgentTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				list_conversations()
 
+	def test_conversation_list_uses_bounded_previews(self):
+		"""The rail's cost is its page, not the user's whole history.
+
+		A snippet is one row per conversation — the earliest run, picked by the
+		database. Reading every run of every conversation to keep the oldest one
+		made a rail row cost more the longer the conversation was, so the rows the
+		endpoint reads are counted here and not just the rows it returns.
+		"""
+		conversations = []
+		for number in range(1, 4):
+			started = self.start(RESTRICTED_USER, f"Opening line {number}")
+			conversations.append(started["conversation"])
+			for turn in range(4):
+				self.start(
+					RESTRICTED_USER, f"Later line {number}.{turn}", conversation=started["conversation"]
+				)
+
+		read = []
+		original = frappe.db.sql
+
+		def counted(query, *args, **kwargs):
+			result = original(query, *args, **kwargs)
+			if "tabAgent Run" in str(query):
+				read.append(len(result) if hasattr(result, "__len__") else 0)
+			return result
+
+		with patch("frappe_agents.api.CONVERSATION_LIMIT", 2):
+			with as_user(RESTRICTED_USER), patch.object(frappe.db, "sql", counted):
+				listed = list_conversations()
+
+		# The page is the page: three conversations exist, two were asked for.
+		self.assertEqual(len(listed), 2)
+		self.assertTrue(read, "no Agent Run query was observed")
+		# Fifteen runs exist. A bounded preview reads one row per conversation on
+		# the page — two, and the same again if two runs share an instant.
+		self.assertLessEqual(max(read), 2 * len(listed))
+		self.assertLessEqual(sum(read), 2 * len(listed))
+
+		snippets = {row["name"]: row["snippet"] for row in listed}
+		for name, snippet in snippets.items():
+			self.assertEqual(snippet, f"Opening line {conversations.index(name) + 1}")
+
 	def row(self, user: str, conversation: str) -> dict:
 		for row in self.listed(user):
 			if row["name"] == conversation:
