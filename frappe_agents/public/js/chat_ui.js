@@ -176,6 +176,10 @@ const BUFFER_CONVERSATIONS = 20;
 // How far from the bottom the log may be scrolled and still follow new text.
 const FOLLOW_SLACK = 120;
 
+// Two chats can be mounted at once — the page and a form panel — so the ids the
+// chips point at with aria-controls have to be unique per widget.
+let mounted_chats = 0;
+
 /**
  * Every run event this page has heard, kept per conversation.
  *
@@ -387,6 +391,12 @@ frappe_agents.ChatUI = class ChatUI {
 	make() {
 		add_styles();
 
+		this.uid = ++mounted_chats;
+		this.pop_id = `agent-chat-pop-${this.uid}`;
+
+		// The popover is drawn after the chips that open it: it is absolutely
+		// positioned, so nothing moves, and tab now leaves a chip into its own menu
+		// instead of five stops back past the whole transcript.
 		this.$body = $(`
 			<div class="agent-chat">
 				<div class="agent-chat-head">
@@ -395,7 +405,6 @@ frappe_agents.ChatUI = class ChatUI {
 				</div>
 				<div class="agent-chat-log"></div>
 				<div class="agent-chat-composer">
-					<div class="agent-chat-pop"></div>
 					<textarea class="form-control agent-chat-input" rows="2"></textarea>
 					<div class="agent-chat-files"></div>
 					<div class="agent-chat-bar">
@@ -403,6 +412,7 @@ frappe_agents.ChatUI = class ChatUI {
 						<span class="agent-chat-chips"></span>
 						<button class="btn btn-primary btn-sm agent-chat-send"></button>
 					</div>
+					<div class="agent-chat-pop" id="${this.pop_id}" role="group" tabindex="-1"></div>
 				</div>
 			</div>
 		`).appendTo(this.parent);
@@ -726,7 +736,11 @@ frappe_agents.ChatUI = class ChatUI {
 	 */
 	make_chip(key, value, has_menu) {
 		const $chip = has_menu
-			? $("<button type='button' class='agent-chat-chip'></button>")
+			? $("<button type='button' class='agent-chat-chip'></button>").attr({
+					"aria-haspopup": "true",
+					"aria-expanded": "false",
+					"aria-controls": this.pop_id,
+			  })
 			: $("<span class='agent-chat-chip is-static'></span>");
 		if (key) $("<span class='agent-chat-chip-key'></span>").text(key).appendTo($chip);
 		$("<span class='agent-chat-chip-value'></span>").text(value).appendTo($chip);
@@ -741,21 +755,60 @@ frappe_agents.ChatUI = class ChatUI {
 		if (event) event.stopPropagation();
 		if (this.pop_owner === owner) {
 			this.close_pop();
+			$anchor.focus();
 			return;
 		}
 		this.close_pop();
 		this.pop_owner = owner;
-		this.$pop.addClass("is-open").css("left", Math.max(0, $anchor.position().left));
+		this.$pop_anchor = $anchor;
+		$anchor.attr("aria-expanded", "true");
+		this.$pop.addClass("is-open");
 		build();
+		this.place_pop($anchor);
+		// A menu opened from the keyboard has to take the keyboard with it. The
+		// tools popover has nothing to pick, so the popover itself takes focus.
+		const $first = this.$pop.find(".agent-chat-pop-opt.is-clickable").first();
+		($first.length ? $first : this.$pop).focus();
 	}
 
+	/**
+	 * Where the popover sits, in inline terms so it mirrors with the text, and
+	 * never past the trailing edge of the composer it hangs off.
+	 */
+	place_pop($anchor) {
+		const parent_width = this.$pop.parent().width() || 0;
+		const pop_width = this.$pop.outerWidth() || 0;
+		const rtl = this.$body.length && window.getComputedStyle(this.$body[0]).direction === "rtl";
+		const anchor_start = rtl
+			? parent_width - ($anchor.position().left + ($anchor.outerWidth() || 0))
+			: $anchor.position().left;
+		const room = Math.max(0, parent_width - pop_width);
+		this.$pop.css("inset-inline-start", `${Math.max(0, Math.min(anchor_start, room))}px`);
+	}
+
+	/**
+	 * Close it, and put the keyboard back where it came from — but only when the
+	 * keyboard is still in the popover. A click on some other control has already
+	 * chosen where focus goes.
+	 */
 	close_pop() {
 		if (!this.$pop) return;
+		const $anchor = this.$pop_anchor;
+		const inside =
+			$anchor &&
+			this.pop_owner &&
+			(document.activeElement === document.body ||
+				$(document.activeElement).closest(".agent-chat-pop").length > 0);
 		this.pop_owner = null;
-		this.$pop.removeClass("is-open").empty();
+		this.$pop_anchor = null;
+		this.$pop.removeClass("is-open").removeAttr("aria-label").empty();
+		if ($anchor) $anchor.attr("aria-expanded", "false");
+		if (inside) $anchor.focus();
 	}
 
 	pop_label(text) {
+		// The popover's own name, so it is not an unnamed group when it takes focus.
+		this.$pop.attr("aria-label", text);
 		$("<div class='agent-chat-pop-label'></div>").text(text).appendTo(this.$pop);
 	}
 
