@@ -8,6 +8,11 @@ started, a run already on the queue must not proceed, and a run in flight must
 stop before its next tool call and before its next model call. A run stopped
 that way is Cancelled, not Failed, and it leaves the same audit trail behind as
 one that ran to the end.
+
+It also has to stop the two paths that are not runs: a human applying what an
+agent proposed, and an extraction job creating a draft. Those are at the bottom
+of this file, because what they add is the other half of the rule — one reader,
+so the same switch cannot be off for a run and still on for the write.
 """
 
 from unittest.mock import patch
@@ -15,20 +20,34 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import cint
 
+from frappe_agents.actions import approve_action
 from frappe_agents.api import start_run
+from frappe_agents.extraction.pipeline import queue_extraction
 from frappe_agents.harness.events import TurnStartEvent
 from frappe_agents.runner.run import KILL_SWITCH_MESSAGE, RunCancellation, RunEvents, execute_run
 from frappe_agents.tests.fixtures import (
 	AGENT,
+	APPROVER_USER,
+	DRAFT_USER,
+	EXTRACT_PROFILE,
+	ORDER_DT,
 	PROFILE,
+	PROJECT_ALPHA,
 	RESTRICTED_USER,
 	TICKET_DT,
+	VENDOR_ACME,
 	AgentTestCase,
 	as_user,
+	extraction_reply,
+	make_order_draft,
+	make_pdf_attachment,
+	make_proposal,
 	make_run,
 	model_calls,
 	model_says,
+	queue_extraction_as,
 	run_events,
+	run_extraction_with,
 	run_with_model,
 	set_kill_switch,
 	tool_calls_for,
@@ -92,7 +111,9 @@ def _script(flip, calls: bool):
 	yield {"type": "message_end", "reason": "toolUse"}
 
 
-class TestKillSwitch(AgentTestCase):
+class ThrowsTheSwitch:
+	"""The three ways these tests move the switch, shared by both cases below."""
+
 	def disable_runtime(self) -> None:
 		set_kill_switch(0)
 		self.addCleanup(set_kill_switch, 1)
@@ -122,6 +143,8 @@ class TestKillSwitch(AgentTestCase):
 		"""
 		self.assertTrue(cint(frappe.get_cached_doc(SETTINGS).global_enabled))
 
+
+class TestKillSwitch(ThrowsTheSwitch, AgentTestCase):
 	def test_start_run_throws_when_the_runtime_is_off(self):
 		self.disable_runtime()
 		before = frappe.db.count("Agent Run")
@@ -379,3 +402,118 @@ class TestKillSwitch(AgentTestCase):
 		calls = tool_calls_for(run.name)
 		self.assertEqual(len(calls), 1)
 		self.assertEqual(calls[0].outcome, "Denied")
+
+
+class TestKillSwitchOnWritePaths(ThrowsTheSwitch, AgentTestCase):
+	"""The switch at the two places the app writes on an agent's behalf.
+
+	Everything above is about the run: what it may start, call, and stream. These
+	are the other two write paths — a human applying a proposal, and an extraction
+	job creating a draft — and they are the ones a stale read would hurt most,
+	because a run that keeps going wastes tokens while these change the site.
+
+	Both are checked twice on purpose. The first check refuses the request at the
+	door; the second happens immediately before the write, because the work in
+	between takes long enough for the switch to move, and the check that decides is
+	the last one before something changes.
+	"""
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.file = make_pdf_attachment()
+		self.order = make_order_draft(user=DRAFT_USER)
+		self.action = make_proposal(self.order.name, user=DRAFT_USER)
+		self.drafts_before = frappe.db.count(ORDER_DT)
+
+	def modified(self):
+		return frappe.db.get_value(ORDER_DT, self.order.name, "modified")
+
+	def reply(self) -> dict:
+		return extraction_reply(
+			{
+				"order_title": f"FA Extracted {frappe.generate_hash(length=8)}",
+				"project": PROJECT_ALPHA,
+				"vendor": VENDOR_ACME,
+				"amount": 120,
+			}
+		)
+
+	def approve(self):
+		with as_user(APPROVER_USER):
+			return approve_action(self.action, self.modified())
+
+	def test_kill_switch_blocks_extraction_final_write_after_model_returns(self):
+		"""Thrown while the model is answering: the reading is paid for and dropped.
+
+		The row was Pending when the request passed the door, and the job was past
+		every refusal it makes before the call. What stops it is the read taken
+		immediately before the draft is inserted — without that, work begun under a
+		live runtime finishes under a dead one and leaves a document behind.
+		"""
+		extraction = queue_extraction_as(DRAFT_USER, self.file.name)
+
+		def answer_after_the_switch_goes(*args, **kwargs):
+			set_kill_switch(0)
+			return self.reply()
+
+		self.addCleanup(set_kill_switch, 1)
+		doc, call = run_extraction_with(extraction, side_effect=answer_after_the_switch_goes)
+
+		self.assertEqual(call.call_count, 1)
+		self.assertEqual(doc.status, "Failed")
+		self.assertIn("switched off", doc.error)
+		self.assertFalse(doc.created_doc)
+		self.assertEqual(frappe.db.count(ORDER_DT), self.drafts_before)
+		# The call still happened, so what it cost is still on the row.
+		self.assertEqual(cint(doc.tokens_in), 1200)
+
+	def test_kill_switch_blocks_approval_and_extraction_across_cache_boundaries(self):
+		"""One switch, two write paths, and a cached Single that still says yes.
+
+		The process holds a copy of Agent Settings taken before the switch moved —
+		which is the ordinary state of any worker that has done this before. Both
+		paths have to read past it, so both go through the same reader the run and
+		tool boundaries use.
+		"""
+		extraction = queue_extraction_as(DRAFT_USER, self.file.name)
+		# The copy this process is holding, taken before the switch moves.
+		frappe.get_cached_doc(SETTINGS)
+		self.throw_the_switch_behind_the_caches()
+		self.assert_the_cache_is_stale()
+
+		with self.assertRaises(frappe.ValidationError):
+			self.approve()
+
+		doc, call = run_extraction_with(extraction, self.reply())
+
+		self.assertEqual(frappe.db.get_value("Agent Action", self.action, "status"), "Pending")
+		self.assertEqual(cint(frappe.db.get_value(ORDER_DT, self.order.name, "docstatus")), 0)
+		call.assert_not_called()
+		self.assertEqual(doc.status, "Failed")
+		self.assertIn("switched off", doc.error)
+		self.assertEqual(frappe.db.count(ORDER_DT), self.drafts_before)
+		# And the door itself, read through the same stale copy.
+		with as_user(DRAFT_USER), self.assertRaises(frappe.ValidationError):
+			queue_extraction(self.file.name, ORDER_DT, model_profile=EXTRACT_PROFILE)
+
+	def test_a_switch_thrown_after_the_first_check_still_stops_the_apply(self):
+		"""The window between the door and the write, on the approval side.
+
+		`_load_target` and the lock check sit in it, and a proposal read under a live
+		runtime must not be applied under a dead one.
+		"""
+		flipped = []
+
+		def flip_then_load(action):
+			set_kill_switch(0)
+			flipped.append(action.name)
+			return frappe.get_doc(action.target_doctype, action.target_name)
+
+		self.addCleanup(set_kill_switch, 1)
+		with patch("frappe_agents.actions._load_target", side_effect=flip_then_load):
+			with self.assertRaises(frappe.ValidationError):
+				self.approve()
+
+		self.assertEqual(flipped, [self.action])
+		self.assertEqual(frappe.db.get_value("Agent Action", self.action, "status"), "Pending")
+		self.assertEqual(cint(frappe.db.get_value(ORDER_DT, self.order.name, "docstatus")), 0)
