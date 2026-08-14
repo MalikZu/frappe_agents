@@ -232,6 +232,20 @@ class TestRunEvents(AgentTestCase):
 
 		self.assertEqual(frappe.db.get_value("Agent Run", name, "output_message"), "One ticket is open.")
 
+	def test_the_stored_log_ends_on_the_answer_the_run_kept(self):
+		"""The chat redraws a finished run from its log, answer included.
+
+		If the last message the log kept said anything other than what the run
+		stored as its answer, a reopened conversation would show the answer twice
+		— once from the log and once from the row.
+		"""
+		name = self.run_once([SEARCH, ANSWER])
+
+		ended = [event for event in run_events(name) if event["type"] == "message_end"]
+		content = ended[-1]["message"].get("content") or []
+		said = "".join(block.get("text") or "" for block in content if block.get("type") == "text")
+		self.assertEqual(said, frappe.db.get_value("Agent Run", name, "output_message"))
+
 	def test_a_stored_log_is_json_the_reader_can_parse(self):
 		name = self.run_once()
 
