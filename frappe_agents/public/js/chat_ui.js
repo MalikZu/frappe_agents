@@ -1423,6 +1423,9 @@ frappe_agents.ChatUI = class ChatUI {
 		this.older_loading = true;
 		const conversation = this.conversation;
 		const before = this.next_before;
+		// This control is about to be disabled and then replaced, and it is what
+		// the reader is standing on. Remember that before either happens.
+		this.older_focused = Boolean(this.$older && this.$older[0] === document.activeElement);
 		if (this.$older) this.$older.prop("disabled", true).text(__("Loading earlier messages…"));
 
 		frappe.call({
@@ -1437,6 +1440,9 @@ frappe_agents.ChatUI = class ChatUI {
 				if (this.conversation !== conversation) return;
 				this.older_loading = false;
 				if (this.$older) this.$older.prop("disabled", false).text(__("Show earlier messages"));
+				// Disabling it took focus off it; the page never arrived, so the
+				// reader is put back on the control they pressed.
+				this.restore_older_focus(null);
 				this.announce(__("Earlier messages could not be loaded."));
 			},
 		});
@@ -1476,12 +1482,38 @@ frappe_agents.ChatUI = class ChatUI {
 		this.older_loading = false;
 		this.render_older(data && data.truncated ? data.next_before : null);
 		if (log) log.scrollTop = top_before + (log.scrollHeight - height_before);
+		this.restore_older_focus($drawn);
 
 		this.announce(
 			runs.length
 				? __("{0} earlier messages loaded.", [runs.length])
 				: __("There are no earlier messages.")
 		);
+	}
+
+	/**
+	 * Keep the reader where they were reading, after the page they asked for.
+	 *
+	 * `render_older` replaces the control rather than reusing it, so the button
+	 * that was pressed is gone by the time the page is on screen. Left alone,
+	 * focus falls to the body, and a keyboard reader paging up a long
+	 * transcript is thrown to the top of the desk on every page — the same
+	 * thing the scroll restore beside it exists to stop happening to a mouse.
+	 *
+	 * Re-armed, focus goes to the new control. Read to its start, there is no
+	 * control any more, so it goes to the first turn that arrived — reachable
+	 * programmatically only, so it never becomes one more stop on the way down.
+	 */
+	restore_older_focus($drawn) {
+		if (!this.older_focused) return;
+		this.older_focused = false;
+		if (this.$older && this.$older.length) {
+			this.$older.focus();
+			return;
+		}
+		const $target = $drawn && $drawn.length ? $drawn.first() : this.$log;
+		if (!$target || !$target.length) return;
+		$target.attr("tabindex", "-1").focus();
 	}
 
 	render_past_run(run) {
