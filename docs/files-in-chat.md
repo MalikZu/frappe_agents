@@ -47,6 +47,8 @@ what was being discussed around it, which is what a reviewer checks before
 accepting anything extracted from it.
 
 Files uploaded in chat are visible exactly where files are visible today, and
-nothing new is shared: the conversation is yours, so a file on it is not readable
-by someone who cannot read the conversation. Deleting a conversation follows
-Frappe's normal attachment lifecycle.
+nothing new is shared: a file on a record is readable by whoever reads that
+record, and by nobody else. So a file on your conversation reaches you, and it
+reaches an Agent Auditor or a System Manager, who already read every
+conversation. A file on a document reaches everyone who reads that document.
+Deleting a conversation follows Frappe's normal attachment lifecycle.
