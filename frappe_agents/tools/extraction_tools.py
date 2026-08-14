@@ -90,8 +90,11 @@ TOOLS = [
 		"handler_path": "frappe_agents.tools.extraction_tools.extract_document",
 		"capability": CAPABILITY_DRAFT,
 		"description": (
-			"Read an attached PDF or image and turn it into a draft document for a person "
-			"to review. Give the file and the doctype the draft should be. The file "
+			"Turn an attached PDF or image into a draft document for a person to review. "
+			"Only use this when the document plausibly IS the target doctype — an identity "
+			"document is not an order. If someone just asks what a document says or contains, "
+			"say you cannot read documents yet instead of queueing an extraction. "
+			"Give the file and the doctype the draft should be. The file "
 			"must already be attached to a record you can read. This returns straight away "
 			"with an extraction name: the reading happens in the background, you never see "
 			"the values, and fields the site marks sensitive — bank and payment details — "
