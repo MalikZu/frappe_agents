@@ -728,8 +728,12 @@ frappe_agents.ChatUI = class ChatUI {
 
 	build_tools_pop(info) {
 		const tools = info.tools || [];
+		const who = info.agent_name || info.name;
+		// A whole sentence per count: a translator cannot fix "1 tools" from here.
 		this.pop_label(
-			__("{0} can use — {1} tools", [info.agent_name || info.name, tools.length])
+			tools.length === 1
+				? __("{0} can use one tool", [who])
+				: __("{0} can use — {1} tools", [who, tools.length])
 		);
 		tools.forEach((tool) => {
 			const $opt = this.pop_option(tool.tool_name, tool.description);
@@ -1346,7 +1350,10 @@ frappe_agents.ChatUI = class ChatUI {
 				if (status === "Completed") {
 					$pending.remove();
 				} else {
-					const text = __("Run {0}", [__(status)]);
+					// Two whole sentences rather than a fragment built around a
+					// translated word, which reorders wrongly in most languages.
+					const text =
+						status === "Cancelled" ? __("The run was cancelled.") : __("The run failed.");
 					$pending.text(text);
 					this.announce(text);
 				}
@@ -1735,14 +1742,24 @@ frappe_agents.ChatUI = class ChatUI {
 			: cint(data.sensitive_count);
 		if (sensitive) {
 			$("<div class='agent-chat-action-line'></div>")
-				.text(__("{0} values are held back until you confirm them one by one.", [sensitive]))
+				.text(
+					sensitive === 1
+						? __("One value is held back until you confirm it.")
+						: __("{0} values are held back until you confirm them one by one.", [sensitive])
+				)
 				.appendTo($card);
 		}
 
 		const mismatches = Array.isArray(data.mismatched_fields) ? data.mismatched_fields.length : cint(data.mismatches);
 		if (mismatches) {
 			$("<div class='agent-chat-action-line is-alarm'></div>")
-				.text(__("{0} of them disagree with the record on file. Check before you confirm anything.", [mismatches]))
+				.text(
+					mismatches === 1
+						? __("One of them disagrees with the record on file. Check before you confirm it.")
+						: __("{0} of them disagree with the record on file. Check before you confirm anything.", [
+								mismatches,
+						  ])
+				)
 				.appendTo($card);
 		}
 
