@@ -29,6 +29,7 @@ from frappe_agents.tests.fixtures import (
 	TICKET_DT,
 	AgentTestCase,
 	make_conversation,
+	make_pdf_attachment,
 	make_run,
 	model_calls,
 	model_says,
@@ -70,6 +71,22 @@ FOCAL = (
 	"before you read any part of it."
 )
 
+# CHANGED ON PURPOSE, 2026-08-14: the system prompt gained a section listing the
+# files attached to the conversation, one line each, with the exact File id.
+#
+# Parity is broken deliberately and only for a conversation that has files on it.
+# A run whose conversation has no attachments — which is every run in this file —
+# reads exactly the prompt it read before, and the assertions below are unchanged
+# because of it. The section itself is characterized in
+# test_conversation_attachments.py, where the ids it must reproduce exactly are.
+#
+# The reason it exists at all: the history is fitted to the model's window, so the
+# turn that named an uploaded file is eventually trimmed away and the File id goes
+# with it. A live run then re-typed an id one character short and told the user
+# their attachment had been deleted. Rebuilding the list at every run start is what
+# makes it immune to that; nothing about it can be recovered from the transcript.
+ATTACHMENTS = "## Files attached to this conversation"
+
 SUGGEST_INSTRUCTIONS = "Answer questions about tickets."
 DRAFT_INSTRUCTIONS = "Draft orders and propose anything that needs a human."
 
@@ -109,6 +126,34 @@ class TestPromptParity(AgentTestCase):
 		)
 
 		self.assertEqual(self.prompt(run), f"{SUGGEST_INSTRUCTIONS}\n\n{FOCAL}\n\n{TOOL_RULES}")
+
+	def test_a_conversation_with_no_files_reads_the_prompt_it_always_did(self):
+		"""The break in parity is narrow, and this is the line it stops at."""
+		conversation = make_conversation(RESTRICTED_USER)
+		run = make_run(effective_user=RESTRICTED_USER, agent=AGENT, conversation=conversation.name)
+
+		prompt = self.prompt(run)
+
+		self.assertNotIn(ATTACHMENTS, prompt)
+		self.assertEqual(prompt, f"{SUGGEST_INSTRUCTIONS}\n\n{TOOL_RULES}")
+
+	def test_the_files_sit_between_the_document_and_the_rules(self):
+		"""Order matters here too: context first, then the rules that bind it."""
+		conversation = make_conversation(RESTRICTED_USER)
+		file = make_pdf_attachment("Agent Conversation", conversation.name, file_name="fa-cv.pdf")
+		run = make_run(
+			effective_user=RESTRICTED_USER,
+			agent=AGENT,
+			conversation=conversation.name,
+			context_doctype=TICKET_DT,
+			context_name=TICKET_ALPHA,
+		)
+
+		prompt = self.prompt(run)
+
+		self.assertLess(prompt.index(FOCAL), prompt.index(ATTACHMENTS))
+		self.assertLess(prompt.index(ATTACHMENTS), prompt.index(TOOL_RULES))
+		self.assertIn(f"- fa-cv.pdf (File: {file.name})", prompt)
 
 	# --- the transcript ------------------------------------------------------
 

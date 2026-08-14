@@ -20,6 +20,11 @@ from typing import Any
 import frappe
 from frappe.utils import cint, now_datetime
 
+from frappe_agents.context.attachments import (
+	ATTACHMENT_LIMIT,
+	conversation_attachment_count,
+	conversation_attachments,
+)
 from frappe_agents.harness.events import (
 	AgentEndEvent,
 	MessageEndEvent,
@@ -155,6 +160,16 @@ DRAFT_DISCIPLINE = (
 
 SKILLS_HEADING = "## Approved skills"
 APPROVED = "Approved"
+
+# The conversation's own files. The heading and the rule are constants because the
+# whole point of the section is that the ids under it are exact — a model that has
+# been told to copy them needs telling in the same words every time.
+ATTACHMENTS_HEADING = "## Files attached to this conversation"
+ATTACHMENTS_RULE = (
+	"Use these File ids exactly as written — never retype one from memory or from an "
+	"earlier turn. Every file here is still attached to this conversation; none of them "
+	"has been deleted."
+)
 
 
 def execute_run(run_name: str) -> None:
@@ -677,11 +692,12 @@ def _call_tool(run: Any, cancellation: RunCancellation, name: str, args: dict) -
 
 
 def build_system_prompt(agent: Any, run: Any) -> str:
-	"""The agent's instructions, its approved skills, the focal document, the rules."""
+	"""The agent's instructions, its approved skills, the focal document, the files, the rules."""
 	parts = (
 		(agent.instructions or "").strip(),
 		_skills_section(agent, run),
 		_focal_document(run),
+		_attached_files(run),
 		TOOL_DISCIPLINE,
 		_draft_section(agent),
 	)
@@ -749,6 +765,39 @@ def _focal_document(run: Any) -> str:
 		"Call get_document_context on it first: it says what exists around that document "
 		"before you read any part of it."
 	)
+
+
+def _attached_files(run: Any) -> str:
+	"""Every file on this conversation, with its exact id, listed fresh at every run.
+
+	The history is fitted to the model's window, so the turn that said which file
+	was uploaded is eventually dropped out of it — and the file id goes with that
+	turn. An agent asked about a file it can no longer see the id of does not say
+	it has forgotten; it produces an id one character short and tells the person
+	their attachment is gone. This section is built from the record at the start of
+	every run, so trimming can take the turn and the ids stay.
+
+	The newest `ATTACHMENT_LIMIT` of them. A prompt is not a file browser: past
+	that, the count is the useful fact and the tool that lists a record's
+	attachments is the way to the rest.
+	"""
+	conversation = run.get("conversation")
+	if not conversation:
+		return ""
+
+	files = conversation_attachments(conversation, ATTACHMENT_LIMIT)
+	if not files:
+		return ""
+
+	lines = [ATTACHMENTS_HEADING]
+	lines += [f"- {file.get('file_name') or file.get('name')} (File: {file.get('name')})" for file in files]
+
+	total = conversation_attachment_count(conversation)
+	if total > len(files):
+		lines.append(f"- and {total - len(files)} older files, not listed here.")
+
+	lines.append(ATTACHMENTS_RULE)
+	return "\n".join(lines)
 
 
 def _build_messages(profile: str, run: Any, system: str = "") -> list[AgentMessage]:
