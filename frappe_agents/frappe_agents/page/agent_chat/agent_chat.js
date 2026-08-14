@@ -15,8 +15,8 @@ const RAIL_STYLES = `
 	.agent-chat-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); }
 	.agent-chat-layout.is-collapsed { grid-template-columns: 40px minmax(0, 1fr); }
 	.agent-chat-rail {
-		display: flex; flex-direction: column; gap: 6px; padding: 6px 8px 6px 0;
-		border-right: 1px solid var(--border-color); height: calc(100vh - 220px); min-height: 320px;
+		display: flex; flex-direction: column; gap: 6px; padding: 6px 0; padding-inline-end: 8px;
+		border-inline-end: 1px solid var(--border-color); height: calc(100vh - 220px); min-height: 320px;
 	}
 	.agent-chat-rail-top { display: flex; align-items: center; gap: 6px; }
 	.agent-chat-rail-toggle { flex: none; padding: 2px 6px; color: var(--text-muted); }
@@ -43,7 +43,7 @@ const RAIL_STYLES = `
 	}
 	.agent-chat-convo:hover .agent-chat-rename,
 	.agent-chat-rename:focus { opacity: 1; }
-	.agent-chat-pane { min-width: 0; padding-left: 14px; }
+	.agent-chat-pane { min-width: 0; padding-inline-start: 14px; }
 	@media (max-width: 720px) {
 		.agent-chat-layout, .agent-chat-layout.is-collapsed {
 			grid-template-columns: minmax(0, 1fr); position: relative;
@@ -53,19 +53,19 @@ const RAIL_STYLES = `
 		   hides the conversations still has to have a way back to them. */
 		.agent-chat-layout .agent-chat-rail,
 		.agent-chat-layout.is-collapsed .agent-chat-rail {
-			height: auto; min-height: 0; padding: 0 0 6px; border-right: none;
+			height: auto; min-height: 0; padding: 0 0 6px; border-inline-end: none;
 		}
 		.agent-chat-layout .agent-chat-new,
 		.agent-chat-layout .agent-chat-rail-list { display: none; }
 		.agent-chat-layout.is-drawer .agent-chat-rail {
-			position: absolute; left: 0; top: 0; z-index: 20;
+			position: absolute; inset-inline-start: 0; top: 0; z-index: 20;
 			width: 250px; max-width: 86%; max-height: calc(100vh - 260px); padding: 6px 8px;
 			background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color);
 			border-radius: var(--border-radius-md, 6px); box-shadow: var(--shadow-lg);
 		}
 		.agent-chat-layout.is-drawer .agent-chat-new { display: flex; }
 		.agent-chat-layout.is-drawer .agent-chat-rail-list { display: block; }
-		.agent-chat-pane { padding-left: 0; }
+		.agent-chat-pane { padding-inline-start: 0; }
 	}
 `;
 
