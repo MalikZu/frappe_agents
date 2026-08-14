@@ -18,6 +18,7 @@ from frappe.query_builder.functions import Min, Sum
 from frappe.utils import cint, get_datetime, now_datetime, today
 
 from frappe_agents.actions import APPROVER_ROLE, separation_of_duties_block
+from frappe_agents.context.attachments import conversation_attachments
 from frappe_agents.extraction.pipeline import (
 	EXTRACTION,
 	STATUS_ACCEPTED,
@@ -356,6 +357,14 @@ def get_conversation(conversation: str, before: str | None = None, limit: Any = 
 
 	`extractions` is there for the same reason again: an extraction is its own job
 	and its own record, so nothing a run wrote says how the reading ended.
+
+	`attachments` is the conversation's own files, and it is not paged with the
+	runs. A file uploaded in chat is attached to the conversation and is never
+	deleted, but the only trace of it on screen was a line of text inside the
+	message that named it — so a reload, or twenty turns, and the person who
+	uploaded it had no way left to open it. The files belong to the conversation,
+	the caller has just been checked for read on the conversation, and so the
+	whole list comes back whichever page of turns was asked for.
 	"""
 	frappe.has_permission("Agent Conversation", "read", doc=conversation, throw=True)
 	doc = frappe.get_doc("Agent Conversation", conversation)
@@ -375,6 +384,7 @@ def get_conversation(conversation: str, before: str | None = None, limit: Any = 
 		"context": _conversation_context(doc),
 		"last_activity": doc.last_activity,
 		"runs": runs,
+		"attachments": conversation_attachments(doc.name),
 		"truncated": page["truncated"],
 		"next_before": page["next_before"],
 	}

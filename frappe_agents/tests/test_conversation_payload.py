@@ -44,6 +44,12 @@ ADDED_KEYS = {"agent_name", "model_profile", "context"}
 # is told so: `truncated` that older turns exist, `next_before` what to pass as
 # `before` to read them. A caller that ignores both still gets runs it can draw.
 PAGE_KEYS = {"truncated", "next_before"}
+# Added the same way, and deliberately outside the paging: `attachments` is the
+# conversation's own files, not the page's. A file uploaded in chat is attached to
+# the conversation and never deleted, but nothing in the payload said so, so a
+# reload left it unreachable. Empty list for a conversation nobody attached
+# anything to — present and empty, never missing.
+ATTACHMENT_KEYS = {"attachments"}
 LEGACY_RUN_KEYS = {
 	"name",
 	"status",
@@ -102,7 +108,7 @@ class TestConversationPayload(AgentTestCase):
 		"""A key nobody meant to add is a key someone will come to depend on."""
 		conversation, _ = self.legacy_conversation()
 
-		self.assertEqual(set(self.read(conversation)), LEGACY_KEYS | ADDED_KEYS | PAGE_KEYS)
+		self.assertEqual(set(self.read(conversation)), LEGACY_KEYS | ADDED_KEYS | PAGE_KEYS | ATTACHMENT_KEYS)
 
 	def test_a_short_conversation_says_it_is_all_there(self):
 		"""The paging keys are answers, not conditions: one turn is a whole page."""
@@ -120,6 +126,7 @@ class TestConversationPayload(AgentTestCase):
 
 		self.assertIsNone(payload["model_profile"])
 		self.assertIsNone(payload["context"])
+		self.assertEqual(payload["attachments"], [])
 		# The one that is not empty: it is the agent's label, and every conversation
 		# has always had an agent to take it from.
 		self.assertEqual(payload["agent_name"], AGENT)
