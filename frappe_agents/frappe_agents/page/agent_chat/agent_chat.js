@@ -30,7 +30,7 @@ const RAIL_STYLES = `
 	.agent-chat-layout.is-collapsed { grid-template-columns: 40px minmax(0, 1fr); }
 	.agent-chat-rail {
 		display: flex; flex-direction: column; gap: 6px; padding: 6px 0; padding-inline-end: 8px;
-		border-inline-end: 1px solid var(--border-color); height: calc(100vh - 220px); min-height: 320px;
+		border-inline-end: 1px solid var(--border-color); height: var(--agent-chat-height, calc(100dvh - 220px)); min-height: 320px;
 	}
 	.agent-chat-rail-top { display: flex; align-items: center; gap: 6px; }
 	.agent-chat-rail-toggle { flex: none; padding: 2px 6px; color: var(--text-muted); }
@@ -177,6 +177,15 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		// The same words as the rail's own control, and one translation key.
 		this.page.set_secondary_action(__("New chat"), () => this.new_chat());
 
+		// The chat fills whatever is below the page chrome. A fixed guess breaks
+		// the moment the shell around the Desk adds a toolbar, so measure instead:
+		// where the layout starts is where the chrome ends.
+		this.fit_height = () => {
+			const el = this.$layout && this.$layout[0];
+			if (!el || !el.isConnected) return;
+			const top = Math.max(0, Math.round(el.getBoundingClientRect().top));
+			el.style.setProperty("--agent-chat-height", `calc(100dvh - ${top + 12}px)`);
+		};
 		this.$layout = $(`
 			<div class="agent-chat-layout">
 				<aside class="agent-chat-rail" id="agent-chat-rail">
@@ -190,6 +199,10 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 				<div class="agent-chat-pane"></div>
 			</div>
 		`).appendTo(this.page.main);
+
+		this.fit_height();
+		requestAnimationFrame(this.fit_height);
+		$(window).on("resize.agent-chat-fit", this.fit_height);
 
 		this.$rail = this.$layout.find(".agent-chat-rail-list");
 		this.$toggle = this.$layout.find(".agent-chat-rail-toggle");
