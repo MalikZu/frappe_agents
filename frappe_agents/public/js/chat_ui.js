@@ -86,6 +86,27 @@ const STYLES = `
 	.agent-chat-row.is-error .agent-chat-bubble { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
 	.agent-chat-tool { font-size: var(--text-sm); color: var(--text-muted); margin: 2px 0 6px 2px; cursor: pointer; font-family: var(--font-stack-mono, monospace); }
 	.agent-chat-tool-args { display: none; margin: 4px 0 8px 14px; padding: 6px 8px; background: var(--control-bg); border-radius: 6px; font-size: var(--text-sm); white-space: pre-wrap; }
+	.agent-chat-think { margin: 0 0 8px 2px; }
+	.agent-chat-think-head {
+		display: inline-flex; align-items: center; gap: 6px; padding: 1px 0;
+		border: none; background: none; font: inherit; font-size: var(--text-sm);
+		color: var(--text-muted); cursor: pointer;
+	}
+	.agent-chat-think-head:hover { color: var(--text-color); }
+	.agent-chat-think-caret { display: inline-block; font-size: 9px; }
+	.agent-chat-think.is-open .agent-chat-think-caret { transform: rotate(90deg); }
+	.agent-chat-think-body {
+		display: none; max-height: 220px; overflow-y: auto; margin: 4px 0 0 14px;
+		padding: 6px 8px; background: var(--control-bg); border-radius: 6px;
+		font-family: var(--font-stack-mono, monospace); font-size: var(--text-sm);
+		color: var(--text-muted); white-space: pre-wrap; word-break: break-word;
+	}
+	.agent-chat-think.is-open .agent-chat-think-body { display: block; }
+	@keyframes agent-chat-think-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+	.agent-chat-think.is-live .agent-chat-think-label { animation: agent-chat-think-pulse 1.4s ease-in-out infinite; }
+	@media (prefers-reduced-motion: reduce) {
+		.agent-chat-think.is-live .agent-chat-think-label { animation: none; }
+	}
 	.agent-chat-status { font-size: var(--text-sm); color: var(--text-muted); margin-bottom: 10px; }
 	.agent-chat-empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
 	.agent-chat-action { border: 1px solid var(--border-color); border-left: 3px solid var(--orange-500, var(--border-color)); border-radius: 8px; padding: 8px 12px; margin: 4px 0 10px 0; background: var(--card-bg, var(--control-bg)); }
@@ -111,6 +132,23 @@ frappe_agents.EXTRACTION_UPDATE_EVENT = "frappe_agents:extraction_update";
 // Tools whose result is a proposal waiting for a person. Their finished event is
 // what a reopened conversation redraws its approval cards from.
 const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel"];
+
+// How far from the bottom the log may be scrolled and still follow new text.
+const FOLLOW_SLACK = 120;
+
+/** The content blocks an assistant message ended up with. */
+function message_blocks(message) {
+	if (!message || message.role !== "assistant") return [];
+	return Array.isArray(message.content) ? message.content : [];
+}
+
+/** What that message said, without the thinking and the tool calls. */
+function message_text(message) {
+	return message_blocks(message)
+		.filter((block) => block && block.type === "text")
+		.map((block) => block.text || "")
+		.join("");
+}
 
 /** Tool arguments as pretty JSON, whatever shape they arrived in. */
 function pretty_args(args) {
@@ -257,6 +295,9 @@ frappe_agents.ChatUI = class ChatUI {
 		// plus the queue the finished event finds them by.
 		this.tool_lines = {};
 		this.tool_waiting = {};
+		// What each run is writing right now: the message on screen, the text
+		// accumulated for it, and the thinking strips open beside it.
+		this.streams = {};
 	}
 
 	make() {
@@ -995,6 +1036,9 @@ frappe_agents.ChatUI = class ChatUI {
 			case "harness_event":
 				this.on_harness_event(data);
 				break;
+			case "message_update":
+				this.render_stream_update(data);
+				break;
 			case "tool_call":
 				this.render_tool_call(data);
 				break;
@@ -1010,7 +1054,13 @@ frappe_agents.ChatUI = class ChatUI {
 			default:
 				this.render_status(data);
 		}
-		this.scroll_to_bottom();
+		// Text arrives several times a second. Chasing it is right when the person
+		// is at the bottom of the log and wrong when they are reading further up.
+		if (data.type === "message_update") {
+			this.follow();
+		} else {
+			this.scroll_to_bottom();
+		}
 	}
 
 	render_status(data) {
@@ -1045,7 +1095,136 @@ frappe_agents.ChatUI = class ChatUI {
 			// Usually already finished by the legacy event just before this one.
 			// Not always: a tool the kill switch refused publishes no legacy event.
 			this.finish_tool_line(this.tool_lines[tool_line_key(data.run, event.toolCallId)]);
+		} else if (event.type === "message_end") {
+			this.finish_stream_message(data.run, event.message);
 		}
+	}
+
+	/** What a run is writing right now, and what it has written so far. */
+	stream(run) {
+		if (!this.streams[run]) {
+			this.streams[run] = { text: "", $row: null, $bubble: null, thinking: {}, said: "" };
+		}
+		return this.streams[run];
+	}
+
+	/**
+	 * A piece of the answer, or of the thinking, as the model writes it.
+	 *
+	 * Deltas are what the bubble grows from. They are never the last word: the
+	 * message_end behind them carries the canonical text and replaces this.
+	 */
+	render_stream_update(data) {
+		const state = this.stream(data.run);
+		if (data.kind === "thinking") {
+			this.render_thinking_update(data.run, state, data);
+			return;
+		}
+		if (data.kind !== "text" || data.phase !== "delta" || !data.delta) return;
+		state.text += data.delta;
+		this.write_stream_text(data.run, state, state.text);
+	}
+
+	/** The agent's bubble for the message being written, made on the first word. */
+	write_stream_text(run, state, text) {
+		this.clear_empty();
+		if (!state.$row) {
+			state.$row = this.make_bubble("", "");
+			state.$bubble = state.$row.find(".agent-chat-bubble");
+			this.insert_before_pending(run, state.$row);
+		}
+		state.$bubble.text(text);
+	}
+
+	/**
+	 * The model has finished a message.
+	 *
+	 * Its content is the canonical form, so it replaces whatever the deltas
+	 * accumulated, and any thinking still open closes. A run can write several
+	 * messages — one before each tool call — so the next one starts fresh.
+	 */
+	finish_stream_message(run, message) {
+		if (!message || message.role !== "assistant") return;
+		const state = this.stream(run);
+
+		Object.keys(state.thinking).forEach((index) => this.close_thinking(state.thinking[index]));
+		state.thinking = {};
+
+		const text = message_text(message);
+		if (text) {
+			this.write_stream_text(run, state, text);
+			state.said = text;
+		} else if (state.$row) {
+			// It ended up saying nothing — a turn that only called a tool.
+			state.$row.remove();
+		}
+		state.text = "";
+		state.$row = null;
+		state.$bubble = null;
+	}
+
+	/** A thinking block opening, growing, or ending. */
+	render_thinking_update(run, state, data) {
+		const index = String(data.index || 0);
+		if (data.phase === "end") {
+			this.close_thinking(state.thinking[index]);
+			return;
+		}
+
+		const strip = this.open_thinking(run, state, index);
+		if (data.phase !== "delta" || !data.delta) return;
+		strip.text += data.delta;
+		strip.$body.text(strip.text);
+		strip.$body.scrollTop(strip.$body[0].scrollHeight);
+	}
+
+	open_thinking(run, state, index) {
+		if (state.thinking[index]) return state.thinking[index];
+		this.clear_empty();
+		const strip = this.make_thinking_strip("", true);
+		this.insert_before_pending(run, strip.$el);
+		state.thinking[index] = strip;
+		return strip;
+	}
+
+	/**
+	 * The strip that shows the model thinking.
+	 *
+	 * Open and streaming while it thinks; one line the moment it stops — "Thought
+	 * for 4s" — and the whole of it a click away either way. A strip replayed
+	 * from a log starts closed: the thinking is there to open, but the answer is
+	 * what a person came back for.
+	 */
+	make_thinking_strip(text, running) {
+		const strip = { text: text || "", running: Boolean(running), started: Date.now() };
+		strip.$el = $("<div class='agent-chat-think'></div>").toggleClass("is-live", strip.running);
+		strip.$head = $("<button type='button' class='agent-chat-think-head'></button>")
+			.attr("aria-expanded", "false")
+			.appendTo(strip.$el);
+		$("<span class='agent-chat-think-caret'>▸</span>").appendTo(strip.$head);
+		strip.$label = $("<span class='agent-chat-think-label'></span>")
+			.text(strip.running ? __("Thinking…") : __("Thought"))
+			.appendTo(strip.$head);
+		strip.$body = $("<pre class='agent-chat-think-body'></pre>").text(strip.text).appendTo(strip.$el);
+		strip.$head.on("click", () => this.toggle_thinking(strip));
+		if (strip.running) this.toggle_thinking(strip);
+		return strip;
+	}
+
+	toggle_thinking(strip) {
+		const open = !strip.$el.hasClass("is-open");
+		strip.$el.toggleClass("is-open", open);
+		strip.$head.attr("aria-expanded", open ? "true" : "false");
+	}
+
+	/** A thinking block has ended: it folds itself away and says how long it took. */
+	close_thinking(strip) {
+		if (!strip || !strip.running) return;
+		strip.running = false;
+		const seconds = Math.max(1, Math.round((Date.now() - strip.started) / 1000));
+		strip.$label.text(__("Thought for {0}s", [seconds]));
+		strip.$el.removeClass("is-live");
+		if (strip.$el.hasClass("is-open")) this.toggle_thinking(strip);
 	}
 
 	/** Draw a tool the agent has just started calling. It resolves in place when it returns. */
@@ -1243,7 +1422,12 @@ frappe_agents.ChatUI = class ChatUI {
 
 	render_message(data) {
 		const text = data.text || data.message || data.output_message || "";
-		if (text) {
+		const state = this.streams[data.run];
+		// The run signs off with the answer it ended on. When that answer was
+		// written into the bubble as it came, this is the same words a second
+		// time and there is nothing left to draw.
+		const streamed = Boolean(state && text && state.said === text);
+		if (text && !streamed) {
 			this.clear_empty();
 			this.insert_before_pending(data.run, this.make_bubble(text, ""));
 		}
@@ -1296,5 +1480,18 @@ frappe_agents.ChatUI = class ChatUI {
 
 	scroll_to_bottom() {
 		this.$log.scrollTop(this.$log[0].scrollHeight);
+	}
+
+	/**
+	 * Keep up with text as it is written, unless the person has scrolled away.
+	 * Dragging the log back down under someone reading what was said earlier is
+	 * the wrong answer to a message arriving.
+	 */
+	follow() {
+		const log = this.$log[0];
+		if (!log) return;
+		if (log.scrollHeight - log.scrollTop - log.clientHeight <= FOLLOW_SLACK) {
+			this.scroll_to_bottom();
+		}
 	}
 };
