@@ -1,20 +1,65 @@
 """Model providers.
 
-Two entry points, over two wire formats — OpenAI-compatible chat completions and
-Anthropic messages:
+Three entry points, over two wire formats — OpenAI-compatible chat completions
+and Anthropic messages:
 
 * `call_model` — the agent loop. Messages in, text and tool calls out.
+* `call_model_stream` — the same call, answered as it is written.
 * `call_model_extract` — one document in, schema-conforming JSON out, with no
   tools bound under any circumstances. It builds its own payload rather than
-  reusing the chat builders, which flatten content to a string.
+  reusing the chat builders, which flatten content to a string. Extraction is
+  never streamed: nothing can be shown until the whole JSON object has arrived.
 
 The API key is read here and nowhere else. It is never logged, never returned, and
 never written to a document field. Document bytes are the same: they go into the
 request body and nowhere else — not into a log line, not into an error message.
+
+## The normalized stream
+
+`call_model_stream` yields plain dicts, one per thing that happened, in the order
+it happened. The two wire formats disagree about almost everything — Anthropic
+marks block boundaries explicitly, OpenAI-compatible endpoints mark none of them —
+so both parsers are normalized here, and every consumer downstream reads one
+vocabulary. Each chunk has a `type`:
+
+| chunk | fields | means |
+|---|---|---|
+| `message_start` | `model` | the stream is open. Always first, exactly once. |
+| `text_start` | `index` | an answer block opened at content index `index`. |
+| `text_delta` | `index`, `text` | more answer text. Never empty. |
+| `text_end` | `index`, `text` | the block closed; `text` is the whole of it. |
+| `thinking_start` | `index`, `redacted` | a reasoning block opened. |
+| `thinking_delta` | `index`, `text` | more reasoning. |
+| `thinking_end` | `index`, `text`, `signature`, `redacted` | the block closed. |
+| `toolcall_start` | `index`, `id`, `name` | a tool call began. |
+| `toolcall_delta` | `index`, `text` | a raw fragment of its argument JSON. |
+| `toolcall_end` | `index`, `id`, `name`, `args`, `arguments` | the call, assembled. |
+| `usage` | `tokens_in`, `tokens_out` | totals so far. Absolute, not increments. |
+| `message_end` | `reason` | `stop`, `length` or `toolUse`. Always last, once. |
+
+`index` is the content index of the block inside the assistant message, counted
+from zero in the order blocks open. It maps straight onto the harness
+`content_index`, and the start/delta/end triples map onto `TextStartEvent` and
+friends one for one. Every block that opens also closes, even if the connection
+dies mid-block, and `message_end` is the generator's last word unless it raised.
+
+`usage` chunks carry the latest known totals for this call, not a delta — a later
+one replaces an earlier one. `signature` is Anthropic's thinking signature, which
+must be handed back verbatim on a later turn that carries tool calls.
+
+Timeouts mean something different here. A streamed answer has no useful total
+budget: a long one legitimately takes minutes. What is never legitimate is
+silence, so the flat total is replaced by a connect timeout plus a per-chunk idle
+timeout — `STREAM_IDLE_TIMEOUT` seconds with no bytes and the stream is dropped
+with a plain error.
+
+Abandoning the generator closes the connection. That is the cancellation path:
+the caller stops pulling, and the socket goes away with it.
 """
 
 import base64
 import json
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import frappe
@@ -26,6 +71,14 @@ PROVIDER_ANTHROPIC = "Anthropic"
 
 REQUEST_TIMEOUT = 120
 DEFAULT_MAX_TOKENS = 4096
+
+# The streaming budget, in place of the flat total. Connecting is either quick or
+# broken; after that only silence is a failure, and 60s of it is generous even
+# for a model that thinks before its first token.
+STREAM_CONNECT_TIMEOUT = 20
+STREAM_IDLE_TIMEOUT = 60
+DONE_SENTINEL = "[DONE]"
+
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -336,6 +389,597 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
 def _is_tool_result(message: dict) -> bool:
 	content = message.get("content")
 	return bool(content) and isinstance(content, list) and content[0].get("type") == "tool_result"
+
+
+# --- streaming ---------------------------------------------------------------
+
+
+def call_model_stream(
+	profile: Any, messages: list[dict], tool_schemas: list[dict] | None = None
+) -> Iterator[dict]:
+	"""Call the model and yield the answer as it is written.
+
+	Same inputs as `call_model`, same two wire formats, same key handling. What
+	comes back is the normalized chunk stream described at the top of this module
+	rather than one finished reply.
+
+	The profile is resolved before the generator is handed over, so a disabled
+	provider or a missing key fails here and now, the way `call_model` fails —
+	not on the first chunk somebody pulls.
+	"""
+	profile, provider, api_key = _resolve_profile(profile)
+	tool_schemas = tool_schemas or []
+
+	if provider.provider_type == PROVIDER_ANTHROPIC:
+		return _stream_anthropic(provider, profile, messages, tool_schemas, api_key)
+	return _stream_openai(provider, profile, messages, tool_schemas, api_key)
+
+
+def _stream_openai(
+	provider: Any, profile: Any, messages: list[dict], tool_schemas: list[dict], api_key: str
+) -> Iterator[dict]:
+	url = f"{(provider.base_url or OPENAI_BASE_URL).rstrip('/')}/chat/completions"
+	payload: dict[str, Any] = {
+		"model": profile.model_id,
+		"messages": _openai_messages(messages),
+		"stream": True,
+		# Without this the usage frame never comes and the run records no tokens.
+		# Endpoints that do not know the option ignore it; the parser tolerates a
+		# stream that ends without usage either way.
+		"stream_options": {"include_usage": True},
+	}
+	if tool_schemas:
+		payload["tools"] = [
+			{
+				"type": "function",
+				"function": {
+					"name": schema["name"],
+					"description": schema.get("description") or "",
+					"parameters": schema.get("args_schema") or {"type": "object", "properties": {}},
+				},
+			}
+			for schema in tool_schemas
+		]
+
+	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+	with _open_stream(url, headers, payload, api_key) as response:
+		yield from parse_openai_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
+
+
+def _stream_anthropic(
+	provider: Any, profile: Any, messages: list[dict], tool_schemas: list[dict], api_key: str
+) -> Iterator[dict]:
+	url = f"{(provider.base_url or ANTHROPIC_BASE_URL).rstrip('/')}/v1/messages"
+	system, converted = _anthropic_messages(messages)
+	payload: dict[str, Any] = {
+		"model": profile.model_id,
+		"max_tokens": DEFAULT_MAX_TOKENS,
+		"messages": converted,
+		"stream": True,
+	}
+	if system:
+		payload["system"] = system
+	if tool_schemas:
+		payload["tools"] = [
+			{
+				"name": schema["name"],
+				"description": schema.get("description") or "",
+				"input_schema": schema.get("args_schema") or {"type": "object", "properties": {}},
+			}
+			for schema in tool_schemas
+		]
+
+	headers = {
+		"x-api-key": api_key,
+		"anthropic-version": ANTHROPIC_VERSION,
+		"Content-Type": "application/json",
+	}
+	with _open_stream(url, headers, payload, api_key) as response:
+		yield from parse_anthropic_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
+
+
+def _open_stream(url: str, headers: dict, payload: dict, api_key: str) -> Any:
+	"""Open the response without reading it, and refuse anything but a 200."""
+	try:
+		response = requests.post(
+			url,
+			headers=headers,
+			json=payload,
+			stream=True,
+			timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
+		)
+	except requests.RequestException as exc:
+		raise ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
+
+	if response.status_code != 200:
+		body = _redact(response.text or "", api_key)[:ERROR_BODY_LIMIT]
+		response.close()
+		raise ProviderError(f"Model request to {url} returned HTTP {response.status_code}: {body}")
+
+	return response
+
+
+def _stream_bytes(response: Any, url: str, api_key: str) -> Iterator[bytes]:
+	"""Raw bytes off the socket, with silence turned into a plain error.
+
+	`iter_content(None)` hands over whatever has arrived rather than waiting for a
+	fixed-size block, which is the whole point: the read timeout on the request is
+	now a per-chunk idle timeout, and it only fires when nothing arrives at all.
+	"""
+	try:
+		yield from response.iter_content(chunk_size=None)
+	except requests.Timeout:
+		raise ProviderError(
+			f"Model stream from {url} sent nothing for {STREAM_IDLE_TIMEOUT}s and was dropped."
+		)
+	except requests.RequestException as exc:
+		raise ProviderError(f"Model stream from {url} broke: {_redact(str(exc), api_key)}")
+
+
+def parse_openai_stream(chunks: Iterable[bytes], model: str | None = None) -> Iterator[dict]:
+	"""Normalized chunks out of an OpenAI-compatible SSE body.
+
+	The wire format marks no block boundaries — text simply appears, reasoning
+	simply appears, and tool arguments arrive as fragments tagged with the index of
+	the call they belong to. Blocks are opened on first sight and closed when the
+	kind changes or the stream ends, so what comes out has the same shape Anthropic
+	states outright.
+	"""
+	yield {"type": "message_start", "model": model}
+
+	blocks = _Blocks()
+	finish_reason = None
+	tokens_in = 0
+	tokens_out = 0
+
+	for _event, data in _sse_events(chunks):
+		if data.strip() == DONE_SENTINEL:
+			break
+
+		payload = _stream_json(data)
+		if payload is None:
+			continue
+		_raise_stream_error(payload)
+
+		usage = payload.get("usage")
+		if isinstance(usage, dict):
+			tokens_in = cint(usage.get("prompt_tokens")) or tokens_in
+			tokens_out = cint(usage.get("completion_tokens")) or tokens_out
+			yield {"type": "usage", "tokens_in": tokens_in, "tokens_out": tokens_out}
+
+		for choice in payload.get("choices") or []:
+			delta = choice.get("delta") or {}
+
+			# OpenRouter calls it `reasoning`, DeepSeek calls it `reasoning_content`,
+			# and most endpoints send neither — then there is simply no thinking.
+			reasoning = _delta_text(delta.get("reasoning"))
+			if not reasoning:
+				reasoning = _delta_text(delta.get("reasoning_content"))
+			if reasoning:
+				yield from blocks.thinking(reasoning)
+
+			text = _delta_text(delta.get("content"))
+			if text:
+				yield from blocks.text(text)
+
+			for position, call in enumerate(delta.get("tool_calls") or []):
+				yield from blocks.tool_fragment(position, call)
+
+			if choice.get("finish_reason"):
+				finish_reason = choice["finish_reason"]
+
+	yield from blocks.close()
+	yield {"type": "message_end", "reason": _openai_reason(finish_reason, blocks.saw_tool_calls)}
+
+
+def parse_anthropic_stream(chunks: Iterable[bytes], model: str | None = None) -> Iterator[dict]:
+	"""Normalized chunks out of an Anthropic messages SSE body.
+
+	Anthropic numbers its own content blocks and says when each one starts and
+	stops, so this parser mostly relays. It still allocates its own indexes, in the
+	order blocks open, rather than trusting the wire numbering to stay dense.
+	"""
+	yield {"type": "message_start", "model": model}
+
+	blocks = _Blocks()
+	stop_reason = None
+	tokens_in = 0
+	tokens_out = 0
+
+	for event, data in _sse_events(chunks):
+		payload = _stream_json(data)
+		if payload is None:
+			continue
+		_raise_stream_error(payload)
+
+		kind = payload.get("type") or event
+		if kind == "message_start":
+			usage = (payload.get("message") or {}).get("usage") or {}
+			tokens_in = cint(usage.get("input_tokens")) or tokens_in
+			tokens_out = cint(usage.get("output_tokens")) or tokens_out
+			yield {"type": "usage", "tokens_in": tokens_in, "tokens_out": tokens_out}
+
+		elif kind == "content_block_start":
+			yield from blocks.open_wire(payload.get("index"), payload.get("content_block") or {})
+
+		elif kind == "content_block_delta":
+			yield from blocks.wire_delta(payload.get("index"), payload.get("delta") or {})
+
+		elif kind == "content_block_stop":
+			yield from blocks.close_wire(payload.get("index"))
+
+		elif kind == "message_delta":
+			stop_reason = (payload.get("delta") or {}).get("stop_reason") or stop_reason
+			usage = payload.get("usage") or {}
+			if usage:
+				tokens_in = cint(usage.get("input_tokens")) or tokens_in
+				tokens_out = cint(usage.get("output_tokens")) or tokens_out
+				yield {"type": "usage", "tokens_in": tokens_in, "tokens_out": tokens_out}
+
+		elif kind == "message_stop":
+			break
+
+	yield from blocks.close()
+	yield {"type": "message_end", "reason": _anthropic_reason(stop_reason, blocks.saw_tool_calls)}
+
+
+class _Blocks:
+	"""The content blocks of one assistant message, as they are discovered.
+
+	Holds the only state either parser needs: which block is open, what has
+	accumulated in it, and which content index it was given. Both formats feed it
+	— Anthropic through the `*_wire` methods, which follow the numbering on the
+	wire, and OpenAI-compatible through `text`/`thinking`/`tool_fragment`, which
+	infer boundaries because the wire states none.
+	"""
+
+	def __init__(self) -> None:
+		self.next_index = 0
+		self.open_kind: str | None = None
+		self.open_index = 0
+		self.buffer = ""
+		self.signature = ""
+		self.redacted = False
+		self.tools: dict[Any, dict] = {}
+		self.tool_order: list[Any] = []
+		self.wire: dict[Any, Any] = {}
+		self.saw_tool_calls = False
+
+	# --- inferred boundaries (OpenAI-compatible) ---
+
+	def text(self, delta: str) -> Iterator[dict]:
+		yield from self._open_prose("text")
+		self.buffer += delta
+		yield {"type": "text_delta", "index": self.open_index, "text": delta}
+
+	def thinking(self, delta: str) -> Iterator[dict]:
+		yield from self._open_prose("thinking")
+		self.buffer += delta
+		yield {"type": "thinking_delta", "index": self.open_index, "text": delta}
+
+	def tool_fragment(self, position: int, call: dict) -> Iterator[dict]:
+		"""One `delta.tool_calls` entry: an opening, a fragment, or both.
+
+		Calls are keyed by the index the endpoint tags them with, because fragments
+		arrive interleaved when a model asks for two tools at once and the id is
+		only ever sent in the first fragment. An endpoint that omits the index has
+		one call in flight per position, which is what the position falls back to.
+		"""
+		yield from self._close_prose()
+
+		key = call.get("index")
+		if key is None:
+			key = position
+
+		function = call.get("function") or {}
+		state = self.tools.get(key)
+		if state is None:
+			self.saw_tool_calls = True
+			state = {
+				"index": self._take_index(),
+				"id": call.get("id") or "",
+				"name": function.get("name") or "",
+				"arguments": "",
+			}
+			self.tools[key] = state
+			self.tool_order.append(key)
+			yield {
+				"type": "toolcall_start",
+				"index": state["index"],
+				"id": state["id"],
+				"name": state["name"],
+			}
+		else:
+			if call.get("id"):
+				state["id"] = call["id"]
+			# Almost every endpoint sends the whole name in the opening fragment and
+			# then repeats it or omits it. A few fragment it, so a name that differs
+			# from what is held is treated as the rest of it.
+			name = function.get("name")
+			if name and name != state["name"]:
+				state["name"] += name
+
+		fragment = function.get("arguments")
+		if fragment:
+			state["arguments"] += fragment
+			yield {"type": "toolcall_delta", "index": state["index"], "text": fragment}
+
+	# --- stated boundaries (Anthropic) ---
+
+	def open_wire(self, wire_index: Any, block: dict) -> Iterator[dict]:
+		kind = block.get("type")
+		yield from self._close_prose()
+		index = self._take_index()
+		self.wire[wire_index] = index
+
+		if kind == "tool_use":
+			self.saw_tool_calls = True
+			state = {
+				"index": index,
+				"id": block.get("id") or "",
+				"name": block.get("name") or "",
+				"arguments": "",
+			}
+			self.tools[wire_index] = state
+			self.tool_order.append(wire_index)
+			yield {"type": "toolcall_start", "index": index, "id": state["id"], "name": state["name"]}
+			return
+
+		if kind in ("thinking", "redacted_thinking"):
+			self.open_kind = "thinking"
+			self.open_index = index
+			# A redacted block carries its ciphertext in `data` and no deltas: the
+			# text is unreadable but the block still has to be kept and sent back.
+			self.buffer = block.get("data") or ""
+			self.signature = ""
+			self.redacted = kind == "redacted_thinking"
+			yield {"type": "thinking_start", "index": index, "redacted": self.redacted}
+			return
+
+		self.open_kind = "text"
+		self.open_index = index
+		self.buffer = block.get("text") or ""
+		self.signature = ""
+		self.redacted = False
+		yield {"type": "text_start", "index": index}
+
+	def wire_delta(self, wire_index: Any, delta: dict) -> Iterator[dict]:
+		kind = delta.get("type")
+
+		if kind == "input_json_delta":
+			state = self.tools.get(wire_index)
+			fragment = delta.get("partial_json") or ""
+			if state is None or not fragment:
+				return
+			state["arguments"] += fragment
+			yield {"type": "toolcall_delta", "index": state["index"], "text": fragment}
+			return
+
+		if kind == "signature_delta":
+			# Arrives in fragments like everything else, and is worthless unless it
+			# is reassembled exactly — Anthropic verifies it byte for byte.
+			self.signature += delta.get("signature") or ""
+			return
+
+		if kind == "thinking_delta":
+			text = delta.get("thinking") or ""
+			if not text:
+				return
+			self.buffer += text
+			yield {
+				"type": "thinking_delta",
+				"index": self.wire.get(wire_index, self.open_index),
+				"text": text,
+			}
+			return
+
+		if kind == "text_delta":
+			text = delta.get("text") or ""
+			if not text:
+				return
+			self.buffer += text
+			yield {"type": "text_delta", "index": self.wire.get(wire_index, self.open_index), "text": text}
+
+	def close_wire(self, wire_index: Any) -> Iterator[dict]:
+		state = self.tools.pop(wire_index, None)
+		if state is not None:
+			if wire_index in self.tool_order:
+				self.tool_order.remove(wire_index)
+			yield _tool_end(state)
+			return
+		yield from self._close_prose()
+
+	# --- the end of the stream ---
+
+	def close(self) -> Iterator[dict]:
+		"""Close whatever is still open. A dropped connection closes them too."""
+		yield from self._close_prose()
+		for key in self.tool_order:
+			yield _tool_end(self.tools[key])
+		self.tool_order = []
+		self.tools = {}
+
+	# --- internals ---
+
+	def _open_prose(self, kind: str) -> Iterator[dict]:
+		if self.open_kind == kind:
+			return
+		yield from self._close_prose()
+		index = self._take_index()
+		self.open_kind = kind
+		self.open_index = index
+		self.buffer = ""
+		self.signature = ""
+		self.redacted = False
+		if kind == "thinking":
+			yield {"type": "thinking_start", "index": index, "redacted": False}
+		else:
+			yield {"type": "text_start", "index": index}
+
+	def _close_prose(self) -> Iterator[dict]:
+		if self.open_kind is None:
+			return
+		kind, index, text = self.open_kind, self.open_index, self.buffer
+		signature, redacted = self.signature, self.redacted
+		self.open_kind = None
+		self.buffer = ""
+		self.signature = ""
+		self.redacted = False
+		if kind == "thinking":
+			yield {
+				"type": "thinking_end",
+				"index": index,
+				"text": text,
+				"signature": signature or None,
+				"redacted": redacted,
+			}
+		else:
+			yield {"type": "text_end", "index": index, "text": text}
+
+	def _take_index(self) -> int:
+		index = self.next_index
+		self.next_index += 1
+		return index
+
+
+def _tool_end(state: dict) -> dict:
+	return {
+		"type": "toolcall_end",
+		"index": state["index"],
+		"id": state["id"] or f"call_{state['index']}",
+		"name": state["name"],
+		"args": _load_args(state["arguments"]),
+		"arguments": state["arguments"],
+	}
+
+
+def _sse_events(chunks: Iterable[bytes]) -> Iterator[tuple[str | None, str]]:
+	"""Server-sent events out of raw bytes, one `(event, data)` pair at a time.
+
+	Lines are cut here rather than by `iter_lines` because a chunk boundary can
+	land anywhere: between the CR and the LF of a CRLF pair, or in the middle of a
+	multi-byte character. Splitting the bytes on the line terminators first and
+	decoding each whole line afterwards makes both harmless — no UTF-8 sequence
+	contains a CR or an LF byte, so a line is never cut through a character.
+	"""
+	buffer = b""
+	event: str | None = None
+	data: list[str] = []
+
+	def dispatch() -> Iterator[tuple[str | None, str]]:
+		nonlocal event, data
+		if data:
+			yield event, "\n".join(data)
+		event = None
+		data = []
+
+	for chunk in chunks:
+		if not chunk:
+			continue
+		buffer += chunk
+		while True:
+			cut = _cut_line(buffer)
+			if cut is None:
+				break
+			line, buffer = cut
+			if not line:
+				yield from dispatch()
+				continue
+			event, data = _sse_field(line, event, data)
+
+	if buffer:
+		line = buffer.rstrip(b"\r")
+		if line:
+			event, data = _sse_field(line, event, data)
+	yield from dispatch()
+
+
+def _sse_field(line: bytes, event: str | None, data: list[str]) -> tuple[str | None, list[str]]:
+	"""One SSE field line folded into the event being assembled."""
+	# A line that opens with a colon is a comment. Keep-alives arrive that way —
+	# OpenRouter sends one every few seconds while a slow model warms up.
+	if line.startswith(b":"):
+		return event, data
+
+	name, _, value = line.decode("utf-8", "replace").partition(":")
+	if value.startswith(" "):
+		value = value[1:]
+	if name == "event":
+		return value, data
+	if name == "data":
+		data.append(value)
+	return event, data
+
+
+def _cut_line(buffer: bytes) -> tuple[bytes, bytes] | None:
+	"""The next whole line and the rest, or None while the line is incomplete."""
+	newline = buffer.find(b"\n")
+	carriage = buffer.find(b"\r")
+
+	if newline == -1 and carriage == -1:
+		return None
+	if carriage == -1 or (newline != -1 and newline < carriage):
+		return buffer[:newline], buffer[newline + 1 :]
+	# A CR at the very end may be the first half of a CRLF that has not arrived.
+	if carriage == len(buffer) - 1:
+		return None
+	skip = 2 if buffer[carriage + 1 : carriage + 2] == b"\n" else 1
+	return buffer[:carriage], buffer[carriage + skip :]
+
+
+def _stream_json(data: str) -> dict | None:
+	"""One SSE payload as an object, or None for anything else.
+
+	A frame that will not parse is dropped rather than fatal: it is one lost token
+	in an answer that is otherwise arriving, and killing the run over it would
+	throw away everything already written.
+	"""
+	if not data or data.strip() == DONE_SENTINEL:
+		return None
+	try:
+		payload = json.loads(data)
+	except ValueError:
+		return None
+	return payload if isinstance(payload, dict) else None
+
+
+def _raise_stream_error(payload: dict) -> None:
+	"""An error delivered inside a perfectly successful 200 body."""
+	error = payload.get("error")
+	if not error:
+		return
+	if isinstance(error, dict):
+		message = error.get("message") or error.get("type") or ""
+	else:
+		message = str(error)
+	raise ProviderError(f"The model stream returned an error: {str(message)[:ERROR_BODY_LIMIT]}")
+
+
+def _delta_text(content: Any) -> str:
+	"""A delta's text, whether it came as a string or as a list of parts."""
+	if isinstance(content, str):
+		return content
+	if isinstance(content, list):
+		return "".join(
+			part.get("text") or "" for part in content if isinstance(part, dict) and part.get("text")
+		)
+	return ""
+
+
+def _openai_reason(finish_reason: str | None, saw_tool_calls: bool) -> str:
+	if finish_reason == "length":
+		return "length"
+	if finish_reason in ("tool_calls", "function_call") or saw_tool_calls:
+		return "toolUse"
+	return "stop"
+
+
+def _anthropic_reason(stop_reason: str | None, saw_tool_calls: bool) -> str:
+	if stop_reason == "max_tokens":
+		return "length"
+	if stop_reason == "tool_use" or saw_tool_calls:
+		return "toolUse"
+	return "stop"
 
 
 def call_model_extract(
