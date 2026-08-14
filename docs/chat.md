@@ -60,10 +60,14 @@ answer, and it is never what the conversation is stored with.
 
 ## Coming back to a conversation
 
-A conversation you reopen is drawn again in full: what you asked, what the agent
-thought, every tool it called, everything it said, and any approval still
+A conversation you reopen is drawn again from its end: what you asked, what the
+agent thought, every tool it called, everything it said, and any approval still
 waiting. It comes from what the run recorded, so it survives a reload and a
 different browser.
+
+A long conversation comes back as its last turns, not all of them, and says
+**Older messages are not shown** where the rest would have been. Nothing is
+deleted — the runs are still in the Agent Run list, under the conversation.
 
 A document the agent was asked to turn into a draft comes back too, as the card
 it always was, in the state that extraction is in now — waiting for your review,
