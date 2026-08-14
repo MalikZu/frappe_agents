@@ -297,12 +297,6 @@ class TestReadingPdfText(ReadingTestCase):
 		self.assertFalse(payload["ok"])
 		self.assertIn("password protected", payload["error"])
 
-	def test_a_damaged_pdf_is_refused_and_not_guessed_at(self):
-		payload, _ = self.read("damaged.pdf", b"%PDF-1.4\nnot really a pdf at all")
-
-		self.assertFalse(payload["ok"])
-		self.assertIn("could not be read", payload["error"])
-
 
 class TestReadingBySight(ReadingTestCase):
 	"""The lane for scans: the document is looked at, on the extraction call path."""

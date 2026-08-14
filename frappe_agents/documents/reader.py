@@ -65,9 +65,11 @@ MAX_CELL_CHARS = 500
 # for a thousand pages of work that the character cap will throw away anyway.
 MAX_UNITS = 100
 
-# Below this, a PDF's "text layer" is a few stray glyphs from a scanner and the
-# document has to be looked at instead of parsed.
-TEXT_LAYER_MIN_CHARS = 24
+# Below this, a PDF's "text layer" is the stray glyph a scanner leaves behind and
+# the document has to be looked at instead. Kept small on purpose: sending a page
+# that really does carry its own text to a model costs money and needs a profile
+# that can see files, so the doubt has to be genuine.
+TEXT_LAYER_MIN_CHARS = 8
 
 # A member of a docx or pptx is decompressed before it is parsed, so its own
 # declared size is checked first: a zip bomb is 40 KB on disk.
