@@ -22,8 +22,10 @@ import frappe
 import requests
 
 from frappe_agents.runner.providers import (
+	SSE_LINE_LIMIT,
 	STREAM_CONNECT_TIMEOUT,
 	STREAM_IDLE_TIMEOUT,
+	TOOL_ARGUMENTS_LIMIT,
 	ProviderError,
 	call_model_stream,
 	parse_anthropic_stream,
@@ -658,6 +660,114 @@ class TestAnthropicStream(AgentTestCase):
 		with self.assertRaises(ProviderError) as caught:
 			list(parse_anthropic_stream([body]))
 		self.assertIn("Overloaded", str(caught.exception))
+
+
+class TestStreamCeilings(AgentTestCase):
+	"""The two things a stream may not do: grow a line forever, or an argument.
+
+	Neither is a slow answer. A body that never ends a line and an endpoint that
+	never stops sending argument fragments both fill the worker's memory until it
+	dies, and a run that dies that way takes the queue with it. Both are refused
+	in words that name the bound, and refusing closes the connection because the
+	generator is what holds it open.
+	"""
+
+	def endless_line(self, pulled: list):
+		"""A body that opens a data line and never ends it. Counts what was pulled."""
+		chunk = b"data: " + b"x" * 64_000
+		while True:
+			pulled.append(len(chunk))
+			yield chunk
+
+	def test_a_line_that_never_ends_is_dropped_at_the_cap(self):
+		for label, parser in (("openai", parse_openai_stream), ("anthropic", parse_anthropic_stream)):
+			with self.subTest(label):
+				pulled: list[int] = []
+				with self.assertRaises(ProviderError) as caught:
+					list(parser(self.endless_line(pulled)))
+
+				self.assertIn(str(SSE_LINE_LIMIT), str(caught.exception))
+				# Bounded, not merely finite: the stream stops within one chunk of
+				# the cap rather than at whatever the body felt like sending.
+				self.assertLess(sum(pulled), SSE_LINE_LIMIT + 128_000)
+
+	def test_openai_arguments_stop_at_the_cap(self):
+		fragment = "x" * 32_000
+		frames = [
+			openai_frame(
+				{
+					"tool_calls": [
+						{
+							"index": 0,
+							"id": "call_a",
+							"function": {"name": "search_documents", "arguments": fragment},
+						}
+					]
+				}
+			)
+			for _ in range(TOOL_ARGUMENTS_LIMIT // len(fragment) + 2)
+		]
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_openai_stream([sse(*frames)]))
+
+		self.assertIn(str(TOOL_ARGUMENTS_LIMIT), str(caught.exception))
+		self.assertIn("search_documents", str(caught.exception))
+
+	def test_anthropic_arguments_stop_at_the_cap(self):
+		fragment = "x" * 32_000
+		frames = [
+			named_frame(
+				"content_block_start",
+				{
+					"type": "content_block_start",
+					"index": 0,
+					"content_block": {
+						"type": "tool_use",
+						"id": "toolu_1",
+						"name": "search_documents",
+						"input": {},
+					},
+				},
+			)
+		]
+		frames += [
+			named_frame(
+				"content_block_delta",
+				{
+					"type": "content_block_delta",
+					"index": 0,
+					"delta": {"type": "input_json_delta", "partial_json": fragment},
+				},
+			)
+			for _ in range(TOOL_ARGUMENTS_LIMIT // len(fragment) + 2)
+		]
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_anthropic_stream([sse(*frames)]))
+
+		self.assertIn(str(TOOL_ARGUMENTS_LIMIT), str(caught.exception))
+
+	def test_a_call_just_under_the_cap_is_still_assembled(self):
+		"""The cap is generous on purpose: a real argument object never nears it."""
+		arguments = json.dumps({"doctype": "Task", "filters": "y" * 1000})
+		body = sse(
+			openai_frame(
+				{
+					"tool_calls": [
+						{
+							"index": 0,
+							"id": "call_a",
+							"function": {"name": "search_documents", "arguments": arguments},
+						}
+					]
+				}
+			),
+			openai_frame({}, finish_reason="tool_calls"),
+		)
+
+		end = of_type(list(parse_openai_stream([body])), "toolcall_end")[0]
+		self.assertEqual(end["args"]["doctype"], "Task")
 
 
 class FakeStream:

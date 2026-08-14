@@ -81,6 +81,16 @@ STREAM_CONNECT_TIMEOUT = 20
 STREAM_IDLE_TIMEOUT = 60
 DONE_SENTINEL = "[DONE]"
 
+# What one SSE line may weigh before the stream is dropped. A frame that never
+# ends is not a slow answer, it is a body that would grow until the worker runs
+# out of memory, and the biggest legitimate frame — a whole tool-call argument
+# object — is orders of magnitude under this.
+SSE_LINE_LIMIT = 1024 * 1024
+# What one tool call's argument JSON may weigh, reassembled. Tools validate their
+# own arguments, so this is deliberately generous: it exists to stop an endpoint
+# streaming fragments forever, not to police what a model may ask for.
+TOOL_ARGUMENTS_LIMIT = 256 * 1024
+
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -173,6 +183,9 @@ def call_model(profile: Any, messages: list[dict], tool_schemas: list[dict] | No
 	"content": str, "tool_calls": [{"id", "name", "args"}], "tool_call_id": str}`.
 
 	Returns `{"text", "tool_calls", "tokens_in", "tokens_out"}`.
+
+	The chat path streams and calls `call_model_stream` instead; this is kept for
+	callers that want the answer whole.
 	"""
 	profile, provider, api_key = _resolve_profile(profile)
 
@@ -729,7 +742,7 @@ class _Blocks:
 
 		fragment = function.get("arguments")
 		if fragment:
-			state["arguments"] += fragment
+			_accumulate_arguments(state, fragment)
 			yield {"type": "toolcall_delta", "index": state["index"], "text": fragment}
 
 	# --- stated boundaries (Anthropic) ---
@@ -779,7 +792,7 @@ class _Blocks:
 			fragment = delta.get("partial_json") or ""
 			if state is None or not fragment:
 				return
-			state["arguments"] += fragment
+			_accumulate_arguments(state, fragment)
 			yield {"type": "toolcall_delta", "index": state["index"], "text": fragment}
 			return
 
@@ -870,6 +883,21 @@ class _Blocks:
 		return index
 
 
+def _accumulate_arguments(state: dict, fragment: str) -> None:
+	"""Add one argument fragment to the call it belongs to, up to the cap.
+
+	Both wire formats send a tool call's arguments as raw JSON fragments and
+	neither says how many are coming. An endpoint that never stops sending them
+	fails the run rather than filling the worker's memory.
+	"""
+	if len(state["arguments"]) + len(fragment) > TOOL_ARGUMENTS_LIMIT:
+		raise ProviderError(
+			f"The model stream sent more than {TOOL_ARGUMENTS_LIMIT} characters of arguments for "
+			f"one call to {state['name'] or 'a tool'} and was dropped."
+		)
+	state["arguments"] += fragment
+
+
 def _tool_end(state: dict) -> dict:
 	return {
 		"type": "toolcall_end",
@@ -889,6 +917,10 @@ def _sse_events(chunks: Iterable[bytes]) -> Iterator[tuple[str | None, str]]:
 	multi-byte character. Splitting the bytes on the line terminators first and
 	decoding each whole line afterwards makes both harmless — no UTF-8 sequence
 	contains a CR or an LF byte, so a line is never cut through a character.
+
+	The half-line held between chunks is bounded. A body that never sends a line
+	terminator would otherwise be accumulated until the worker died, so past
+	`SSE_LINE_LIMIT` the stream is dropped and the connection with it.
 	"""
 	buffer = b""
 	event: str | None = None
@@ -914,6 +946,11 @@ def _sse_events(chunks: Iterable[bytes]) -> Iterator[tuple[str | None, str]]:
 				yield from dispatch()
 				continue
 			event, data = _sse_field(line, event, data)
+		if len(buffer) > SSE_LINE_LIMIT:
+			raise ProviderError(
+				f"The model stream sent more than {SSE_LINE_LIMIT} bytes without ending a line "
+				"and was dropped."
+			)
 
 	if buffer:
 		line = buffer.rstrip(b"\r")
