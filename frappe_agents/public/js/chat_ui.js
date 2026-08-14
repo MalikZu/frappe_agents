@@ -1484,10 +1484,14 @@ frappe_agents.ChatUI = class ChatUI {
 		if (log) log.scrollTop = top_before + (log.scrollHeight - height_before);
 		this.restore_older_focus($drawn);
 
+		// A whole sentence per count: a translator cannot fix "1 earlier
+		// messages" from here.
 		this.announce(
-			runs.length
-				? __("{0} earlier messages loaded.", [runs.length])
-				: __("There are no earlier messages.")
+			runs.length === 1
+				? __("One earlier message loaded.")
+				: runs.length
+					? __("{0} earlier messages loaded.", [runs.length])
+					: __("There are no earlier messages.")
 		);
 	}
 
