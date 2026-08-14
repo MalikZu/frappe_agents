@@ -27,6 +27,29 @@ const STYLES = `
 	.agent-chat-doc.is-restricted { background: var(--control-bg); border-color: var(--border-color); color: var(--text-muted); }
 	.agent-chat-doc-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.agent-chat-doc svg { flex: none; }
+	/* The conversation's own files, under the header: what this chat is about,
+	   then what it is carrying. Scrolls sideways rather than growing downward —
+	   the transcript is what the height belongs to. */
+	.agent-chat-attachments {
+		display: none; flex-wrap: nowrap; align-items: center; gap: 6px;
+		padding-block: 6px; overflow-x: auto; border-bottom: 1px solid var(--border-color);
+	}
+	.agent-chat-attachments.is-filled { display: flex; }
+	.agent-chat-att {
+		flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 300px;
+		border: 1px solid var(--border-color); background: var(--control-bg);
+		border-radius: var(--border-radius-full, 999px); padding: 2px 4px; padding-inline-start: 10px;
+		font-size: var(--text-sm);
+	}
+	.agent-chat-att-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	/* The id is the thing the agent needs said back to it exactly, so it is set in
+	   mono and it is a button: one click puts it on the clipboard. */
+	.agent-chat-att-id {
+		flex: none; border: none; background: none; padding: 1px 6px; border-radius: var(--border-radius-full, 999px);
+		font-family: var(--font-stack-mono, monospace); font-size: var(--text-xs);
+		color: var(--text-muted); cursor: pointer;
+	}
+	.agent-chat-att-id:hover { background: var(--highlight-color); color: var(--text-color); }
 	.agent-chat-log { flex: 1; overflow-y: auto; padding: 8px 0; }
 	.agent-chat-sr {
 		position: absolute; width: 1px; height: 1px; overflow: hidden;
@@ -50,6 +73,8 @@ const STYLES = `
 	.agent-chat-file-drop:focus-visible,
 	.agent-chat-pop-opt:focus-visible,
 	.agent-chat-tool-head:focus-visible,
+	.agent-chat-att-link:focus-visible,
+	.agent-chat-att-id:focus-visible,
 	.agent-chat-copy:focus-visible,
 	.agent-chat-rich code.is-copyable:focus-visible,
 	.agent-chat-think-head:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
@@ -166,7 +191,7 @@ const STYLES = `
 	.agent-chat-rich code.is-copyable { cursor: pointer; }
 	.agent-chat-rich code.is-copyable:hover { background: var(--highlight-color); }
 	/* The confirmation: it went somewhere. Short, and the live region says it too. */
-	.agent-chat-copy.is-copied, .agent-chat-rich code.is-copied {
+	.agent-chat-copy.is-copied, .agent-chat-att-id.is-copied, .agent-chat-rich code.is-copied {
 		background: var(--bg-green, var(--control-bg)); color: var(--text-on-green, var(--text-color));
 	}
 	.agent-chat-rich > :first-child { margin-block-start: 0; }
@@ -536,6 +561,10 @@ frappe_agents.ChatUI = class ChatUI {
 		// Files uploaded for the next message. The upload itself is already on a
 		// record; this list is only what the message about to be sent will name.
 		this.uploads = [];
+		// Every file this conversation is carrying, whichever message named it.
+		// The server sends the lot on every page, so this is replaced rather than
+		// accumulated — except by an upload, which is added the moment it lands.
+		this.attachments = [];
 		// One card per extraction, redrawn in place as its status moves.
 		this.extractions = {};
 		// One card per proposal, so replaying a log cannot draw a second one.
@@ -548,6 +577,7 @@ frappe_agents.ChatUI = class ChatUI {
 		// accumulated for it, and the thinking strips open beside it.
 		this.streams = {};
 		this.update_busy();
+		this.render_attachments();
 	}
 
 	make() {
@@ -565,6 +595,7 @@ frappe_agents.ChatUI = class ChatUI {
 					<span class="agent-chat-title"></span>
 					<span class="agent-chat-context"></span>
 				</div>
+				<div class="agent-chat-attachments"></div>
 				<div class="agent-chat-log"></div>
 				<div class="agent-chat-sr" role="status"></div>
 				<div class="agent-chat-composer">
@@ -585,6 +616,7 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$head = this.$body.find(".agent-chat-head");
 		this.$title = this.$body.find(".agent-chat-title");
 		this.$context = this.$body.find(".agent-chat-context");
+		this.$attachments = this.$body.find(".agent-chat-attachments");
 		this.$log = this.$body.find(".agent-chat-log");
 		this.$sr = this.$body.find(".agent-chat-sr");
 		this.$input = this.$body.find(".agent-chat-input");
@@ -603,10 +635,14 @@ frappe_agents.ChatUI = class ChatUI {
 		// An icon on its own says nothing to a screen reader, so the hint is its name.
 		this.$attach.attr({ title: this.attach_hint(), "aria-label": this.attach_hint() });
 		this.$attach.append(clip_icon());
+		// A strip of links needs saying what it is a strip of, once, rather than
+		// leaving a reader to work it out from the file names.
+		this.$attachments.attr({ role: "group", "aria-label": __("Files in this conversation") });
 		this.$send.text(__("Send"));
 		this.render_head();
 		this.render_chips();
 		this.render_files();
+		this.render_attachments();
 	}
 
 	bind() {
@@ -1143,6 +1179,54 @@ frappe_agents.ChatUI = class ChatUI {
 		if (this.uploads.some((file) => file.name === file_doc.name)) return;
 		this.uploads.push({ name: file_doc.name, file_name: file_doc.file_name || file_doc.name });
 		this.render_files();
+		// The strip is the conversation's files, and one of them has just arrived.
+		// Added here rather than waited for: the next reload would say the same
+		// thing, and nobody should have to reload to see what they just uploaded.
+		if (!this.attachments.some((file) => file.name === file_doc.name)) {
+			this.attachments.push({
+				name: file_doc.name,
+				file_name: file_doc.file_name || file_doc.name,
+				file_url: file_doc.file_url || "",
+				is_private: Boolean(file_doc.is_private),
+			});
+			this.render_attachments();
+		}
+	}
+
+	/**
+	 * The files this conversation is carrying: one chip each, name and id.
+	 *
+	 * They were only ever visible as a line of text inside the message that named
+	 * them, which a reload buries and a long conversation loses altogether. The
+	 * file is attached to the conversation and is never deleted, so the strip says
+	 * so — the name opens it, the id is what a tool takes and is one click to copy.
+	 *
+	 * The link is a plain href. A private file is served by frappe's own
+	 * /private/files route, which asks the permission question again on the way
+	 * through; nothing here is trusted to have asked it.
+	 */
+	render_attachments() {
+		if (!this.$attachments) return;
+		const files = this.attachments || [];
+		this.$attachments.empty().toggleClass("is-filled", files.length > 0);
+
+		files.forEach((file) => {
+			const label = file.file_name || file.name;
+			const $chip = $("<span class='agent-chat-att'></span>").appendTo(this.$attachments);
+			$("<a class='agent-chat-att-link'></a>")
+				.attr({
+					href: file.file_url || `/app/file/${encodeURIComponent(file.name)}`,
+					target: "_blank",
+					rel: "noopener noreferrer",
+					title: label,
+				})
+				.text(label)
+				.appendTo($chip);
+			const $id = $("<button type='button' class='agent-chat-att-id'></button>")
+				.text(file.name)
+				.appendTo($chip);
+			this.copies($id, file.name, __("Copy the File id for {0}", [label]));
+		});
 	}
 
 	/**
@@ -1269,7 +1353,9 @@ frappe_agents.ChatUI = class ChatUI {
 		// The server has just re-checked who may see this document, so its answer
 		// replaces whatever this surface was carrying.
 		this.context = data.context || this.seed_context();
+		this.attachments = data.attachments || [];
 		this.render_head();
+		this.render_attachments();
 		this.render_chips();
 		this.refresh_composer();
 
