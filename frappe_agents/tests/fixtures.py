@@ -1612,6 +1612,14 @@ def _ensure_tools() -> None:
 
 
 def _ensure_provider() -> None:
+	"""The one provider the tests point at, on a port nothing listens on.
+
+	`self_hosted` is true and truthfully so: `http://localhost:1` is exactly the
+	destination the endpoint check refuses for a provider somebody else runs, and
+	the fixture is a host we run — or would, if anything were listening. Without
+	the flag every runner test would fail on the check rather than on the fake it
+	is actually about.
+	"""
 	if not frappe.db.exists("LLM Provider", PROVIDER):
 		frappe.get_doc(
 			{
@@ -1619,12 +1627,17 @@ def _ensure_provider() -> None:
 				"provider_name": PROVIDER,
 				"provider_type": "OpenAI Compatible",
 				"base_url": "http://localhost:1/v1",
+				"self_hosted": 1,
 				"api_key": "fa-test-key",
 				"enabled": 1,
 			}
 		).insert(ignore_permissions=True)
 	else:
 		_ensure_enabled("LLM Provider", PROVIDER)
+		# A provider row from before the flag existed, or one a test moved.
+		if not cint(frappe.db.get_value("LLM Provider", PROVIDER, "self_hosted")):
+			frappe.db.set_value("LLM Provider", PROVIDER, "self_hosted", 1, update_modified=False)
+			frappe.clear_document_cache("LLM Provider", PROVIDER)
 
 	if not frappe.db.exists("LLM Model Profile", PROFILE):
 		frappe.get_doc(

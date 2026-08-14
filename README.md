@@ -61,6 +61,13 @@ Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
 Agent Auditor) and registers the built-in tools. Then, in the Desk: create an
 LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
 
+A provider's **Base URL** is the host that receives your prompts and your API
+key, so it must be an `https://` address on the public internet. To point at a
+model you run yourself — Ollama on the same box, something on your own
+network — tick **Self Hosted** on the provider. That checkbox is what allows
+`http://` and addresses like `localhost` or `10.x`, and it is checked again
+before every request. Redirects are never followed.
+
 ## Docs
 
 - [Agent Chat](docs/chat.md) — conversations, the composer chips, and the
