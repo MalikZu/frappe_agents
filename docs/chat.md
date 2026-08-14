@@ -65,10 +65,11 @@ thought, every tool it called, everything it said, and any approval still
 waiting. It comes from what the run recorded, so it survives a reload and a
 different browser.
 
-A document the agent had read comes back too, as the card it always was, in the
-state the reading is in now — waiting for your review, accepted, or still being
-read. That card is a record, not a message: switching conversations while a
-document is being read no longer loses it.
+A document the agent was asked to turn into a draft comes back too, as the card
+it always was, in the state that extraction is in now — waiting for your review,
+accepted, or still being read. The card is drawn from the extraction record, not
+from the message: switching conversations while a document is being read no
+longer loses it.
 
 A run that is still going has not recorded anything yet — it writes its history
 when it ends. Until then the page remembers it for you, so switching to another
