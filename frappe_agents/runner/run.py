@@ -92,6 +92,21 @@ HISTORY_LIMIT = 20
 ERROR_LIMIT = 500
 TOOL_RESULT_LIMIT = 20_000
 
+# What a profile's context limit is worth in characters, and how much of it the
+# transcript may take.
+#
+# The limit is in tokens and nothing here tokenizes: a tokenizer per provider is
+# a dependency and a wrong answer for every model it was not written for. Three
+# characters to a token is the pessimistic end of the usual four, so the estimate
+# reads high and the mistake it makes is dropping a turn that would have fitted —
+# not sending a prompt the provider refuses after the run has done its work.
+#
+# Half the window, because the transcript is not all of it: the model still has
+# to write an answer, and this turn's tool results are appended to the messages
+# before they go back for the next call.
+CONTEXT_CHARS_PER_TOKEN = 3
+CONTEXT_PROMPT_SHARE = 0.5
+
 KILL_SWITCH_MESSAGE = "The agent runtime is switched off."
 # A turn that ended in one of these produced no answer — the loop wrote the
 # message itself to say why it stopped.
@@ -283,11 +298,13 @@ async def _drive(
 		ok = outcomes.pop(call.id, None)
 		return result, is_error if ok is None else not ok
 
+	system = build_system_prompt(agent, run)
+
 	async for event in run_agent_loop(
 		provider=provider,
 		model=profile,
-		system=build_system_prompt(agent, run),
-		messages=_build_messages(profile, run),
+		system=system,
+		messages=_build_messages(profile, run, system),
 		tools=tools,
 		max_turns=max_turns,
 		signal=cancellation,
@@ -699,21 +716,88 @@ def _focal_document(run: Any) -> str:
 	)
 
 
-def _build_messages(profile: str, run: Any) -> list[AgentMessage]:
+def _build_messages(profile: str, run: Any, system: str = "") -> list[AgentMessage]:
 	"""The transcript the model reads: this conversation, oldest turn first.
 
 	The system prompt is not in here. It is passed to the loop separately and put
 	back at the head of the list on its way to the provider, so what goes over
-	the wire is what has always gone over the wire.
+	the wire is what has always gone over the wire. It is passed in all the same,
+	because it takes up room in the model's window and the history has to fit
+	around it.
 	"""
+	history, dropped = _fitted_history(profile, run, system)
+
 	messages: list[AgentMessage] = []
-	for prior in _history(run):
+	for prior in history:
 		if prior.get("input_message"):
 			messages.append(UserMessage(content=prior["input_message"]))
 		if prior.get("output_message"):
 			messages.append(AssistantMessage(model=profile, content=prior["output_message"]))
 	messages.append(UserMessage(content=run.input_message or ""))
+
+	if dropped:
+		_record_truncation(run)
 	return messages
+
+
+def _fitted_history(profile: str, run: Any, system: str) -> tuple[list[dict], int]:
+	"""The prior turns that fit the model's window, newest kept, and how many did not.
+
+	Oldest first goes, one whole turn at a time: half a turn is a question with no
+	answer or an answer to nothing. What is never dropped is the message this run
+	was started with — a run that sends no question is not a shorter run, it is a
+	broken one.
+	"""
+	rows = _history(run)
+	budget = _prompt_budget(profile)
+	if budget is None:
+		return rows, 0
+
+	# What cannot be dropped is spent first: the prompt and this turn's question.
+	room = budget - len(system or "") - len(run.input_message or "")
+
+	kept: list[dict] = []
+	used = 0
+	for prior in reversed(rows):
+		cost = len(prior.get("input_message") or "") + len(prior.get("output_message") or "")
+		if used + cost > room:
+			break
+		used += cost
+		kept.append(prior)
+
+	kept.reverse()
+	return kept, len(rows) - len(kept)
+
+
+def _prompt_budget(profile: str) -> int | None:
+	"""How many characters of prompt this profile's window has room for.
+
+	`None` when the profile names no limit, which is the state every profile was
+	in before this: the history cap alone decides what is sent.
+	"""
+	limit = 0
+	if profile:
+		try:
+			limit = cint(frappe.get_cached_value("LLM Model Profile", profile, "context_limit"))
+		except Exception:
+			limit = 0
+	if limit <= 0:
+		return None
+	return int(limit * CONTEXT_PROMPT_SHARE) * CONTEXT_CHARS_PER_TOKEN
+
+
+def _record_truncation(run: Any) -> None:
+	"""Say on the run that it was sent less than the whole conversation.
+
+	A person reading a run where the model did not know something said earlier
+	has to be able to tell a model that forgot from a conversation that was cut.
+	"""
+	try:
+		_update(run, {"history_truncated": 1})
+	except Exception:
+		frappe.logger("frappe_agents").error(
+			f"could not record history truncation on run {run.name}", exc_info=True
+		)
 
 
 def _history(run: Any) -> list[dict]:
