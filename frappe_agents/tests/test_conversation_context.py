@@ -20,6 +20,7 @@ import frappe
 from frappe_agents.api import get_conversation, start_run
 from frappe_agents.tests.fixtures import (
 	AGENT,
+	ALPHA_SECRET,
 	AUDITOR_USER,
 	DRAFT_USER,
 	ORDER_DT,
@@ -72,6 +73,18 @@ class TestConversationContext(AgentTestCase):
 		self.assertEqual(payload["context"], {"restricted": 1})
 		# Not the name, not the doctype, not the title — anywhere in the answer.
 		self.assertNotIn(TICKET_ALPHA, frappe.as_json(payload["context"]))
+
+	def test_the_restricted_answer_holds_nothing_but_the_fact_of_a_document(self):
+		"""One key and one key only. A doctype names a kind of record, which is
+		already more than someone who may not read it is owed."""
+		started = self.seed(context_doctype=TICKET_DT, context_name=TICKET_ALPHA)
+
+		context = self.read(started["conversation"], user=AUDITOR_USER)["context"]
+
+		self.assertEqual(set(context), {"restricted"})
+		blob = frappe.as_json(context)
+		for leaked in (TICKET_DT, TICKET_ALPHA, ALPHA_SECRET):
+			self.assertNotIn(leaked, blob)
 
 	def test_a_document_that_is_gone_leaves_no_chip(self):
 		order = make_order_draft(user=DRAFT_USER)

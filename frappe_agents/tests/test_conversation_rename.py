@@ -60,3 +60,21 @@ class TestConversationRename(AgentTestCase):
 				rename_conversation(conversation.name, "Mine now")
 
 		self.assertEqual(frappe.db.get_value("Agent Conversation", conversation.name, "title"), "Theirs")
+
+	def test_holding_write_on_the_row_is_not_owning_the_conversation(self):
+		"""The doctype grants write to whoever created the row. Whose conversation it
+		is, though, is the `user` field — and that is the one that decides."""
+		conversation = make_conversation(OPEN_USER, title="Theirs")
+		frappe.db.set_value(
+			"Agent Conversation", conversation.name, "owner", RESTRICTED_USER, update_modified=False
+		)
+
+		with as_user(RESTRICTED_USER):
+			self.assertTrue(
+				frappe.has_permission("Agent Conversation", "write", doc=conversation.name),
+				"the fixture no longer reaches the second check",
+			)
+			with self.assertRaises(frappe.PermissionError):
+				rename_conversation(conversation.name, "Mine now")
+
+		self.assertEqual(frappe.db.get_value("Agent Conversation", conversation.name, "title"), "Theirs")
