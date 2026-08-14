@@ -18,6 +18,11 @@ from here: an approval record links back to the run that asked for it.
 
 ## The composer
 
+The paperclip attaches a file. It is uploaded privately and kept on the
+conversation — or on the document, when the chat was opened from a form — and
+the message you send names it, so the agent knows what it was handed. See
+[Files in chat](files-in-chat.md).
+
 Three chips sit next to the message box.
 
 **The agent.** Click it to talk to a different agent. That starts a new
