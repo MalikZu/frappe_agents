@@ -37,6 +37,11 @@ have to come from different people:
 * `WEAK_APPROVER` holds Agent Approver and read alone. An approver who may not
   submit the document may not cause it to be submitted either, and that user is
   how the tests say so.
+* `BLIND_APPROVER` holds Agent Approver *and* submit, and a User Permission pins
+  them to `PROJECT_BETA` — so every order the tests propose, which is on
+  `PROJECT_ALPHA`, is a document they may not read. That is the other boundary:
+  being able to submit is not being able to approve, because an approval is a
+  person saying they read the record.
 
 None of them is Administrator, deliberately: `frappe.get_roles("Administrator")`
 returns every role on the site and `has_permission` short-circuits to True for
@@ -147,6 +152,7 @@ DRAFT_USER = "fa-drafter@example.com"
 SECOND_DRAFTER = "fa-drafter-two@example.com"
 APPROVER_USER = "fa-order-approver@example.com"
 WEAK_APPROVER = "fa-weak-approver@example.com"
+BLIND_APPROVER = "fa-blind-approver@example.com"
 AUDITOR_USER = "fa-auditor@example.com"
 BLIND_DRAFTER = "fa-blind-drafter@example.com"
 
@@ -1424,6 +1430,9 @@ def _ensure_users() -> None:
 	# Agent Approver, and read on the order — nothing more. Being allowed to decide
 	# a proposal is not being allowed to submit the document it is about.
 	_make_user(WEAK_APPROVER, "Weak Approver", ["Agent User", APPROVER_ROLE, READER_ROLE])
+	# May submit an order and may not read the ones the tests propose: the User
+	# Permission below pins them to the other project.
+	_make_user(BLIND_APPROVER, "Blind Approver", ["Agent User", APPROVER_ROLE, SUBMITTER_ROLE])
 	_make_user(AUDITOR_USER, "Auditor", ["Agent User", AUDITOR_ROLE])
 
 
@@ -1549,21 +1558,28 @@ def _order_doc(title: str) -> Any:
 
 
 def _ensure_user_permission() -> None:
-	existing = frappe.db.exists(
-		"User Permission",
-		{"user": RESTRICTED_USER, "allow": PROJECT_DT, "for_value": PROJECT_ALPHA},
-	)
-	if not existing:
-		frappe.get_doc(
-			{
-				"doctype": "User Permission",
-				"user": RESTRICTED_USER,
-				"allow": PROJECT_DT,
-				"for_value": PROJECT_ALPHA,
-				"apply_to_all_doctypes": 1,
-			}
-		).insert(ignore_permissions=True)
-	frappe.clear_cache(user=RESTRICTED_USER)
+	"""Pin two users to one project each: one to Alpha, one to Beta.
+
+	`RESTRICTED_USER` sees Alpha, which is where the fixture records live.
+	`BLIND_APPROVER` sees Beta, which is where nothing the tests propose lives —
+	so a document-level read denial is available without taking a role away.
+	"""
+	for user, project in ((RESTRICTED_USER, PROJECT_ALPHA), (BLIND_APPROVER, PROJECT_BETA)):
+		existing = frappe.db.exists(
+			"User Permission",
+			{"user": user, "allow": PROJECT_DT, "for_value": project},
+		)
+		if not existing:
+			frappe.get_doc(
+				{
+					"doctype": "User Permission",
+					"user": user,
+					"allow": PROJECT_DT,
+					"for_value": project,
+					"apply_to_all_doctypes": 1,
+				}
+			).insert(ignore_permissions=True)
+		frappe.clear_cache(user=user)
 
 
 def _ensure_tools() -> None:
