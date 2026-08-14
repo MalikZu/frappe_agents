@@ -142,6 +142,33 @@ const STYLES = `
 	.agent-chat-row:not(.is-user) .agent-chat-bubble { max-width: min(78%, 68ch); }
 	.agent-chat-row.is-user .agent-chat-bubble { background: var(--bg-light-gray, var(--control-bg)); }
 	.agent-chat-row.is-error .agent-chat-bubble { background: var(--bg-red, var(--control-bg)); color: var(--text-on-red, var(--text-color)); }
+	/* Rendered markdown: block layout does the spacing, so pre-wrap must not. */
+	.agent-chat-bubble.agent-chat-rich { white-space: normal; }
+	.agent-chat-rich > :first-child { margin-block-start: 0; }
+	.agent-chat-rich > :last-child { margin-block-end: 0; }
+	.agent-chat-rich h1, .agent-chat-rich h2, .agent-chat-rich h3,
+	.agent-chat-rich h4, .agent-chat-rich h5, .agent-chat-rich h6 {
+		font-size: var(--text-base); font-weight: 600; margin-block: 0.8em 0.3em; line-height: 1.4;
+	}
+	.agent-chat-rich p { margin-block: 0.45em; }
+	.agent-chat-rich ul, .agent-chat-rich ol { margin-block: 0.45em; padding-inline-start: 1.4em; }
+	.agent-chat-rich li { margin-block: 0.15em; }
+	.agent-chat-rich code {
+		font-family: var(--font-stack-mono, monospace); font-size: 0.9em;
+		background: var(--card-bg); border-radius: var(--border-radius-tiny); padding: 0.1em 0.35em;
+	}
+	.agent-chat-rich pre {
+		background: var(--card-bg); border-radius: var(--border-radius-sm);
+		padding: 8px 10px; margin-block: 0.5em; overflow-x: auto;
+	}
+	.agent-chat-rich pre code { background: none; padding: 0; }
+	.agent-chat-rich blockquote {
+		margin: 0.5em 0; padding-inline-start: 10px;
+		border-inline-start: 3px solid var(--border-color); color: var(--text-muted);
+	}
+	.agent-chat-rich table { border-collapse: collapse; margin-block: 0.5em; max-width: 100%; display: block; overflow-x: auto; }
+	.agent-chat-rich th, .agent-chat-rich td { border: 1px solid var(--border-color); padding: 3px 8px; font-size: var(--text-sm); }
+	.agent-chat-rich hr { border: 0; border-block-start: 1px solid var(--border-color); margin-block: 0.7em; }
 	.agent-chat-tool { margin-block: 2px 8px; margin-inline: 2px 0; }
 	.agent-chat-tool-head {
 		display: inline-flex; align-items: flex-start; gap: 6px; max-width: 100%;
@@ -1201,7 +1228,7 @@ frappe_agents.ChatUI = class ChatUI {
 			// Already on screen when the log carried it, which it does for every
 			// run that recorded one.
 			if (run.output_message !== said) {
-				this.$log.append(this.make_bubble(run.output_message, ""));
+				this.$log.append(this.make_bubble(run.output_message, "", true));
 			}
 		} else if (run.error) {
 			this.$log.append(this.make_bubble(run.error, "is-error"));
@@ -1305,7 +1332,7 @@ frappe_agents.ChatUI = class ChatUI {
 		const text = message_text(message);
 		if (text) {
 			this.clear_empty();
-			this.insert_before_pending(run, this.make_bubble(text, ""));
+			this.insert_before_pending(run, this.make_bubble(text, "", true));
 		}
 		return text;
 	}
@@ -1607,6 +1634,7 @@ frappe_agents.ChatUI = class ChatUI {
 		const text = message_text(message);
 		if (text) {
 			this.write_stream_text(run, state, text);
+			if (state.$bubble) this.render_rich(state.$bubble, text);
 			state.said = text;
 			this.announce(__("The agent replied."));
 		} else if (state.$row) {
@@ -1967,7 +1995,7 @@ frappe_agents.ChatUI = class ChatUI {
 		const streamed = Boolean(state && text && state.said === text);
 		if (text && !streamed) {
 			this.clear_empty();
-			this.insert_before_pending(data.run, this.make_bubble(text, ""));
+			this.insert_before_pending(data.run, this.make_bubble(text, "", true));
 		}
 		const $pending = this.pending[data.run];
 		if ($pending) {
@@ -1990,10 +2018,57 @@ frappe_agents.ChatUI = class ChatUI {
 		this.update_busy();
 	}
 
-	make_bubble(text, cls) {
+	make_bubble(text, cls, as_markdown) {
 		const $row = $(`<div class='agent-chat-row ${cls}'></div>`);
-		$("<div class='agent-chat-bubble'></div>").text(text).appendTo($row);
+		const $bubble = $("<div class='agent-chat-bubble'></div>").appendTo($row);
+		if (as_markdown) this.render_rich($bubble, text);
+		else $bubble.text(text);
 		return $row;
+	}
+
+	/**
+	 * The agent writes markdown; show it as markdown — after sanitizing.
+	 *
+	 * The text is model output, which untrusted document content can steer, so
+	 * the rendered HTML is stripped hard: no scripts, no media, no forms, no
+	 * attributes beyond a safe href. Images are dropped on purpose — an <img>
+	 * in a transcript is an outbound request to a URL the content chose.
+	 * While an answer is still streaming it stays plain text; the swap to rich
+	 * rendering happens once, on the final message.
+	 */
+	render_rich($el, text) {
+		if (!text || typeof frappe === "undefined" || !frappe.markdown) {
+			$el.text(text || "");
+			return;
+		}
+		let html;
+		try {
+			html = frappe.markdown(text);
+		} catch (e) {
+			$el.text(text);
+			return;
+		}
+		$el.addClass("agent-chat-rich");
+		const doc = new DOMParser().parseFromString(html, "text/html");
+		const drop = new Set([
+			"SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK", "META", "BASE",
+			"FORM", "INPUT", "BUTTON", "SELECT", "TEXTAREA", "SVG", "IMG", "VIDEO", "AUDIO",
+		]);
+		doc.body.querySelectorAll("*").forEach((node) => {
+			if (drop.has(node.tagName)) {
+				node.remove();
+				return;
+			}
+			[...node.attributes].forEach((attr) => {
+				if (attr.name.toLowerCase() === "href" && /^(https?:\/\/|\/|#)/i.test(attr.value.trim())) return;
+				node.removeAttribute(attr.name);
+			});
+			if (node.tagName === "A" && node.getAttribute("href")) {
+				node.setAttribute("target", "_blank");
+				node.setAttribute("rel", "noopener noreferrer");
+			}
+		});
+		$el.empty().append([...doc.body.childNodes]);
 	}
 
 	add_bubble(text, cls) {
