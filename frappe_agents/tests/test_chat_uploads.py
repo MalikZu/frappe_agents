@@ -26,10 +26,13 @@ from frappe.handler import check_write_permission
 from frappe_agents.api import start_conversation, start_run
 from frappe_agents.tests.fixtures import (
 	AGENT,
+	AUDITOR_USER,
 	DRAFT_AGENT,
 	DRAFT_USER,
 	ORDER_DT,
 	PROFILE,
+	PROJECT_ALPHA,
+	PROJECT_DT,
 	RESTRICTED_USER,
 	SECOND_DRAFTER,
 	VAULT_DT,
@@ -247,6 +250,43 @@ class TestChatUploads(AgentTestCase):
 		self.assertFalse(payload["ok"])
 		self.assertFalse(frappe.db.exists("Document Extraction", {"source_file": file.name}))
 
+	def test_no_way_of_naming_it_gets_another_user_to_a_file_on_my_conversation(self):
+		"""The reference forms are sugar; the conversation read is the gate under all of them.
+
+		One user opens a chat and uploads. The other names that file every way the
+		resolver accepts — the record, the link, the filename — and is refused each
+		time, because the only thing any of them ends at is a File on a conversation
+		they cannot read.
+		"""
+		with as_user(DRAFT_USER):
+			conversation = start_conversation(agent=DRAFT_AGENT)["conversation"]
+		file = attach_pdf(conversation, DRAFT_USER, f"fa-private-{frappe.generate_hash(length=6)}.pdf")
+
+		with as_user(SECOND_DRAFTER):
+			self.assertFalse(frappe.has_permission(CONVERSATION, "read", doc=conversation))
+
+		for ref in (file.name, file.file_url, file.file_name):
+			with self.subTest(ref=ref):
+				payload = extract(SECOND_DRAFTER, ref)
+				self.assertFalse(payload["ok"])
+
+		self.assertFalse(frappe.db.exists("Document Extraction", {"source_file": file.name}))
+
+	def test_an_auditor_who_reads_the_conversation_reads_what_was_uploaded_to_it(self):
+		"""What the anchor costs, said out loud rather than assumed.
+
+		Agent Auditor reads every conversation, so it reads the files on them. That is
+		the same reach the transcript already had, and it is why the conversation is
+		only the anchor when there is no document to use instead.
+		"""
+		with as_user(DRAFT_USER):
+			conversation = start_conversation(agent=DRAFT_AGENT)["conversation"]
+		file = attach_pdf(conversation, DRAFT_USER, f"fa-audited-{frappe.generate_hash(length=6)}.pdf")
+
+		with as_user(AUDITOR_USER):
+			self.assertTrue(frappe.has_permission(CONVERSATION, "read", doc=conversation))
+			self.assertTrue(frappe.has_permission("File", "read", doc=file.name))
+
 
 class TestFormPanelUploads(AgentTestCase):
 	"""A chat opened on a document anchors what is uploaded to that document.
@@ -277,6 +317,19 @@ class TestFormPanelUploads(AgentTestCase):
 		"""Nobody in the cast may touch the vault, so no chat may put a file on it."""
 		with as_user(DRAFT_USER), self.assertRaises(frappe.PermissionError):
 			check_write_permission(VAULT_DT, VAULT_RECORD)
+
+	def test_a_document_this_user_may_only_read_is_not_an_anchor_either(self):
+		"""The panel names the anchor, and the server decides whether it is one.
+
+		Which record an upload lands on is a choice the browser makes, so the check
+		that matters is the one frappe's upload endpoint makes afterwards — and it
+		asks for write. Being able to read a document is not being able to hang
+		something off it.
+		"""
+		with as_user(DRAFT_USER):
+			self.assertTrue(frappe.has_permission(PROJECT_DT, "read", doc=PROJECT_ALPHA))
+			with self.assertRaises(frappe.PermissionError):
+				check_write_permission(PROJECT_DT, PROJECT_ALPHA)
 
 	def test_the_document_anchor_is_shared_with_everyone_who_reads_the_document(self):
 		"""Why the open document is the better anchor: the file inherits its readers."""
