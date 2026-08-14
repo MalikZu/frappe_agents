@@ -440,7 +440,12 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$pop = this.$body.find(".agent-chat-pop");
 		this.$send = this.$body.find(".agent-chat-send");
 
-		this.$input.attr("placeholder", __("Ask the agent something…"));
+		// The placeholder is an example and it leaves as soon as you type, so the
+		// name is its own attribute — this is the field the screen is built around.
+		this.$input.attr({
+			placeholder: __("Ask the agent something…"),
+			"aria-label": __("Message the agent"),
+		});
 		// An icon on its own says nothing to a screen reader, so the hint is its name.
 		this.$attach.attr({ title: this.attach_hint(), "aria-label": this.attach_hint() });
 		this.$attach.append(clip_icon());
