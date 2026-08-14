@@ -179,6 +179,7 @@ READ_TOOL_NAMES = (
 )
 DRAFT_TOOL_NAMES = (
 	"create_draft",
+	"create_drafts",
 	"update_draft",
 	"propose_submit",
 	"propose_cancel",
