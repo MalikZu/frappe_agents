@@ -41,6 +41,31 @@ one-line description and whether it reads, drafts, writes or submits. It is a
 list, not a switch. Granting and scoping happen on the Agent form, where changes
 are versioned.
 
+## Watching the agent work
+
+The answer appears a few words at a time, as the model writes it. Under it sit
+the tool calls, one line each — click a line to see the arguments it ran with.
+The log follows the text down the page, unless you have scrolled up to read
+something earlier; then it stays where you put it.
+
+Some models think before they answer. That shows as a strip above the answer:
+open and running while it thinks, then folded into one line — **Thought for 4s**
+— the moment it stops. Click the line to read it. The thinking is not the
+answer, and it is never what the conversation is stored with.
+
+## Coming back to a conversation
+
+A conversation you reopen is drawn again in full: what you asked, what the agent
+thought, every tool it called, everything it said, and any approval still
+waiting. It comes from what the run recorded, so it survives a reload and a
+different browser.
+
+A run that is still going has not recorded anything yet — it writes its history
+when it ends. Until then the page remembers it for you, so switching to another
+conversation and back picks the run up where it was and carries on live.
+Reloading the page in the middle of a run loses that much; the answer lands on
+the run either way, and the conversation shows it all once the run ends.
+
 ## The document a conversation is about
 
 A chat opened from a form is about that document, and says so in a chip beside
