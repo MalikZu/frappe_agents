@@ -995,20 +995,41 @@ frappe_agents.ChatUI = class ChatUI {
 			if (run.output_message !== said) {
 				this.$log.append(this.make_bubble(run.output_message, ""));
 			}
-			return;
-		}
-		if (run.error) {
+		} else if (run.error) {
 			this.$log.append(this.make_bubble(run.error, "is-error"));
-			return;
-		}
-		// Still in flight: keep a pending line so realtime updates land in place.
-		if (["Queued", "Running"].includes(run.status)) {
+		} else if (["Queued", "Running"].includes(run.status)) {
+			// Still in flight: keep a pending line so realtime updates land in place.
 			const $pending = $("<div class='agent-chat-status'></div>")
 				.text(`${__(run.status)}…`)
 				.attr("data-run", run.name);
 			this.$log.append($pending);
 			this.pending[run.name] = $pending;
 		}
+
+		this.replay_extractions(run);
+	}
+
+	/**
+	 * The cards for the documents this run had read, in the state they are in now.
+	 *
+	 * Extraction is its own job on its own record: it finishes after the run that
+	 * asked for it, so nothing in the run's log says how it ended and the card
+	 * used to live in this browser and nowhere else. The server answers that
+	 * question instead, and it answers it fresh — a card redrawn here says what
+	 * the extraction says today, not what it said when the run stopped.
+	 *
+	 * Last, so a card sits under the answer the way it does when it arrives live.
+	 */
+	replay_extractions(run) {
+		(run.extractions || []).forEach((extraction) => {
+			if (!extraction || !extraction.name) return;
+			this.render_extraction_update(extraction.name, {
+				run: run.name,
+				status: extraction.status,
+				target_doctype: extraction.target_doctype,
+				created_doc: extraction.created_doc,
+			});
+		});
 	}
 
 	/**
@@ -1579,6 +1600,14 @@ frappe_agents.ChatUI = class ChatUI {
 				.appendTo($card);
 		} else if (data.file_name) {
 			$("<div class='agent-chat-action-target'></div>").text(data.file_name).appendTo($card);
+		}
+
+		if (data.created_doc) {
+			// Named, not linked: the review form is the way into an extraction, and
+			// it is one click away at the bottom of this card.
+			$("<div class='agent-chat-action-line'></div>")
+				.text(__("Draft: {0}", [data.created_doc]))
+				.appendTo($card);
 		}
 
 		const sensitive = Array.isArray(data.sensitive_fields)
