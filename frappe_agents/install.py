@@ -35,6 +35,11 @@ def create_roles() -> None:
 		role.insert(ignore_permissions=True)
 
 
+SIDEBAR_NAME = "Frappe Agents"
+# The section the agent, its access and the things it is made of live under. The
+# sidebar patch appends into it and needs to find it by the name shipped here.
+BUILD_SECTION = "Build"
+
 SIDEBAR = (
 	("Link", "Home", "Workspace", "Frappe Agents", "home", 0),
 	("Link", "Agent Chat", "Page", "agent-chat", "messages-square", 0),
@@ -42,7 +47,7 @@ SIDEBAR = (
 	("Link", "Pending Actions", "DocType", "Agent Action", None, 1),
 	("Link", "Needs Review", "DocType", "Document Extraction", None, 1),
 	("Link", "Review Quality", "Report", "Agent Action Review Quality", None, 1),
-	("Section Break", "Build", None, None, "bot", 0),
+	("Section Break", BUILD_SECTION, None, None, "bot", 0),
 	("Link", "Agents", "DocType", "Agent", None, 1),
 	("Link", "Access Profiles", "DocType", "Agent Access Profile", None, 1),
 	("Link", "Blueprints", "DocType", "Agent Blueprint", None, 1),
@@ -65,10 +70,10 @@ def build_workspace_sidebar():
 	time someone opens the workspace, so building here, at install time, wins
 	the race — and an existing sidebar is the user's to keep, never stomped.
 	"""
-	if frappe.db.exists("Workspace Sidebar", "Frappe Agents"):
+	if frappe.db.exists("Workspace Sidebar", SIDEBAR_NAME):
 		return
 	doc = frappe.new_doc("Workspace Sidebar")
-	doc.name = "Frappe Agents"
+	doc.name = SIDEBAR_NAME
 	for type_, label, link_type, link_to, icon, child in SIDEBAR:
 		row = {"type": type_, "label": label, "child": child, "collapsible": 1}
 		if type_ == "Section Break":
@@ -79,4 +84,4 @@ def build_workspace_sidebar():
 				row["icon"] = icon
 		doc.append("items", row)
 	doc.flags.ignore_permissions = True
-	doc.insert(ignore_permissions=True, set_name="Frappe Agents")
+	doc.insert(ignore_permissions=True, set_name=SIDEBAR_NAME)

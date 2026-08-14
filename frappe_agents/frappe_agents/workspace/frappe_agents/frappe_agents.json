@@ -17,7 +17,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Agent Setup",
-   "link_count": 4,
+   "link_count": 6,
    "onboard": 0,
    "type": "Card Break"
   },
@@ -31,6 +31,28 @@
    "onboard": 0,
    "type": "Link",
    "icon": "bot"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Access Profile",
+   "link_count": 0,
+   "link_to": "Agent Access Profile",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link",
+   "icon": "lock"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Blueprint",
+   "link_count": 0,
+   "link_to": "Agent Blueprint",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link",
+   "icon": "file-text"
   },
   {
    "hidden": 0,
