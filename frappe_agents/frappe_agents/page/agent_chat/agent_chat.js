@@ -32,10 +32,13 @@ const RAIL_STYLES = `
 	.agent-chat-convo-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
 	.agent-chat-convo {
 		flex: 1; min-width: 0; padding: 6px 8px; text-align: start; font: inherit; color: inherit;
-		background: none; border: none; border-radius: var(--border-radius-md, 6px); cursor: pointer;
+		background: none; border-radius: var(--border-radius-md, 6px); cursor: pointer;
+		/* Carried by every row, so selecting one costs no space and the rows
+		   under it do not shift. */
+		border: 1px solid transparent;
 	}
 	.agent-chat-convo:hover { background: var(--highlight-color); }
-	.agent-chat-convo.is-active { background: var(--card-bg, var(--control-bg)); border: 1px solid var(--border-color); }
+	.agent-chat-convo.is-active { background: var(--card-bg, var(--control-bg)); border-color: var(--border-color); }
 	.agent-chat-convo-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
 	.agent-chat-convo-agent { font-weight: 600; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.agent-chat-convo-when { flex: none; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
