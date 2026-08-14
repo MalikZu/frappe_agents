@@ -19,7 +19,7 @@ today the way it behaved yesterday.
 
 import frappe
 
-from frappe_agents.access.grants import exposed_tool_names
+from frappe_agents.access.grants import exposed_tool_names, in_legacy_mode
 from frappe_agents.tests.fixtures import (
 	DRAFT_AGENT,
 	DRAFT_USER,
@@ -37,6 +37,7 @@ from frappe_agents.tests.fixtures import (
 	AgentTestCase,
 	as_user,
 	call_tool,
+	make_access_profile,
 	make_attachment,
 	make_matrix_agent,
 	make_order_draft,
@@ -108,6 +109,29 @@ class TestToolExposure(AgentTestCase):
 			autonomy="Suggest",
 		)
 		self.assertIn("run_report", exposed_tool_names(runner))
+
+	def test_an_attached_profile_that_grants_nothing_is_still_the_matrix(self):
+		"""The shim reads the record, not the compiled grant.
+
+		A manager who attaches a profile has moved this agent to the matrix. If
+		emptying that profile dropped it back onto its old selection, a narrowing
+		would have widened the agent to everything its user can reach.
+		"""
+		profile = make_access_profile([rule(TICKET_DT, can_read=1)])
+		agent = make_matrix_agent([], profiles=[profile.name], autonomy="Suggest", tools=list(TOOL_NAMES))
+
+		profile.set("rules", [])
+		profile.flags.ignore_permissions = True
+		profile.save(ignore_permissions=True)
+		frappe.clear_document_cache("Agent Access Profile", profile.name)
+		frappe.clear_document_cache("Agent", agent.name)
+		agent = frappe.get_cached_doc("Agent", agent.name)
+
+		self.assertFalse(in_legacy_mode(agent))
+		self.assertEqual(exposed_tool_names(agent), set())
+
+		payload, _ = call_tool(RESTRICTED_USER, "search_documents", {"doctype": TICKET_DT}, agent=agent.name)
+		self.assertFalse(payload["ok"])
 
 	def test_an_agent_with_a_selection_and_no_rules_is_left_alone(self):
 		"""The legacy shim: a site that has not migrated behaves exactly as before."""

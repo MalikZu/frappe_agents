@@ -26,10 +26,15 @@ Three rules hold everywhere in here:
 Before the matrix, an agent's access was its Agent Selected Tool rows: holding
 `search_documents` meant reading any doctype the user could read. Sites still on
 that shape must not change behaviour the moment this code lands, so an agent
-with **no matrix rows and at least one selected tool** runs in legacy mode —
-`require_grant` passes everything and exposure is the selection, exactly as
-before. An agent with nothing at all is in matrix mode and holds no generic
-tools, which is the deny-by-default the matrix is for.
+that names **no profile, no rule row, and at least one selected tool** runs in
+legacy mode — `require_grant` passes everything and exposure is the selection,
+exactly as before. An agent with nothing at all is in matrix mode and holds no
+generic tools, which is the deny-by-default the matrix is for.
+
+The shim reads the record, never the compiled grant. The moment somebody
+attaches a profile or writes a rule, the agent is on the matrix and stays there
+even if that grant compiles to nothing — otherwise emptying a profile would
+silently hand the agent everything its old selection reached.
 
 The migration patch converts selections into rules; after it, no agent should be
 in legacy mode. The shim then stays as a pure fallback for rows created outside
@@ -157,9 +162,20 @@ def rule_rows_with_source(agent: Any) -> list[tuple[str, Any]]:
 
 
 def in_legacy_mode(agent: Any) -> bool:
-	"""Whether this agent still runs on tool selection instead of the matrix."""
+	"""Whether this agent still runs on tool selection instead of the matrix.
+
+	The question is what the *record* says, not what it compiles to. An agent that
+	carries a profile or a rule row of its own has been moved to the matrix, and
+	stays there even when the compiled grant comes out empty — a profile whose
+	rules were all deleted, or rows that name nothing but excluded targets. The
+	shim is for records nobody has touched yet, and reading an empty matrix as
+	"fall back to everything the selection allowed" would turn a narrowing into
+	the widest grant on the site.
+	"""
 	agent = _agent_doc(agent)
-	return not rule_rows(agent) and bool(agent.get("tools"))
+	if agent.get("access_profiles") or agent.get("access_rules"):
+		return False
+	return bool(agent.get("tools"))
 
 
 def require_grant(target: str, verb: str, target_type: str = TARGET_DOCTYPE) -> None:

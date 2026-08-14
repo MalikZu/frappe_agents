@@ -110,7 +110,9 @@ def convert_agent(agent: Any) -> bool:
 
 def skip_reason(agent: Any, selection: set[str]) -> str | None:
 	"""Why this agent must stay on the selection, or None when it can move."""
-	if agent.get("access_rules"):
+	if agent.get("access_rules") or agent.get("access_profiles"):
+		# Already on the matrix. Adding the selection on top would widen a grant
+		# somebody wrote deliberately, which is the opposite of this patch's job.
 		return "it already carries access rules"
 
 	if selection & REPORT_TOOLS:
