@@ -24,6 +24,8 @@ from frappe_agents.runner.run import (
 	EVENT_LOG_BYTES,
 	EVENT_LOG_HEAD,
 	EVENT_LOG_TAIL,
+	STREAM_FLUSH_CHARS,
+	StreamThrottle,
 	_event_log,
 )
 from frappe_agents.tests.fixtures import (
@@ -40,6 +42,7 @@ from frappe_agents.tests.fixtures import (
 	make_run,
 	model_calls,
 	model_says,
+	model_streams,
 	run_events,
 	run_with_model,
 	tool_request,
@@ -48,6 +51,9 @@ from frappe_agents.tests.fixtures import (
 SEARCH = model_calls(tool_request("search_documents", {"doctype": TICKET_DT, "fields": ["name"]}))
 ANSWER = model_says("One ticket is open.", tokens_in=10, tokens_out=5)
 REASON = "The quantities match the signed quotation."
+
+THINKING = "One ticket matched, so the count is one."
+STREAMED = model_streams("One ticket is open.", thinking=THINKING, signature="ErUBCkYIBBgC")
 
 
 class TestRunEvents(AgentTestCase):
@@ -143,6 +149,52 @@ class TestRunEvents(AgentTestCase):
 		]
 		self.assertLess(types.index("tool_execution_start"), types.index("tool_call"))
 
+	# --- the answer as it is written ----------------------------------------
+
+	def updates(self, run_name: str, script) -> list[dict]:
+		return [event for event in self.published(run_name, script) if event["type"] == "message_update"]
+
+	def test_a_streamed_answer_reaches_the_browser_as_it_arrives(self):
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		updates = self.updates(run.name, [STREAMED])
+
+		shape = [(update["kind"], update["phase"]) for update in updates]
+		self.assertEqual(shape[0], ("thinking", "start"))
+		self.assertEqual(shape[-1], ("text", "end"))
+		self.assertEqual(shape.index(("thinking", "end")) + 1, shape.index(("text", "start")))
+		self.assertTrue(all(phase == "delta" for _, phase in shape[1 : shape.index(("thinking", "end"))]))
+
+	def test_the_deltas_add_up_to_what_the_model_wrote(self):
+		"""Coalescing may join them, but nothing may be lost or reordered."""
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		updates = self.updates(run.name, [STREAMED])
+
+		written = {"thinking": "", "text": ""}
+		for update in updates:
+			if update["phase"] == "delta":
+				written[update["kind"]] += update["delta"]
+		self.assertEqual(written["thinking"], THINKING)
+		self.assertEqual(written["text"], "One ticket is open.")
+
+	def test_a_block_never_closes_before_the_text_inside_it_was_sent(self):
+		"""Held-back deltas are flushed by anything else going out."""
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		updates = self.updates(run.name, [STREAMED])
+
+		for position, update in enumerate(updates):
+			if update["phase"] == "end":
+				before = updates[position - 1]
+				self.assertEqual((before["kind"], before["phase"]), (update["kind"], "delta"))
+
+	def test_an_answer_delivered_whole_publishes_no_updates(self):
+		"""A provider that does not stream costs the browser nothing extra."""
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		self.assertEqual(self.updates(run.name, [SEARCH, ANSWER]), [])
+
 	# --- what the run writes down -------------------------------------------
 
 	def test_the_run_stores_the_events_it_saw(self):
@@ -155,10 +207,30 @@ class TestRunEvents(AgentTestCase):
 			self.assertIn(expected, types)
 
 	def test_partial_messages_are_not_stored(self):
-		"""Nothing streams yet, so a half-written message is neither kept nor sent."""
-		name = self.run_once()
+		"""The log keeps final state. A half-written message has no final state."""
+		name = self.run_once([STREAMED])
 
 		self.assertNotIn("message_update", event_types(run_events(name)))
+
+	def test_the_answer_the_model_thought_about_is_in_the_log(self):
+		"""Thinking rides inside the assistant message, so it replays like the rest."""
+		name = self.run_once([STREAMED])
+
+		ended = [event for event in run_events(name) if event["type"] == "message_end"]
+		thinking = [
+			block
+			for event in ended
+			for block in event["message"].get("content") or []
+			if isinstance(block, dict) and block.get("type") == "thinking"
+		]
+		self.assertEqual([block["thinking"] for block in thinking], [THINKING])
+		self.assertEqual(thinking[0]["thinkingSignature"], "ErUBCkYIBBgC")
+
+	def test_the_final_answer_is_the_text_alone(self):
+		"""Thinking is never the answer. The run's output_message says only the text."""
+		name = self.run_once([STREAMED])
+
+		self.assertEqual(frappe.db.get_value("Agent Run", name, "output_message"), "One ticket is open.")
 
 	def test_a_stored_log_is_json_the_reader_can_parse(self):
 		name = self.run_once()
@@ -274,3 +346,74 @@ class TestRunEvents(AgentTestCase):
 		values = frappe.db.get_value("Agent Run", run.name, ["status", "output_message"], as_dict=True)
 		self.assertEqual(values.status, "Completed")
 		self.assertEqual(values.output_message, ANSWER["text"])
+
+
+class TestStreamThrottle(AgentTestCase):
+	"""Deltas, on their way to being a few frames instead of hundreds.
+
+	A model writes a handful of characters at a time. Every one of them as its
+	own realtime frame is the same answer at fifty times the cost, so they are
+	held and sent together — until there are enough of them, until enough time
+	has passed, or until something else has to go out first.
+	"""
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.sent: list[tuple] = []
+		self.now = 0.0
+
+	def throttle(self) -> StreamThrottle:
+		return StreamThrottle(lambda *update: self.sent.append(update), clock=lambda: self.now)
+
+	def test_small_deltas_are_held_and_sent_as_one(self):
+		throttle = self.throttle()
+
+		for _ in range(5):
+			throttle.add("text", 0, "word ")
+		self.assertEqual(self.sent, [])
+
+		throttle.flush()
+		self.assertEqual(self.sent, [("text", 0, "delta", "word word word word word ")])
+
+	def test_enough_characters_go_out_without_waiting(self):
+		throttle = self.throttle()
+
+		throttle.add("text", 0, "x" * (STREAM_FLUSH_CHARS - 1))
+		self.assertEqual(self.sent, [])
+
+		throttle.add("text", 0, "yy")
+		self.assertEqual(len(self.sent), 1)
+		self.assertEqual(len(self.sent[0][3]), STREAM_FLUSH_CHARS + 1)
+
+		# Nothing is sent twice: what went out is no longer held.
+		throttle.flush()
+		self.assertEqual(len(self.sent), 1)
+
+	def test_a_slow_answer_goes_out_on_the_clock(self):
+		"""Two hundred milliseconds of silence is a long time to watch nothing."""
+		throttle = self.throttle()
+
+		throttle.add("text", 0, "Three ")
+		self.now += 0.2
+		throttle.add("text", 0, "tickets")
+
+		self.assertEqual(self.sent, [("text", 0, "delta", "Three tickets")])
+
+	def test_one_block_is_never_glued_to_another(self):
+		throttle = self.throttle()
+
+		throttle.add("thinking", 0, "counting them")
+		throttle.add("text", 1, "Three")
+
+		self.assertEqual(self.sent, [("thinking", 0, "delta", "counting them")])
+		throttle.flush()
+		self.assertEqual(self.sent[1], ("text", 1, "delta", "Three"))
+
+	def test_flushing_nothing_sends_nothing(self):
+		throttle = self.throttle()
+
+		throttle.add("text", 0, "")
+		throttle.flush()
+		throttle.flush()
+
+		self.assertEqual(self.sent, [])

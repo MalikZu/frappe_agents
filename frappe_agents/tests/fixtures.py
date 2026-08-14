@@ -45,8 +45,9 @@ it, so a separation-of-duties test run as Administrator proves nothing.
 The model is a fixture too. `FakeProvider` is the one fake model the runner tests
 run against: it satisfies the same provider contract the real adapter does, so a
 run drives the real agent loop, the real executor and the real audit path — only
-the answers are scripted. Nothing here patches `call_model`; the seam is the
-provider, one layer further out.
+the answers are scripted. Nothing here patches the HTTP call; the seam is the
+provider, one layer further out. An answer is delivered whole unless the script
+asked for `model_streams`, which tells it in the pieces a real one arrives in.
 
 The extraction cast is one more doctype and one more user. `FA Test Vendor` is
 the master record an invoice claims to be from: it carries an IBAN-shaped field,
@@ -67,11 +68,22 @@ from frappe.utils import cint, now_datetime
 from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction, run_extraction
 from frappe_agents.harness.messages import (
 	AssistantMessage,
+	TextContent,
+	ThinkingContent,
 	ToolCall,
 	Usage,
 	assistant_content,
 )
-from frappe_agents.harness.provider_events import AssistantDoneEvent, AssistantStartEvent
+from frappe_agents.harness.provider_events import (
+	AssistantDoneEvent,
+	AssistantStartEvent,
+	TextDeltaEvent,
+	TextEndEvent,
+	TextStartEvent,
+	ThinkingDeltaEvent,
+	ThinkingEndEvent,
+	ThinkingStartEvent,
+)
 from frappe_agents.runner.run import execute_run
 from frappe_agents.tools.base import execute_tool, publish_kill_switch
 
@@ -343,6 +355,34 @@ def model_calls(*calls: dict, text: str | None = None, tokens_in: int = 0, token
 	}
 
 
+def model_streams(
+	text: str = "",
+	*calls: dict,
+	thinking: str | None = None,
+	signature: str | None = None,
+	pieces: int = 3,
+	tokens_in: int = 0,
+	tokens_out: int = 0,
+) -> dict:
+	"""A scripted answer that arrives in pieces, the way a real one does.
+
+	The same answer as `model_says`, told the way a provider tells it: the
+	thinking block first, then the text, both cut into `pieces` deltas with a
+	start and an end around them. Only a test that is about streaming needs
+	this — a scripted answer is delivered whole otherwise.
+	"""
+	return {
+		"text": text,
+		"tool_calls": list(calls),
+		"thinking": thinking,
+		"signature": signature,
+		"pieces": pieces,
+		"stream": True,
+		"tokens_in": tokens_in,
+		"tokens_out": tokens_out,
+	}
+
+
 def tool_request(tool: str, args: dict | None = None, call_id: str = "call_1") -> dict:
 	"""One tool call inside a scripted answer."""
 	return {"id": call_id, "name": tool, "args": dict(args or {})}
@@ -412,13 +452,19 @@ class FakeProvider:
 			ToolCall(id=call["id"], name=call["name"], arguments=dict(call.get("args") or {}))
 			for call in reply.get("tool_calls") or []
 		]
+		content = _scripted_content(reply, calls)
 		reason = "toolUse" if calls else "stop"
 		message = AssistantMessage(
 			model=model,
-			content=assistant_content(reply.get("text") or "", calls),
+			content=content,
 			usage=Usage(input=tokens_in, output=tokens_out, total_tokens=tokens_in + tokens_out),
 			stop_reason=reason,
 		)
+
+		if reply.get("stream"):
+			for event in _scripted_stream(model, reply, content):
+				yield event
+
 		yield AssistantDoneEvent(reason=reason, message=message)
 
 	def _reply(self) -> dict:
@@ -431,6 +477,43 @@ class FakeProvider:
 		if isinstance(entry, type) and issubclass(entry, BaseException):
 			raise entry()
 		return entry() if callable(entry) else entry
+
+
+def _scripted_content(reply: dict, calls: list) -> list:
+	"""One scripted answer as the content blocks an assistant message holds."""
+	blocks: list = []
+	if reply.get("thinking"):
+		blocks.append(ThinkingContent(thinking=reply["thinking"], thinking_signature=reply.get("signature")))
+	blocks.extend(assistant_content(reply.get("text") or "", calls))
+	return blocks
+
+
+def _scripted_stream(model: str, reply: dict, blocks: list) -> Any:
+	"""The block events a provider would send on the way to this answer.
+
+	Prose only: a tool call's arguments stream as raw JSON fragments and nothing
+	downstream of the adapter reads them.
+	"""
+	for index, block in enumerate(blocks):
+		partial = AssistantMessage(model=model, content=blocks[:index])
+		if isinstance(block, ThinkingContent):
+			yield ThinkingStartEvent(content_index=index, partial=partial)
+			for piece in _pieces(block.thinking, cint(reply.get("pieces")) or 1):
+				yield ThinkingDeltaEvent(content_index=index, delta=piece, partial=partial)
+			yield ThinkingEndEvent(content_index=index, content=block.thinking, partial=partial)
+		elif isinstance(block, TextContent):
+			yield TextStartEvent(content_index=index, partial=partial)
+			for piece in _pieces(block.text, cint(reply.get("pieces")) or 1):
+				yield TextDeltaEvent(content_index=index, delta=piece, partial=partial)
+			yield TextEndEvent(content_index=index, content=block.text, partial=partial)
+
+
+def _pieces(text: str, count: int) -> list[str]:
+	"""One string as `count` deltas, the way a model writes it."""
+	if not text:
+		return []
+	size = max(1, -(-len(text) // count))
+	return [text[start : start + size] for start in range(0, len(text), size)]
 
 
 def run_with_model(run_name: str, script: Any = ()) -> FakeProvider:
