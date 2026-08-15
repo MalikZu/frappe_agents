@@ -927,7 +927,9 @@ def _stream_openai(
 	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 	with _open_stream(url, headers, payload, api_key) as response:
 		stream.opened(response)
-		yield from parse_openai_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
+		yield from _redacted_stream(
+			parse_openai_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
+		)
 
 
 def _stream_anthropic(
@@ -965,7 +967,9 @@ def _stream_anthropic(
 	}
 	with _open_stream(url, headers, payload, api_key) as response:
 		stream.opened(response)
-		yield from parse_anthropic_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
+		yield from _redacted_stream(
+			parse_anthropic_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
+		)
 
 
 def _stream_responses(
@@ -982,7 +986,9 @@ def _stream_responses(
 	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 	with _open_stream(url, headers, payload, api_key) as response:
 		stream.opened(response)
-		yield from parse_responses_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
+		yield from _redacted_stream(
+			parse_responses_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
+		)
 
 
 def _open_stream(url: str, headers: dict, payload: dict, api_key: str) -> Any:
@@ -1029,6 +1035,25 @@ def _error_body(response: Any, api_key: str) -> str:
 		pass
 	text = bytes(raw[:ERROR_BODY_BYTES]).decode("utf-8", "replace")
 	return _redact(text, api_key)[:ERROR_BODY_LIMIT]
+
+
+def _redacted_stream(chunks: Iterator[dict], api_key: str) -> Iterator[dict]:
+	"""Re-raise whatever the parser refused, with the key taken back out of it.
+
+	The parsers take bytes and a model name and never see the key, so they cannot
+	redact — and one of the things they build errors out of is the provider's own
+	words. An endpoint that quotes the credential it just rejected would otherwise
+	put it straight into a run's failure message, where it is read by anyone who
+	can open the run and copied into every log that follows it. This is the last
+	point on the way out that still holds the key, so it is where that is undone.
+	"""
+	try:
+		yield from chunks
+	except ProviderError as exc:
+		redacted = _redact(str(exc), api_key)
+		if redacted == str(exc):
+			raise
+		raise ProviderError(redacted)
 
 
 def _stream_bytes(response: Any, url: str, api_key: str) -> Iterator[bytes]:

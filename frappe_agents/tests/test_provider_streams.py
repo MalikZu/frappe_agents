@@ -1211,7 +1211,10 @@ class TestStreamTransport(AgentTestCase):
 	"""What goes on the wire, and what happens when nothing comes back."""
 
 	def use_anthropic_provider(self) -> None:
-		frappe.db.set_value("LLM Provider", PROVIDER, "provider_type", "Anthropic", update_modified=False)
+		self.use_provider("Anthropic")
+
+	def use_provider(self, provider_type: str) -> None:
+		frappe.db.set_value("LLM Provider", PROVIDER, "provider_type", provider_type, update_modified=False)
 		frappe.clear_document_cache("LLM Provider", PROVIDER)
 		self.addCleanup(frappe.clear_document_cache, "LLM Provider", PROVIDER)
 
@@ -1264,6 +1267,40 @@ class TestStreamTransport(AgentTestCase):
 		self.assertNotIn("fa-test-key", message)
 		self.assertIn("***", message)
 		self.assertTrue(response.closed)
+
+	def test_an_error_inside_a_200_body_never_shows_the_key_either(self):
+		"""A refusal that arrives mid-stream is still a refusal quoting our key.
+
+		The non-200 path redacts because the transport builds that message and
+		still holds the key. An in-band error is built by the parser instead, and
+		the parsers take bytes and a model name — they never see the key and
+		cannot redact it. So an endpoint that names the credential it is rejecting
+		would put it straight into the run's failure message. Every wire is
+		checked, because the leak was never specific to one.
+		"""
+		wires = (
+			("OpenAI Compatible", data_frame({"error": {"message": "bad key fa-test-key rejected"}})),
+			(
+				"Anthropic",
+				named_frame("error", {"type": "error", "error": {"message": "bad key fa-test-key"}}),
+			),
+			(
+				"OpenAI Responses",
+				responses_frame("error", code="invalid_api_key", message="bad key fa-test-key"),
+			),
+		)
+		for provider_type, frame in wires:
+			with self.subTest(provider_type):
+				self.use_provider(provider_type)
+				response = FakeStream([sse(frame)])
+				with patch("frappe_agents.runner.providers.requests.post", return_value=response):
+					with self.assertRaises(ProviderError) as caught:
+						list(call_model_stream(PROFILE, MESSAGES))
+
+				message = str(caught.exception)
+				self.assertNotIn("fa-test-key", message)
+				self.assertIn("***", message)
+				self.assertTrue(response.closed)
 
 	def test_an_enormous_error_body_is_capped_on_the_socket_not_afterwards(self):
 		"""The endpoint decides how big its refusal is; we decide how much we read."""
