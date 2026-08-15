@@ -76,6 +76,22 @@ client-cached (`auto_generate_sidebar_from_module` is @site_cache).
 
 ## Hard-won rules
 
+- REALTIME on frappe_docker: v16's websocket auth requires the request's Host
+  and Origin hostnames to be EQUAL, and then uses the Origin as the URL for its
+  session-validation fetch — stock frappe_docker's nginx template breaks both
+  for localhost setups ("Invalid origin" in the browser console; NOTHING live —
+  no streaming, no events). Fixed persistently here: patched
+  `fa-docker-bench/frappe.conf.template` (socket.io location pins
+  Host=test_site, Origin=http://test_site:8080) bind-mounted over
+  /templates/nginx/frappe.conf.template, plus a `test_site` network ALIAS on
+  the frontend service so the auth fetch resolves. Also `sites/currentsite.txt`
+  = test_site. VERIFY REALTIME WITH A BROWSER, NOT CURL — curl passes the
+  transport handshake without ever hitting the namespace auth that fails.
+- Fast JS iteration without an image rebuild: node lives at
+  /home/frappe/.nvm/versions/node/v24.12.0/bin in the image — docker cp the
+  source, then `export PATH=<that>:$PATH && bench build --app frappe_agents`;
+  the assets volume is shared, frontend serves the new bundle immediately.
+
 - One heavy docker operation at a time. Never `docker system prune`. Never touch
   techmaze-*/openconstructionerp-* containers (other projects).
 - compose YAML: don't use folded scalars (`>`) for multi-flag bench commands —
