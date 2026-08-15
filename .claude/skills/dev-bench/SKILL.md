@@ -1,68 +1,90 @@
 ---
 name: dev-bench
-description: Set up or reuse the throwaway Docker dev bench and run the test suite. Use for any "run the tests" or "try it on a bench" task.
+description: Run tests or hands-on-test frappe_agents on the local frappe_docker stack. Use for any "run the tests", "try it on a bench", or "rebuild the bench" task.
 ---
 
-# Dev bench (Docker, throwaway)
+# Dev bench (frappe_docker compose stack "fa")
 
-Containers: `fa-db` (mariadb:11.8) + `fa-bench` (frappe/bench, repo mounted read-only
-at /mnt/frappe_agents) on network `fa-net`. Site `test_site`, passwords are dev-only.
+The old hand-rolled bench (fa-bench + hand-run redis/serve/socketio) is RETIRED —
+its uncapped `bench build` froze the Mac on 2026-08-16. This stack is the official
+frappe_docker layered image with hard resource caps.
 
-## First-time setup
+Everything lives in `/Users/malik/Projects/fa-docker-bench/`:
+`apps.json` (canonical; `frappe_docker/apps.json` is a symlink), `compose.yaml`
+(project name `fa`, every service has mem_limit/cpus — totals ≤6.5G/7cpu),
+`scripts/{setup_wizard,grant_roles,seed_agents}.py`, `build.log`, `tests*.log`.
+
+Two sites on the stack:
+- **test_site** — Malik's hands-on site: UAE company (Falcon Trading LLC, AED),
+  ERPNext demo data, users Administrator/admin + malik@leam.ae/admin.
+  **Never run the suite here** — test records (13 _Test Company rows) already
+  polluted it once.
+- **clean_test** — pristine, allow_tests, no wizard/demo. **All suite runs here.**
+
+Apps baked in the image `fa-apps:v0.6.0-preview`: frappe v16, payments, erpnext,
+hrms v16, frappe_agents (integration/v0.6.0-preview), flow_client. Gotcha: the
+flow_client REPO installs as app **`flow`** (`--install-app flow`). LEGAL: never
+read flow_client source (AGPL vs our MIT) — install/run as black box only.
+
+## Daily driving
 
 ```bash
-docker network create fa-net
-docker run -d --name fa-db --network fa-net -e MYSQL_ROOT_PASSWORD=fa_root_pw \
-  mariadb:11.8 --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
-docker run -d --name fa-bench --network fa-net \
-  -v <repo>:/mnt/frappe_agents:ro frappe/bench:latest bash -c 'sleep infinity'
-
-# bench init dies with exit 127 without this — the image has no redis-server:
-docker exec -u root fa-bench bash -c 'apt-get update -qq && apt-get install -y -qq redis-server mariadb-client'
-
-docker exec fa-bench bash -lc 'cd /home/frappe && bench init --skip-assets --frappe-branch version-16 frappe-bench'
-docker exec fa-bench bash -lc 'redis-server --daemonize yes --port 13000 && redis-server --daemonize yes --port 11000'
-docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench set-config -g db_host fa-db && bench set-config -g redis_cache redis://localhost:13000 && bench set-config -g redis_queue redis://localhost:11000 && bench set-config -g redis_socketio redis://localhost:11000'
-docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench new-site test_site --db-root-password fa_root_pw --admin-password admin --mariadb-user-host-login-scope=%'
-docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench get-app frappe_agents /mnt/frappe_agents && bench --site test_site install-app frappe_agents && bench --site test_site set-config allow_tests true'
+cd /Users/malik/Projects/fa-docker-bench
+docker compose -p fa up -d          # start   (http://localhost:8010)
+docker compose -p fa stop           # stop, keeps everything
+docker compose -p fa down           # removes containers, KEEPS volumes — but
+                                    # also LOSES any docker-cp'd app files (see below)
+docker compose -p fa logs -f backend
+docker exec fa-backend-1 bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site console'
 ```
 
-## Every run after a change on main
+Login link without typing a password:
+`docker exec fa-backend-1 bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site browse --user Administrator'`
+— take the sid, use `http://localhost:8010/app?sid=...` (ignore the broken host in
+its output).
+
+## Running the suite
 
 ```bash
-# once per container — the mount is host-owned, git refuses it otherwise
-# (the failure is the misleading "correct access rights" message, and the
-# old clone keeps running silently: CHECK THE TEST COUNT went up).
-# Wildcard, not the single path: fetch-by-path also hits /mnt/.../.git directly.
-docker exec fa-bench bash -lc "git config --global --replace-all safe.directory '*'"
-
-# fetch+reset, not pull — a pull after any in-container commit (or against a
-# rebased main) leaves merge commits that diverge the clone forever
-# name the branch you are verifying, not always main: a lane worktree's branch is
-# reachable from the mount because a worktree shares the main clone's object store
-docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench/apps/frappe_agents && git fetch /mnt/frappe_agents main && git reset --hard FETCH_HEAD'
-docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site migrate && bench --site test_site run-tests --app frappe_agents'
-
-# if a human is browsing the site, finish with a cache clear — a migrate or web
-# restart mid-session leaves them a stale boot payload (empty Desk sidebar is
-# the classic symptom; same per-user sidebar cache quirk as the AlYazeem box):
-docker exec fa-bench bash -lc 'cd /home/frappe/frappe-bench && bench --site test_site clear-cache'
+docker exec fa-backend-1 bash -lc 'cd /home/frappe/frappe-bench && bench --site clean_test migrate && bench --site clean_test run-tests --app frappe_agents'
 ```
+759 green on 2026-08-16 (integration branch). Check the COUNT moved as expected.
 
-Rules: run tests against committed main, not the working tree — get-app clones from
-the mount. If redis dies (container restart), rerun the two redis-server lines.
+## Updating frappe_agents code on the running stack
 
-Workers: `bench worker` is a bash wrapper whose python child's cmdline is
-`bench_helper frappe worker` — "bench worker" never appears in it. Kill BOTH:
-`pkill -f "[b]ench worker"; pkill -f "[b]ench_helper frappe worker"` and verify
-zero remain before restarting, or a zombie from before a pip install keeps
-winning the queue race and every job dies on ModuleNotFoundError while new
-workers sit idle. After any `bench get-app`, restart EVERY long-lived python process — workers
-AND the web server (`pkill -f "[s]erve --port 8000"` + relaunch) — a running
-interpreter never sees a new editable install. The web server fails LATE:
-redis-cached hooks mask the missing import until a migrate or clear-cache
-rebuilds them, then every request 500s on ModuleNotFoundError. Canary with
-`frappe.enqueue("frappe.ping")` before burning real model calls.
-Tear down with `docker rm -f fa-db fa-bench` when done; nothing in it is precious.
+The layered image STRIPS `.git` from apps — you cannot fetch inside the container.
+Two ways:
 
-Last verified: 2026-08-15 — 618 tests green on Frappe v16 / Python 3.14.2.
+1. **Quick (container-local, lost on `compose down`):** from a local worktree,
+   `git diff --name-only <baked>..<new>` then `docker cp` each file into
+   `fa-backend-1:/home/frappe/frappe-bench/apps/frappe_agents/<path>` (+ chown
+   frappe:frappe as root), then migrate + clear-cache both sites and
+   `docker compose -p fa restart backend queue-short queue-long scheduler`.
+2. **Proper (bake it):** update the branch in `apps.json` if needed, then from
+   `fa-docker-bench/frappe_docker/`, NOTHING ELSE HEAVY RUNNING:
+   `docker build --build-arg=FRAPPE_PATH=https://github.com/frappe/frappe --build-arg=FRAPPE_BRANCH=version-16 --secret=id=apps_json,src=apps.json --build-arg=CACHE_BUST=$(date +%s) --tag=fa-apps:v0.6.0-preview --file=images/layered/Containerfile .`
+   (~28 min) then `docker compose -p fa up -d` recreates onto the new image.
+   NOTE: current frappe_docker uses the **secret mount**, not APPS_JSON_BASE64 —
+   the base64 build-arg is dead, docs forbid it.
+
+After ANY migrate or code swap while a human browses: `bench --site <site>
+clear-cache` AND a hard browser reload — sidebar/boot data is site-cached AND
+client-cached (`auto_generate_sidebar_from_module` is @site_cache).
+
+## Hard-won rules
+
+- One heavy docker operation at a time. Never `docker system prune`. Never touch
+  techmaze-*/openconstructionerp-* containers (other projects).
+- compose YAML: don't use folded scalars (`>`) for multi-flag bench commands —
+  the fold silently split `new-site` flags into separate commands. And
+  `set-config -p allow_tests true` crashes (literal_eval wants `True`);
+  plain `set-config allow_tests true` per site is fine.
+- pkill in containers: bracket the pattern `[b]ench` AND make sure no other
+  unbracketed copy of the pattern appears in the SAME command line (an
+  unbracketed pgrep later in the line self-killed the shell once).
+- Sidebar looks wrong after app work? Check `tabWorkspace Sidebar`.app is
+  "frappe_agents" — list views filter sidebars by app and fall back to the
+  auto module sidebar ("Frappe Agents", hammer icon) when it's empty.
+
+Last verified: 2026-08-16 — stack built, 759 tests green on clean_test, UAE demo
+site live, sidebar fix applied via method 1.
