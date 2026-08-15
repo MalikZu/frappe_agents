@@ -339,6 +339,54 @@ const BUFFER_CONVERSATIONS = 20;
 // How far from the bottom the log may be scrolled and still follow what arrives.
 const FOLLOW_SLACK = 120;
 
+// How many events a chat holds for a run it cannot place yet. A turn refused
+// before the model is called publishes about six, so this is a couple of bursts
+// and nothing like a transcript — keeping a transcript is the page-wide run
+// buffer's job, and this one exists only to cross a few milliseconds.
+const ORPHAN_EVENTS = 20;
+
+// How long to keep asking for a realtime socket, and how often. See `on_realtime`.
+const REALTIME_RETRY_MS = 500;
+const REALTIME_RETRIES = 20;
+
+/**
+ * Attach a realtime handler, and make sure it actually attached.
+ *
+ * `frappe.realtime.on` is a silent no-op before the socket object exists — its
+ * whole body is `if (this.socket) { ... }`, with no error, no queue and no
+ * retry. The registration is simply gone, for the life of the page. Anything
+ * mounted in that window hears nothing ever again, while the frames arrive on
+ * the socket perfectly well for whoever did manage to attach: a chat that shows
+ * a run stuck at "Queued…" for the rest of the session, and a reload that then
+ * shows exactly what happened, because reading a conversation back is plain
+ * HTTP and never needed the socket at all.
+ *
+ * The window is not hypothetical. A chat is built during the page's own load,
+ * the socket connects asynchronously, and a stack whose realtime is down when
+ * the tab is opened leaves it undefined for as long as it takes somebody to fix
+ * the proxy.
+ *
+ * There is no signal for the failure, so this asks the only question with an
+ * answer — is there a socket yet — and asks it again until there is one or it
+ * has waited long enough to say so out loud. `alive` lets a surface that has
+ * been torn down in the meantime stop the retries.
+ */
+function on_realtime(event, handler, alive) {
+	const attach = (attempt) => {
+		if (alive && !alive()) return;
+		if (frappe.realtime && frappe.realtime.socket) {
+			frappe.realtime.on(event, handler);
+			return;
+		}
+		if (attempt >= REALTIME_RETRIES) {
+			console.error("frappe_agents: no realtime socket, live updates are off for", event);
+			return;
+		}
+		setTimeout(() => attach(attempt + 1), REALTIME_RETRY_MS);
+	};
+	attach(0);
+}
+
 // Two chats can be mounted at once — the page and a form panel — so the ids the
 // chips point at with aria-controls have to be unique per widget.
 let mounted_chats = 0;
@@ -363,8 +411,8 @@ frappe_agents.run_buffer = {
 	listen() {
 		if (this.listening) return;
 		this.listening = true;
-		frappe.realtime.on(frappe_agents.RUN_UPDATE_EVENT, (data) => this.keep("run", data));
-		frappe.realtime.on(frappe_agents.EXTRACTION_UPDATE_EVENT, (data) => this.keep("extraction", data));
+		on_realtime(frappe_agents.RUN_UPDATE_EVENT, (data) => this.keep("run", data));
+		on_realtime(frappe_agents.EXTRACTION_UPDATE_EVENT, (data) => this.keep("extraction", data));
 	},
 
 	keep(channel, data) {
@@ -600,6 +648,9 @@ frappe_agents.ChatUI = class ChatUI {
 		// twice — the run's own failure event and the error frame behind it, live
 		// or replayed from the log — and it is one piece of news.
 		this.failures = {};
+		// Events that arrived for a run this surface could not place yet, held
+		// until it can. See `hold_orphan`.
+		this.orphans = [];
 		this.update_busy();
 		this.render_attachments();
 	}
@@ -699,16 +750,19 @@ frappe_agents.ChatUI = class ChatUI {
 
 		// Kept on the instance so destroy() can unbind exactly this listener —
 		// otherwise every panel open leaves another one rendering into a dead log.
+		const alive = () => !this.destroyed;
 		this.run_update_handler = (data) => this.on_run_update(data);
-		frappe.realtime.on(frappe_agents.RUN_UPDATE_EVENT, this.run_update_handler);
+		on_realtime(frappe_agents.RUN_UPDATE_EVENT, this.run_update_handler, alive);
 
 		// Extraction runs as its own job, so its progress arrives on its own event
 		// and usually after the run that asked for it has already finished.
 		this.extraction_update_handler = (data) => this.on_extraction_update(data);
-		frappe.realtime.on(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler);
+		on_realtime(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler, alive);
 	}
 
 	destroy() {
+		// Stops any attach still waiting for a socket that has not come up yet.
+		this.destroyed = true;
 		if (this.run_update_handler) {
 			frappe.realtime.off(frappe_agents.RUN_UPDATE_EVENT, this.run_update_handler);
 			this.run_update_handler = null;
@@ -1682,7 +1736,7 @@ frappe_agents.ChatUI = class ChatUI {
 				return;
 			}
 			if (!entry.data || !live.has(entry.data.run)) return;
-			this.apply_run_update(entry.data);
+			this.draw_run_update(entry.data);
 		});
 	}
 
@@ -1776,10 +1830,15 @@ frappe_agents.ChatUI = class ChatUI {
 				$pending.attr("data-run", r.message.run);
 				this.pending[r.message.run] = $pending;
 				// A run can be refused before this answer gets back — the identity
-				// checks happen before the model is ever called. The failure was
-				// drawn when it arrived, against a run this surface could not yet
-				// name, so the waiting line it should have taken down comes down
-				// here instead of sitting there for the rest of the session.
+				// checks happen before the model is ever called, and a provider can
+				// answer 400 in under a second. Everything published for it in the
+				// meantime was held rather than dropped, and this is the moment it
+				// can be placed: draw it now, in the order it arrived.
+				this.claim_orphans(r.message.run);
+				// And if it was drawn already — matched by conversation before the
+				// run had a name here — the waiting line it should have taken down
+				// comes down now instead of sitting there for the rest of the
+				// session.
 				if (this.failures[r.message.run]) this.clear_pending(r.message.run);
 				this.update_busy();
 				if (is_new && this.on_conversation) this.on_conversation(this.conversation, null);
@@ -1831,16 +1890,91 @@ frappe_agents.ChatUI = class ChatUI {
 
 	on_run_update(data) {
 		if (!data || !data.run) return;
-		if (data.conversation && this.conversation && data.conversation !== this.conversation) return;
-		if (!data.conversation && !this.pending[data.run]) return;
+
+		const owned = this.run_ownership(data);
+		if (owned === "theirs") return;
+		if (owned === "later") {
+			this.hold_orphan(data);
+			return;
+		}
 
 		// Text arrives several times a second, and a tool line, a proposal or an
 		// error arrives with no warning at all. Chasing any of them is right when
 		// the person is at the bottom of the log and wrong when they are reading
 		// something further up.
 		const following = this.at_bottom();
-		this.apply_run_update(data);
+		this.draw_run_update(data);
 		if (following) this.scroll_to_bottom();
+	}
+
+	/**
+	 * Whether an event belongs to what is on screen: mine, theirs, or not yet.
+	 *
+	 * "Not yet" is the case this surface used to get wrong. A run is refused
+	 * before the model is ever called — the identity checks, a disabled agent,
+	 * the kill switch, a provider that answers 400 in under a second — so a
+	 * whole turn's worth of events can be published, delivered and drawn on
+	 * before `start_run` has answered with the name of the run they belong to.
+	 * Until that answer arrives this surface knows neither the run nor, on a
+	 * first message, the conversation, so it could match neither and dropped
+	 * them. The turn then sat at "Queued…" until a reload told the truth.
+	 *
+	 * Dropping is now only for what is certainly somebody else's: a run of
+	 * another conversation, while this one is showing a conversation of its own.
+	 */
+	run_ownership(data) {
+		// A run already being drawn here is this surface's, whatever it says
+		// about its conversation.
+		if (this.pending[data.run] || this.streams[data.run]) return "mine";
+		if (data.conversation && this.conversation) {
+			return data.conversation === this.conversation ? "mine" : "theirs";
+		}
+		return "later";
+	}
+
+	/**
+	 * Keep an event for a run this surface cannot place yet.
+	 *
+	 * Bounded, and bounded per surface. The page-wide run buffer keeps a
+	 * conversation's history; this holds a burst across the few milliseconds
+	 * between a run failing and this surface learning its name.
+	 */
+	hold_orphan(data) {
+		this.orphans.push(data);
+		if (this.orphans.length > ORPHAN_EVENTS) {
+			this.orphans.splice(0, this.orphans.length - ORPHAN_EVENTS);
+		}
+	}
+
+	/**
+	 * Draw what arrived for a run before this surface could name it.
+	 *
+	 * Called the moment a run becomes ours. Anything held for another run stays
+	 * held: two sends can be in flight at once, and one landing says nothing
+	 * about the other.
+	 */
+	claim_orphans(run) {
+		if (!run || !this.orphans.length) return;
+		const mine = this.orphans.filter((data) => data.run === run);
+		if (!mine.length) return;
+		this.orphans = this.orphans.filter((data) => data.run !== run);
+		mine.forEach((data) => this.draw_run_update(data));
+		this.scroll_to_bottom();
+	}
+
+	/**
+	 * Draw one event, and never let one of them take the rest of a burst with it.
+	 *
+	 * A turn's events arrive as separate frames, but a failure arrives as a
+	 * burst delivered together, and an exception drawing any one of them used to
+	 * be an exception thrown out of a socket handler with the rest undrawn.
+	 */
+	draw_run_update(data) {
+		try {
+			this.apply_run_update(data);
+		} catch (e) {
+			console.error("frappe_agents: could not draw a run event", data && data.type, e);
+		}
 	}
 
 	/** Draw one run event. Replaying the buffer comes through here too. */
