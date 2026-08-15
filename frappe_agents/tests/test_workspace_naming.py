@@ -42,6 +42,10 @@ class TestWorkspaceNamingContract(AgentTestCase):
 		self.assertEqual(icon["label"], WORKSPACE)
 		self.assertEqual(icon["link_to"], WORKSPACE)
 		self.assertEqual(icon["name"], WORKSPACE)
+		# restrict_removal: a deleted standard icon cascades (in developer mode it
+		# deletes the shipped JSON from the app tree too) and nothing recreates it
+		# until the next full sync. Hide the tile if unwanted; never delete it.
+		self.assertEqual(icon["restrict_removal"], 1)
 
 	def test_desktop_icon_filename_matches_its_scrubbed_label(self):
 		# migrate's delete_duplicate_icons treats an icon as stale unless a file
