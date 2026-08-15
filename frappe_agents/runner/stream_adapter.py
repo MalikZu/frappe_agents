@@ -359,11 +359,17 @@ def _call(chunk: dict, index: int) -> ToolCall:
 
 
 def _has_content(block: AssistantContent) -> bool:
-	"""Whether a block says anything. An empty one is not worth keeping."""
+	"""Whether a block says anything. An empty one is not worth keeping.
+
+	A reasoning block with no words still says something: OpenAI only writes a
+	summary when one is asked for, so a Responses turn routinely returns
+	reasoning that is nothing but the encrypted item the next turn has to hand
+	back. Dropping it here would silently throw that away.
+	"""
 	if isinstance(block, TextContent):
 		return bool(block.text)
 	if isinstance(block, ThinkingContent):
-		return bool(block.thinking)
+		return bool(block.thinking or block.thinking_signature)
 	return True
 
 
@@ -428,16 +434,18 @@ def _wire_thinking(message: AssistantMessage) -> list[dict]:
 	"""The thinking blocks that have to travel back with a tool call.
 
 	Anthropic will not accept a turn that asked for a tool unless the reasoning
-	that led to it comes back exactly as it was sent, signature and all. A block
-	with no signature is dropped rather than sent: it would be rejected, and the
-	whole turn with it. Nothing here reaches an OpenAI-compatible endpoint —
-	that builder reads role, content and tool calls, and nothing else.
+	that led to it comes back exactly as it was sent, signature and all, and the
+	Responses wire wants its reasoning items back for the same reason — dropping
+	them between tool calls measurably degrades what comes next. A block with
+	neither words nor a signature is dropped: there is nothing in it to send.
+	Nothing here reaches an OpenAI-compatible endpoint — that builder reads role,
+	content and tool calls, and nothing else.
 	"""
 	blocks = []
 	for block in message.content:
-		if not isinstance(block, ThinkingContent) or not block.thinking:
+		if not isinstance(block, ThinkingContent):
 			continue
-		if block.redacted:
+		if block.redacted and block.thinking:
 			blocks.append({"thinking": block.thinking, "redacted": True})
 		elif block.thinking_signature:
 			blocks.append({"thinking": block.thinking, "signature": block.thinking_signature})
