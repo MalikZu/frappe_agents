@@ -15,14 +15,17 @@ Two narrowings that are not in the general File permission model:
   fixed in `pipeline.py`.
 """
 
+from frappe_agents.access.grants import VERB_EXTRACT
 from frappe_agents.extraction.pipeline import queue_extraction, require_provenance, resolve_file
-from frappe_agents.tools.base import CAPABILITY_DRAFT, run_model_profile
+from frappe_agents.tools.base import CAPABILITY_DRAFT, require_grant, run_model_profile
 
 
 def extract_document(payload: dict) -> dict:
 	"""Queue an extraction of one attached file into one doctype."""
 	file_ref = _require_str(payload, "file")
 	target_doctype = _require_str(payload, "target_doctype")
+
+	require_grant(target_doctype, VERB_EXTRACT)
 
 	# A File name, a link to a file on this site, or the filename itself — all three
 	# end as one File row, checked for permission the way a File name always was.

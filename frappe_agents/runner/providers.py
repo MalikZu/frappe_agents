@@ -1,7 +1,7 @@
 """Model providers.
 
-Three entry points, over two wire formats — OpenAI-compatible chat completions
-and Anthropic messages:
+Three entry points, over three wire formats — OpenAI-compatible chat
+completions, OpenAI Responses, and Anthropic messages:
 
 * `call_model` — one chat call, answered whole. Messages in, text and tool calls
   out. Kept as the plain form of the call; the agent loop no longer uses it.
@@ -19,9 +19,10 @@ request body and nowhere else — not into a log line, not into an error message
 ## The normalized stream
 
 `call_model_stream` yields plain dicts, one per thing that happened, in the order
-it happened. The two wire formats disagree about almost everything — Anthropic
-marks block boundaries explicitly, OpenAI-compatible endpoints mark none of them —
-so both parsers are normalized here, and every consumer downstream reads one
+it happened. The three wire formats disagree about almost everything — Anthropic
+marks block boundaries explicitly, OpenAI-compatible endpoints mark none of them,
+and OpenAI Responses names every boundary as its own semantic event — so all
+three parsers are normalized here, and every consumer downstream reads one
 vocabulary. Each chunk has a `type`:
 
 | chunk | fields | means |
@@ -46,8 +47,10 @@ friends one for one. Every block that opens also closes, even if the connection
 dies mid-block, and `message_end` is the generator's last word unless it raised.
 
 `usage` chunks carry the latest known totals for this call, not a delta — a later
-one replaces an earlier one. `signature` is Anthropic's thinking signature, which
-must be handed back verbatim on a later turn that carries tool calls.
+one replaces an earlier one. `signature` is whatever the provider needs handed
+back verbatim on a later turn that carries tool calls: Anthropic's thinking
+signature, or — on the Responses wire — the whole reasoning item, wrapped by
+`_reasoning_signature`. Both travel the same way through the transcript.
 
 Timeouts mean something different here. A streamed answer has no useful total
 budget: a long one legitimately takes minutes. What is never legitimate is
@@ -74,6 +77,7 @@ import requests
 from frappe.utils import cint
 
 PROVIDER_OPENAI = "OpenAI Compatible"
+PROVIDER_RESPONSES = "OpenAI Responses"
 PROVIDER_ANTHROPIC = "Anthropic"
 
 REQUEST_TIMEOUT = 120
@@ -99,6 +103,33 @@ TOOL_ARGUMENTS_LIMIT = 256 * 1024
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+# --- OpenAI Responses ---
+#
+# The transcript is ours, so nothing is left on OpenAI's side: `store: false` on
+# every request, and the reasoning that led to a tool call comes back encrypted
+# so it can be replayed on the next turn without them having kept it.
+RESPONSES_STORE = False
+RESPONSES_INCLUDE = ("reasoning.encrypted_content",)
+# Reasoning tokens are billed against this budget before a word of the answer is
+# written, so the 4096 the other wires use would let a thinking model spend its
+# whole allowance thinking and return an empty, truncated turn.
+RESPONSES_MAX_OUTPUT_TOKENS = 16_000
+# Only function tools may be sent. A hosted tool (web_search, code_interpreter,
+# file_search, computer_use, a remote MCP server) executes inside OpenAI, which
+# means it never passes the permission chokepoint and leaves no audit row. The
+# ban is an allow-list on purpose: a tool type invented next quarter is refused
+# by default rather than shipped by omission.
+RESPONSES_TOOL_TYPE = "function"
+# A reasoning item is handed back to us as one opaque blob and handed back to
+# them the same way, so it rides through the transcript inside the signature
+# field the thinking block already has. The marker keeps it from ever being
+# mistaken for an Anthropic signature, and the ceiling means a provider that
+# answers with a megabyte of ciphertext costs us one dropped replay rather than
+# a transcript nobody can load.
+RESPONSES_REASONING_MARKER = "fa-responses-reasoning:"
+RESPONSES_REASONING_LIMIT = 512 * 1024
+
 ERROR_BODY_LIMIT = 800
 # What may be pulled off the socket to build that 800 characters. A provider that
 # answers a refusal with a gigabyte of HTML is answered by reading the first few
@@ -206,6 +237,8 @@ def call_model(profile: Any, messages: list[dict], tool_schemas: list[dict] | No
 	tool_schemas = tool_schemas or []
 	if provider.provider_type == PROVIDER_ANTHROPIC:
 		return _call_anthropic(provider, profile, messages, tool_schemas, api_key)
+	if provider.provider_type == PROVIDER_RESPONSES:
+		return _call_responses(provider, profile, messages, tool_schemas, api_key)
 	return _call_openai(provider, profile, messages, tool_schemas, api_key)
 
 
@@ -402,6 +435,256 @@ def _call_anthropic(
 		"tokens_in": cint(usage.get("input_tokens")),
 		"tokens_out": cint(usage.get("output_tokens")),
 	}
+
+
+def _call_responses(
+	provider: Any, profile: Any, messages: list[dict], tool_schemas: list[dict], api_key: str
+) -> dict:
+	url = _responses_url(provider)
+	payload = _responses_payload(profile, messages, tool_schemas)
+
+	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+	data = _post(url, headers, payload, api_key)
+
+	texts = []
+	tool_calls = []
+	for index, item in enumerate(data.get("output") or []):
+		kind = item.get("type")
+		if kind == "message":
+			for part in item.get("content") or []:
+				if isinstance(part, dict) and part.get("type") == "output_text":
+					texts.append(part.get("text") or "")
+		elif kind == "function_call":
+			tool_calls.append(
+				{
+					"id": item.get("call_id") or item.get("id") or f"call_{index}",
+					"name": item.get("name") or "",
+					"args": _load_args(item.get("arguments")),
+				}
+			)
+
+	usage = data.get("usage") or {}
+	return {
+		"text": "".join(texts) if texts else None,
+		"tool_calls": tool_calls,
+		"tokens_in": cint(usage.get("input_tokens")),
+		"tokens_out": cint(usage.get("output_tokens")),
+	}
+
+
+def _responses_url(provider: Any) -> str:
+	"""The Responses endpoint, with exactly one version segment in it.
+
+	The seeded base URL already ends in `/v1`, and every other provider row an
+	administrator types will too, because that is what the vendor prints. So the
+	version is stripped if it is there and put back once — `/v1/v1/responses` is
+	a 404 nobody would think to look for.
+	"""
+	base = (provider.base_url or OPENAI_BASE_URL).rstrip("/")
+	if base.endswith("/v1"):
+		base = base[: -len("/v1")].rstrip("/")
+	return f"{base}/v1/responses"
+
+
+def _responses_payload(
+	profile: Any, messages: list[dict], tool_schemas: list[dict], stream: bool = False
+) -> dict:
+	"""One Responses request body, built the same way streamed or not."""
+	instructions, items = _responses_input(messages)
+	payload: dict[str, Any] = {
+		"model": profile.model_id,
+		"input": items,
+		"store": RESPONSES_STORE,
+		"include": list(RESPONSES_INCLUDE),
+		"max_output_tokens": RESPONSES_MAX_OUTPUT_TOKENS,
+	}
+	if instructions:
+		payload["instructions"] = instructions
+	if tool_schemas:
+		payload["tools"] = [
+			{
+				# Flat, unlike chat completions: name and parameters sit at the top
+				# level rather than nested under "function".
+				"type": RESPONSES_TOOL_TYPE,
+				"name": schema["name"],
+				"description": schema.get("description") or "",
+				"parameters": schema.get("args_schema") or {"type": "object", "properties": {}},
+			}
+			for schema in tool_schemas
+		]
+	if stream:
+		payload["stream"] = True
+
+	_assert_function_tools_only(payload)
+	return payload
+
+
+def _assert_function_tools_only(payload: dict) -> None:
+	"""The hosted-tool ban, enforced where the bytes leave the process.
+
+	Every tool this app offers is executed here, behind the permission check and
+	in front of an audit row. A hosted tool would be executed by OpenAI instead:
+	the model would read documents, search the web or run code with none of that
+	in the way and nothing written down. So the request is refused rather than
+	sent, and it is refused on the shape of the array — not on a list of names
+	that would go stale the week a new hosted tool ships.
+	"""
+	for tool in payload.get("tools") or []:
+		kind = tool.get("type") if isinstance(tool, dict) else None
+		if kind != RESPONSES_TOOL_TYPE:
+			raise ProviderError(
+				f"The Responses request carried a {kind or 'nameless'} tool. Only function tools "
+				"may be sent: a hosted tool runs inside OpenAI, so it never passes the permission "
+				"check and leaves no audit row."
+			)
+
+
+def _responses_input(messages: list[dict]) -> tuple[str, list[dict]]:
+	"""The internal message list as `instructions` and a list of input items.
+
+	Responses has no system role in the conversation: the system prompt is its
+	own top-level field, and everything else is an item — a message, a
+	`function_call`, its matching `function_call_output`, or a reasoning item
+	being replayed.
+	"""
+	system_parts = []
+	items: list[dict] = []
+
+	for message in messages:
+		role = message.get("role")
+
+		if role == "system":
+			if message.get("content"):
+				system_parts.append(message["content"])
+			continue
+
+		if role == "tool":
+			items.append(
+				{
+					"type": "function_call_output",
+					"call_id": message.get("tool_call_id") or "",
+					"output": message.get("content") or "",
+				}
+			)
+			continue
+
+		if role == "assistant":
+			content = _responses_content(message.get("content"), "output_text")
+			calls = message.get("tool_calls") or []
+			# Reasoning leads the turn, because that is the order it was written
+			# in and the order the API wants it back in — and it is only replayed
+			# when the thing it produced follows it. A reasoning item whose output
+			# item is missing is rejected by name, and the whole request with it,
+			# so a turn that thought and then said nothing hands back nothing.
+			if content or calls:
+				items.extend(_responses_reasoning_items(message))
+			if content:
+				items.append({"type": "message", "role": "assistant", "content": content})
+			for call in calls:
+				items.append(
+					{
+						"type": "function_call",
+						"call_id": call.get("id") or "",
+						"name": call.get("name") or "",
+						"arguments": json.dumps(call.get("args") or {}),
+					}
+				)
+			continue
+
+		content = _responses_content(message.get("content"), "input_text")
+		if content:
+			items.append({"type": "message", "role": "user", "content": content})
+
+	return "\n\n".join(system_parts), items
+
+
+def _responses_content(content: Any, text_type: str) -> list[dict]:
+	"""One message's content as content parts.
+
+	`text_type` differs by side — a user's words are `input_text` and the
+	model's are `output_text`, and the API rejects each in the other's place.
+	Images are only ever the user's, so they are always `input_image`.
+	"""
+	if isinstance(content, list):
+		parts = []
+		for part in content:
+			if not isinstance(part, dict):
+				continue
+			image = _responses_image(part)
+			if image:
+				parts.append(image)
+				continue
+			text = part.get("text") or ""
+			if text:
+				parts.append({"type": text_type, "text": text})
+		return parts
+
+	text = content or ""
+	return [{"type": text_type, "text": text}] if text else []
+
+
+def _responses_image(part: dict) -> dict | None:
+	"""One image content part, whichever shape the transcript held it in."""
+	kind = part.get("type")
+	if kind == "input_image":
+		return dict(part)
+	if kind == "image_url":
+		url = (part.get("image_url") or {}).get("url") if isinstance(part.get("image_url"), dict) else None
+		return {"type": "input_image", "image_url": url} if url else None
+	if kind == "image" and part.get("data"):
+		media_type = part.get("mime_type") or "image/png"
+		return {"type": "input_image", "image_url": f"data:{media_type};base64,{part['data']}"}
+	return None
+
+
+def _responses_reasoning_items(message: dict) -> list[dict]:
+	"""The reasoning items that have to travel back with a tool call.
+
+	A reasoning model that asked for a tool wrote the reasoning that led to it,
+	and dropping that between turns measurably degrades the next one. So the
+	whole item — id, summary and encrypted content — is replayed exactly as it
+	arrived, the way an Anthropic thinking signature is.
+
+	A block that carries no such item is skipped rather than invented: an
+	Anthropic signature, or reasoning from a turn where the model returned none,
+	would be rejected and take the whole request with it.
+	"""
+	items = []
+	for block in message.get("thinking") or []:
+		item = _reasoning_item(block.get("signature"))
+		if item:
+			items.append(item)
+	return items
+
+
+def _reasoning_signature(item: dict) -> str | None:
+	"""One reasoning item packed into the signature field of a thinking block.
+
+	The transcript already carries a signature per thinking block and already
+	hands it back verbatim, so a reasoning item needs no new field anywhere — it
+	needs to be one string. An item too big to be worth storing returns None and
+	is simply not replayed: the turn still works, it just thinks afresh.
+	"""
+	try:
+		packed = json.dumps(item, separators=(",", ":"))
+	except TypeError, ValueError:
+		return None
+	if len(packed) > RESPONSES_REASONING_LIMIT:
+		return None
+	return f"{RESPONSES_REASONING_MARKER}{packed}"
+
+
+def _reasoning_item(signature: Any) -> dict | None:
+	"""The reasoning item back out of a signature, or None if it never held one."""
+	if not isinstance(signature, str) or not signature.startswith(RESPONSES_REASONING_MARKER):
+		return None
+	if len(signature) > RESPONSES_REASONING_LIMIT + len(RESPONSES_REASONING_MARKER):
+		return None
+	try:
+		item = json.loads(signature[len(RESPONSES_REASONING_MARKER) :])
+	except ValueError:
+		return None
+	return item if isinstance(item, dict) and item.get("type") == "reasoning" else None
 
 
 def _openai_messages(messages: list[dict]) -> list[dict]:
@@ -606,7 +889,12 @@ def call_model_stream(
 	tool_schemas = tool_schemas or []
 
 	stream = ProviderStream()
-	build = _stream_anthropic if provider.provider_type == PROVIDER_ANTHROPIC else _stream_openai
+	if provider.provider_type == PROVIDER_ANTHROPIC:
+		build = _stream_anthropic
+	elif provider.provider_type == PROVIDER_RESPONSES:
+		build = _stream_responses
+	else:
+		build = _stream_openai
 	return stream.pulling(build(provider, profile, messages, tool_schemas, api_key, stream))
 
 
@@ -644,7 +932,9 @@ def _stream_openai(
 	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 	with _open_stream(url, headers, payload, api_key) as response:
 		stream.opened(response)
-		yield from parse_openai_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
+		yield from _redacted_stream(
+			parse_openai_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
+		)
 
 
 def _stream_anthropic(
@@ -682,7 +972,28 @@ def _stream_anthropic(
 	}
 	with _open_stream(url, headers, payload, api_key) as response:
 		stream.opened(response)
-		yield from parse_anthropic_stream(_stream_bytes(response, url, api_key), model=profile.model_id)
+		yield from _redacted_stream(
+			parse_anthropic_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
+		)
+
+
+def _stream_responses(
+	provider: Any,
+	profile: Any,
+	messages: list[dict],
+	tool_schemas: list[dict],
+	api_key: str,
+	stream: ProviderStream,
+) -> Iterator[dict]:
+	url = _responses_url(provider)
+	payload = _responses_payload(profile, messages, tool_schemas, stream=True)
+
+	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+	with _open_stream(url, headers, payload, api_key) as response:
+		stream.opened(response)
+		yield from _redacted_stream(
+			parse_responses_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
+		)
 
 
 def _open_stream(url: str, headers: dict, payload: dict, api_key: str) -> Any:
@@ -729,6 +1040,25 @@ def _error_body(response: Any, api_key: str) -> str:
 		pass
 	text = bytes(raw[:ERROR_BODY_BYTES]).decode("utf-8", "replace")
 	return _redact(text, api_key)[:ERROR_BODY_LIMIT]
+
+
+def _redacted_stream(chunks: Iterator[dict], api_key: str) -> Iterator[dict]:
+	"""Re-raise whatever the parser refused, with the key taken back out of it.
+
+	The parsers take bytes and a model name and never see the key, so they cannot
+	redact — and one of the things they build errors out of is the provider's own
+	words. An endpoint that quotes the credential it just rejected would otherwise
+	put it straight into a run's failure message, where it is read by anyone who
+	can open the run and copied into every log that follows it. This is the last
+	point on the way out that still holds the key, so it is where that is undone.
+	"""
+	try:
+		yield from chunks
+	except ProviderError as exc:
+		redacted = _redact(str(exc), api_key)
+		if redacted == str(exc):
+			raise
+		raise ProviderError(redacted)
 
 
 def _stream_bytes(response: Any, url: str, api_key: str) -> Iterator[bytes]:
@@ -853,6 +1183,153 @@ def parse_anthropic_stream(chunks: Iterable[bytes], model: str | None = None) ->
 
 	yield from blocks.close()
 	yield {"type": "message_end", "reason": _anthropic_reason(stop_reason, blocks.saw_tool_calls)}
+
+
+def parse_responses_stream(chunks: Iterable[bytes], model: str | None = None) -> Iterator[dict]:
+	"""Normalized chunks out of an OpenAI Responses SSE body.
+
+	This format names everything. Output items are announced when they open and
+	again when they close, deltas say which item and which content part they
+	belong to, and the run ends with a whole response object rather than a
+	sentinel. So this parser relays, keyed on `output_index`, and lets `_Blocks`
+	hold the same bounded buffers the other two use.
+
+	Two things are only reliable on `response.output_item.done`, and both matter:
+	a function call's arguments are complete there, and a reasoning item's
+	`encrypted_content` may still be a fragment in `.added`. So the item is read
+	on the way out, not on the way in.
+	"""
+	yield {"type": "message_start", "model": model}
+
+	blocks = _Blocks()
+	status = None
+	incomplete_reason = None
+	tokens_in = 0
+	tokens_out = 0
+
+	for event, data in _sse_events(chunks):
+		payload = _stream_json(data)
+		if payload is None:
+			continue
+
+		kind = payload.get("type") or event
+
+		if kind == "error":
+			_raise_responses_error(payload)
+
+		elif kind == "response.output_item.added":
+			yield from blocks.open_wire(payload.get("output_index"), _responses_block(payload.get("item")))
+
+		elif kind == "response.output_text.delta":
+			yield from blocks.wire_delta(
+				payload.get("output_index"), {"type": "text_delta", "text": payload.get("delta") or ""}
+			)
+
+		elif kind in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+			yield from blocks.wire_delta(
+				payload.get("output_index"),
+				{"type": "thinking_delta", "thinking": payload.get("delta") or ""},
+			)
+
+		elif kind == "response.reasoning_summary_part.added":
+			# A summary arrives in parts, each its own paragraph. The first needs
+			# no separator; every one after it would otherwise run into the last.
+			if cint(payload.get("summary_index")):
+				yield from blocks.wire_delta(
+					payload.get("output_index"), {"type": "thinking_delta", "thinking": "\n\n"}
+				)
+
+		elif kind == "response.function_call_arguments.delta":
+			yield from blocks.wire_delta(
+				payload.get("output_index"),
+				{"type": "input_json_delta", "partial_json": payload.get("delta") or ""},
+			)
+
+		elif kind == "response.output_item.done":
+			yield from _responses_item_done(blocks, payload)
+
+		elif kind in ("response.completed", "response.incomplete", "response.failed"):
+			response = payload.get("response") or {}
+			status = response.get("status") or _responses_status(kind)
+			incomplete_reason = (response.get("incomplete_details") or {}).get("reason")
+			usage = response.get("usage") or {}
+			if usage:
+				tokens_in = cint(usage.get("input_tokens")) or tokens_in
+				tokens_out = cint(usage.get("output_tokens")) or tokens_out
+				yield {"type": "usage", "tokens_in": tokens_in, "tokens_out": tokens_out}
+			if status == "failed":
+				_raise_responses_error(response.get("error") or {})
+			break
+
+	yield from blocks.close()
+	yield {"type": "message_end", "reason": _responses_reason(incomplete_reason, blocks.saw_tool_calls)}
+
+
+def _responses_block(item: Any) -> dict:
+	"""One announced output item as the block `_Blocks` opens for it.
+
+	Anything that is not a message, a reasoning item or a function call is
+	opened as prose and closes empty — there is nothing to show and nothing to
+	replay, and an item type we have never seen is not a reason to drop a run.
+	"""
+	item = item if isinstance(item, dict) else {}
+	kind = item.get("type")
+	if kind == "function_call":
+		return {
+			"type": "tool_use",
+			"id": item.get("call_id") or item.get("id") or "",
+			"name": item.get("name") or "",
+		}
+	if kind == "reasoning":
+		return {"type": "thinking"}
+	return {"type": "text"}
+
+
+def _responses_item_done(blocks: "_Blocks", payload: dict) -> Iterator[dict]:
+	"""Close the item that just finished, having read what only its end carries."""
+	index = payload.get("output_index")
+	item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+	kind = item.get("type")
+
+	if kind == "function_call":
+		blocks.settle_tool(
+			index,
+			item.get("call_id") or item.get("id") or "",
+			item.get("name") or "",
+			item.get("arguments") or "",
+		)
+	elif kind == "reasoning":
+		# The whole item, packed so the next turn can hand it straight back.
+		blocks.sign(_reasoning_signature(item))
+
+	yield from blocks.close_wire(index)
+
+
+def _responses_status(kind: str) -> str:
+	return {
+		"response.completed": "completed",
+		"response.incomplete": "incomplete",
+		"response.failed": "failed",
+	}.get(kind, "completed")
+
+
+def _raise_responses_error(error: Any) -> None:
+	"""An error delivered as its own event, or inside a failed response object."""
+	if isinstance(error, dict):
+		message = error.get("message") or error.get("code") or error.get("type") or ""
+	else:
+		message = str(error or "")
+	raise ProviderError(
+		f"The model stream returned an error: {str(message or 'no reason given')[:ERROR_BODY_LIMIT]}"
+	)
+
+
+def _responses_reason(incomplete_reason: Any, saw_tool_calls: bool) -> str:
+	if incomplete_reason == "max_output_tokens":
+		return "length"
+	if saw_tool_calls:
+		return "toolUse"
+	return "stop"
 
 
 class _Blocks:
@@ -1011,6 +1488,33 @@ class _Blocks:
 				return
 			self.buffer += text
 			yield {"type": "text_delta", "index": self.wire.get(wire_index, self.open_index), "text": text}
+
+	def sign(self, signature: str | None) -> None:
+		"""Attach to the open reasoning block whatever has to be handed back.
+
+		Anthropic streams its signature in fragments and it is accumulated as it
+		arrives; Responses hands over the whole reasoning item at the end, so it
+		is set in one go. Either way it leaves on the `thinking_end` chunk.
+		"""
+		if signature and self.open_kind == "thinking":
+			self.signature = signature
+
+	def settle_tool(self, wire_index: Any, call_id: str, name: str, arguments: str) -> None:
+		"""What the end of a tool call says, folded into what was streamed.
+
+		Responses repeats the finished call when the item closes, and for an
+		endpoint that streamed no argument fragments at all that repetition is
+		the only copy there is. It goes through the same cap as a fragment does.
+		"""
+		state = self.tools.get(wire_index)
+		if state is None:
+			return
+		if call_id:
+			state["id"] = call_id
+		if name:
+			state["name"] = name
+		if arguments and not state["arguments"]:
+			_accumulate_arguments(state, arguments)
 
 	def close_wire(self, wire_index: Any) -> Iterator[dict]:
 		state = self.tools.pop(wire_index, None)
@@ -1280,6 +1784,12 @@ def call_model_extract(
 	_check_wire_size(provider, media_type, len(encoded))
 
 	engine = pdf_engine if (openrouter and media_type == PDF_MEDIA_TYPE) else PDF_ENGINE_NATIVE
+	# Two extraction wires, not three: a Responses provider extracts over
+	# chat/completions like every other OpenAI-compatible row, and that is the
+	# decision rather than an oversight. What forced the Responses wire for chat
+	# was reasoning colliding with bound tools, and extraction binds none — so the
+	# older endpoint still answers it, and it is the one that takes a JSON schema
+	# in the shape this code already builds.
 	anthropic = provider.provider_type == PROVIDER_ANTHROPIC
 	if anthropic:
 		_check_anthropic_structured(profile)

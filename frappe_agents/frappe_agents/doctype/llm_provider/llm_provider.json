@@ -28,14 +28,15 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Provider Type",
-   "options": "OpenAI Compatible\nAnthropic",
+   "options": "OpenAI Compatible\nOpenAI Responses\nAnthropic",
    "reqd": 1
   },
   {
    "description": "API root, without a trailing slash. Leave empty to use the provider default.",
    "fieldname": "base_url",
    "fieldtype": "Data",
-   "label": "Base URL"
+   "label": "Base URL",
+   "length": 255
   },
   {
    "default": "0",
@@ -47,7 +48,8 @@
   {
    "fieldname": "api_key",
    "fieldtype": "Password",
-   "label": "API Key"
+   "label": "API Key",
+   "length": 1024
   },
   {
    "default": "1",
@@ -57,9 +59,10 @@
    "label": "Enabled"
   }
  ],
+ "icon": "plug",
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-14 18:00:00.000000",
+ "modified": "2026-08-16 15:30:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "LLM Provider",
@@ -86,6 +89,5 @@
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],
- "track_changes": 1,
- "icon": "plug"
+ "track_changes": 1
 }

@@ -17,6 +17,7 @@ from frappe import _
 from frappe.query_builder.functions import Min, Sum
 from frappe.utils import cint, get_datetime, now_datetime, today
 
+from frappe_agents.access.preview import effective_access as access_preview
 from frappe_agents.actions import APPROVER_ROLE, separation_of_duties_block
 from frappe_agents.context.attachments import conversation_attachments
 from frappe_agents.extraction.pipeline import (
@@ -33,6 +34,7 @@ from frappe_agents.extraction.schema import build_extraction_schema
 from frappe_agents.model_profiles import check_profile, profile_choices
 from frappe_agents.tools.base import AUTONOMY_CAPABILITIES, runtime_enabled
 from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
+from frappe_agents.tools.registry import agent_tool_order
 
 MAX_MESSAGE_CHARS = 20_000
 TITLE_CHARS = 140
@@ -42,6 +44,7 @@ DEFAULT_PENDING_LIMIT = 50
 MAX_PENDING_LIMIT = 200
 
 AGENT_USER = "Agent User"
+MANAGER_ROLE = "Agent Manager"
 # One rail's worth of conversations. Older ones are reachable from the Agent
 # Conversation list, which is a list view with paging and filters already.
 CONVERSATION_LIMIT = 50
@@ -99,14 +102,15 @@ def list_agents() -> list[dict]:
 def _tool_summaries(agent: Any) -> list[dict]:
 	"""The tools this agent can actually call, for the read-only tools popover.
 
-	Filtered the way the executor filters: a disabled tool, or one whose
-	capability is outside the agent's autonomy, is refused at call time. Listing
-	it here would promise the user something that never happens.
+	Filtered the way the executor filters: the access rules decide which generic
+	tools exist at all, and a disabled tool or one whose capability is outside the
+	agent's autonomy is refused at call time. Listing either here would promise
+	the user something that never happens.
 	"""
 	capabilities = AUTONOMY_CAPABILITIES.get(agent.autonomy, set())
 	summaries = []
-	for row in agent.get("tools") or []:
-		tool = _tool(row.tool)
+	for name in agent_tool_order(agent):
+		tool = _tool(name)
 		if tool is None or not cint(tool.enabled) or tool.capability not in capabilities:
 			continue
 		summaries.append(
@@ -131,6 +135,28 @@ def _tool(name: str | None) -> Any:
 		return frappe.get_cached_doc("Agent Tool", name)
 	except frappe.DoesNotExistError:
 		return None
+
+
+@frappe.whitelist()
+def effective_access(agent: str) -> dict:
+	"""What an agent's access rules come to, for the manager looking at them.
+
+	The Agent form's read-only preview. It grants nothing and changes nothing —
+	it reads the compiled matrix and says, for each target, whether the person
+	asking could use that rule at all. A rule is an intersection with the user's
+	own permissions, so the same agent honestly reads differently to two managers.
+
+	Manager-only, because it is a configuration answer rather than a chat one: an
+	Agent User may read the Agent record but has no business being handed a map of
+	what the site's managers have wired up.
+	"""
+	if not ({MANAGER_ROLE, SYSTEM_MANAGER} & set(frappe.get_roles())):
+		raise frappe.PermissionError(
+			_("You need the {0} role to see an agent's effective access.").format(MANAGER_ROLE)
+		)
+
+	frappe.has_permission("Agent", "read", doc=agent, throw=True)
+	return access_preview(agent)
 
 
 @frappe.whitelist()

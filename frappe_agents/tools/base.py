@@ -70,6 +70,49 @@ class KillSwitchActive(ToolDenied):
 	"""Global kill switch is off. Aborts the run — never handed back to the model."""
 
 
+def require_grant(target: str, verb: str, target_type: str = "DocType") -> None:
+	"""Refuse unless the running agent's access rules allow this verb on this target.
+
+	The chokepoint. Every generic tool asks here and nowhere else, beside the
+	frappe permission check it already makes — user permissions ∩ access rules,
+	never one instead of the other. The rules live in `frappe_agents.access.grants`.
+	"""
+	_grants().require_grant(target, verb, target_type)
+
+
+def has_grant(target: str, verb: str, target_type: str = "DocType") -> bool:
+	"""Whether `require_grant` would pass, for a caller that omits rather than refuses."""
+	return _grants().has_grant(target, verb, target_type)
+
+
+def require_draft_ownership(doctype: str, doc: Any) -> None:
+	"""Refuse a draft somebody else created unless the rule allows any draft."""
+	_grants().require_draft_ownership(doctype, doc)
+
+
+def require_file_access() -> None:
+	"""Refuse reading attached files unless the agent carries `may_read_files`."""
+	_grants().require_file_access()
+
+
+def require_blueprint_drafting() -> None:
+	"""Refuse the builder's meta tools unless the agent may draft Agent Blueprints."""
+	_grants().require_blueprint_drafting()
+
+
+def row_cap(target: str, tool_max: int, target_type: str = "DocType") -> int:
+	"""The tool's own row cap, narrowed by the rule's cap when it sets one."""
+	return _grants().row_cap(target, tool_max, target_type)
+
+
+def _grants() -> Any:
+	# Imported on use: `access.grants` needs ToolDenied from this module, and a
+	# module-level import here would close the circle.
+	from frappe_agents.access import grants
+
+	return grants
+
+
 def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 	"""Run one tool for one Agent Run and log it.
 

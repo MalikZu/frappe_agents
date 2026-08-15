@@ -16,6 +16,12 @@ Linked rows are sampled at `VISIBLE_SAMPLE_CAP`, so a count carries which kind o
 hole it is: `not_visible_count` is a permission denial, `beyond_sample_count`
 (with `sampled: true`) is a row the sample stopped short of. Only a denial puts a
 doctype in the `not_visible` block.
+
+A doctype the agent's access rules do not grant is none of those things: it is
+absent. The manifest and the links slice walk the same neighbourhood and have to
+tell one story about it — a doctype the slice will not open is not named or
+counted here either, because "6 of those point at this document" is already a
+fact about a doctype nobody granted.
 """
 
 from typing import Any
@@ -24,6 +30,7 @@ import frappe
 from frappe.model import no_value_fields, table_fields
 from frappe.utils import cint
 
+from frappe_agents.access.grants import VERB_READ
 from frappe_agents.context.slices import (
 	COUNT_CAP,
 	link_filters,
@@ -33,6 +40,7 @@ from frappe_agents.context.slices import (
 	sample_linked_rows,
 	status_word,
 )
+from frappe_agents.tools.base import has_grant
 
 MAX_CORE_FIELDS = 10
 MAX_CORE_TEXT_CHARS = 120
@@ -234,7 +242,13 @@ def _links(doctype: str, name: str) -> tuple[dict, dict]:
 	not_visible_total = 0
 	not_visible_doctypes: list[str] = []
 
-	for linked_doctype, info in link_targets(doctype)[:MAX_LINK_DOCTYPES]:
+	# Granted first, capped second — the same order the links slice uses, so an
+	# ungranted doctype cannot spend one of the slots a granted one needs. Outside
+	# a run there is no agent to ask and every target passes, which is what a
+	# direct call to the assembler has always been.
+	targets = [target for target in link_targets(doctype) if has_grant(target[0], VERB_READ)]
+
+	for linked_doctype, info in targets[:MAX_LINK_DOCTYPES]:
 		filters, or_filters = link_filters(doctype, name, info)
 		sample = sample_linked_rows(linked_doctype, filters, or_filters, VISIBLE_SAMPLE_CAP)
 		visible = len(sample["rows"])

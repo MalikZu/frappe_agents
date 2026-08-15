@@ -22,14 +22,28 @@ import frappe
 from frappe.model import no_value_fields
 from frappe.utils import cint
 
+from frappe_agents.access.grants import (
+	TARGET_REPORT,
+	VERB_READ,
+	VERBS,
+	compiled_grants,
+	current_agent,
+)
 from frappe_agents.context.slices import has_row_permission_hook, may_read, status_word
 from frappe_agents.documents import reader
-from frappe_agents.tools.base import CAPABILITY_READ, ToolDenied
+from frappe_agents.tools.base import (
+	CAPABILITY_READ,
+	ToolDenied,
+	require_file_access,
+	require_grant,
+	row_cap,
+)
 
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
 MAX_REPORT_ROWS = 200
 MAX_LISTED_DOCS = 20
+MAX_FOUND_DOCTYPES = 50
 RESTRICTED = "<restricted>"
 
 STANDARD_FIELDS = (
@@ -53,7 +67,7 @@ def search_documents(payload: dict) -> dict:
 
 	fields, restricted = _resolve_fields(meta, payload.get("fields"), allowed_levels)
 	filters = _resolve_filters(meta, payload.get("filters"), allowed_levels)
-	limit = _resolve_limit(payload.get("limit"))
+	limit = _resolve_limit(payload.get("limit"), row_cap(doctype, MAX_LIMIT))
 	order_by = _resolve_order_by(meta, payload.get("order_by"), allowed_levels)
 	include_cancelled = _as_bool(payload.get("include_cancelled"))
 
@@ -149,6 +163,8 @@ def run_report(payload: dict) -> dict:
 	if not isinstance(filters, dict):
 		raise ValueError("filters must be an object of fieldname to value.")
 
+	require_grant(report_name, VERB_READ, TARGET_REPORT)
+
 	if not frappe.has_permission("Report", "read"):
 		raise ToolDenied("You are not allowed to read reports.")
 
@@ -198,10 +214,68 @@ def run_report(payload: dict) -> dict:
 def read_document(payload: dict) -> dict:
 	"""Read an attached document and return what it says, as untrusted text."""
 	file_ref = _require_str(payload, "file")
+	# Files are not doctype-shaped, so they ride one flag on the agent rather than
+	# a rule row. The File permission check is still the reader's own.
+	require_file_access()
 	return reader.read_document(file_ref, payload.get("pages"))
 
 
+def find_doctypes(payload: dict) -> dict:
+	"""Which doctypes this agent may work with, and what it may do with each.
+
+	Discovery is an information boundary. The answer is the compiled grant
+	intersected with what the user may read — never a search of the site's
+	schema — so a doctype nobody granted is not named, not described, and not
+	confirmed to exist.
+	"""
+	query = payload.get("query")
+	if query is not None and not isinstance(query, str):
+		raise ValueError("query must be a string.")
+	query = (query or "").strip().lower()
+	limit = _resolve_limit(payload.get("limit"), MAX_FOUND_DOCTYPES)
+
+	agent = current_agent()
+	if agent is None:
+		raise ToolDenied(
+			"find_doctypes answers from the agent's access rules, so it only works inside a run."
+		)
+
+	granted = compiled_grants(agent).get("DocType") or {}
+	rows = []
+	for target in sorted(granted):
+		verbs = [verb for verb in VERBS if granted[target].get(verb)]
+		if not verbs:
+			continue
+		if not frappe.has_permission(target, "read"):
+			# The rule allows it and this user does not: the intersection is empty,
+			# so the doctype is not offered for this run.
+			continue
+		meta = frappe.get_meta(target)
+		if query and query not in target.lower() and query not in (meta.description or "").lower():
+			continue
+		rows.append(
+			{
+				"doctype": target,
+				"module": meta.module,
+				"description": meta.description or "",
+				"allowed": verbs,
+			}
+		)
+
+	total = len(rows)
+	shown = rows[:limit]
+	return {
+		"doctypes": shown,
+		"count": len(shown),
+		"total": total,
+		"truncated": len(shown) < total,
+		"_result_summary": f"{len(shown)} of {total} granted doctype(s)",
+	}
+
+
 def _require_read(doctype: str) -> None:
+	"""The two gates, in the order that leaks least: the rule, then the user's own perms."""
+	require_grant(doctype, VERB_READ)
 	if not frappe.has_permission(doctype, "read"):
 		raise ToolDenied(f"You are not allowed to read {doctype}.")
 
@@ -284,9 +358,9 @@ def _as_bool(value: Any) -> bool:
 	return bool(value)
 
 
-def _resolve_limit(limit: Any) -> int:
+def _resolve_limit(limit: Any, maximum: int = MAX_LIMIT) -> int:
 	limit = cint(limit) or DEFAULT_LIMIT
-	return max(1, min(limit, MAX_LIMIT))
+	return max(1, min(limit, maximum))
 
 
 def _resolve_order_by(meta: Any, order_by: Any, allowed_levels: list) -> str:
@@ -324,6 +398,30 @@ def _docs_touched(doctype: str, names: list) -> str | None:
 
 
 TOOLS = [
+	{
+		"tool_name": "find_doctypes",
+		"handler_path": "frappe_agents.tools.read_tools.find_doctypes",
+		"capability": CAPABILITY_READ,
+		"description": (
+			"List the doctypes you may work with and what you may do with each — read, "
+			"draft new, edit drafts, propose, extract. Start here when you do not know "
+			"which doctype holds something. This is the whole list: a doctype that is not "
+			"in it is not one you can reach, so do not guess at names."
+		),
+		"args_schema": {
+			"type": "object",
+			"properties": {
+				"query": {
+					"type": "string",
+					"description": "Optional text to match against the doctype name or its description.",
+				},
+				"limit": {
+					"type": "integer",
+					"description": f"Rows to return, 1 to {MAX_FOUND_DOCTYPES}. Default {DEFAULT_LIMIT}.",
+				},
+			},
+		},
+	},
 	{
 		"tool_name": "search_documents",
 		"handler_path": "frappe_agents.tools.read_tools.search_documents",

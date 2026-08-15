@@ -23,6 +23,12 @@ Two permission shapes live side by side, and the difference matters:
 hid is `not_visible_count`; a row that exists past the sample limit is
 `beyond_sample_count`, alongside `sampled: true`. Only the first is a permission
 denial, and only the first puts a doctype in the `not_visible` block.
+
+A third cause is reported as nothing at all. The links slice walks off the focal
+document into other doctypes, and a doctype the agent's access rules do not
+grant is left out of the answer entirely — no group, no count, not even a name
+in `not_visible`. A count beside a doctype name is still a fact about the site,
+and the matrix says the agent does not get that one.
 """
 
 import json
@@ -32,8 +38,9 @@ import frappe
 from frappe.model import no_value_fields, table_fields
 from frappe.utils import cint
 
+from frappe_agents.access.grants import VERB_READ
 from frappe_agents.context.untrusted import is_untrusted_fieldtype, wrap
-from frappe_agents.tools.base import ToolDenied
+from frappe_agents.tools.base import ToolDenied, has_grant
 
 RESTRICTED = "<restricted>"
 MASKED = "<masked>"
@@ -458,6 +465,11 @@ def _links_up(doctype: str, name: str, limit: int) -> dict:
 		target_doctype = doc.get(df.options) if df.fieldtype == "Dynamic Link" else df.options
 		if not target_doctype or (target_doctype, str(value)) in seen:
 			continue
+		if not has_grant(target_doctype, VERB_READ):
+			# Absence, not a redaction. Reading the focal document was granted;
+			# hopping into a doctype nobody granted is a second question, and the
+			# answer to it is that this neighbour never appears.
+			continue
 		seen.add((target_doctype, str(value)))
 
 		group = groups.setdefault(
@@ -500,7 +512,11 @@ def _links_down(doctype: str, name: str, limit: int) -> dict:
 	not_visible = 0
 	not_visible_doctypes: list[str] = []
 
-	for linked_doctype, info in link_targets(doctype)[:MAX_LINK_DOCTYPES]:
+	# Granted first, capped second: an ungranted doctype must not use up one of the
+	# slots and push a granted one out of the answer.
+	targets = [target for target in link_targets(doctype) if has_grant(target[0], VERB_READ)]
+
+	for linked_doctype, info in targets[:MAX_LINK_DOCTYPES]:
 		filters, or_filters = link_filters(doctype, name, info)
 		sample = sample_linked_rows(linked_doctype, filters, or_filters, limit)
 

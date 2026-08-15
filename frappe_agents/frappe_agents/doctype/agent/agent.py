@@ -5,13 +5,29 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from frappe_agents.frappe_agents.doctype.agent_access_rule.agent_access_rule import validate_rules
+
 FORBIDDEN_SERVICE_USERS = ("Administrator", "Guest")
 
 
 class Agent(Document):
 	def validate(self) -> None:
+		validate_rules(self, "access_rules")
+		self.dedupe_profiles()
 		if self.run_as == "Service User":
 			self.validate_service_user()
+
+	def dedupe_profiles(self) -> None:
+		"""One row per attached profile. Two rows would grant nothing extra and read as if they did."""
+		seen = set()
+		kept = []
+		for row in self.get("access_profiles") or []:
+			if row.access_profile in seen:
+				continue
+			seen.add(row.access_profile)
+			kept.append(row)
+		if len(kept) != len(self.get("access_profiles") or []):
+			self.set("access_profiles", kept)
 
 	def validate_service_user(self) -> None:
 		"""A service user runs without a human in the loop, so its blast radius is the whole point."""

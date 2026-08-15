@@ -3,6 +3,10 @@
 
 import frappe
 
+from frappe_agents.access.builder import seed_agents_builder
+from frappe_agents.access.default_profiles import seed_default_profiles
+from frappe_agents.default_catalog import seed_default_catalog
+
 # Every role needs the Desk: managers configure agents, users chat, approvers review
 # drafts, auditors read the tool-call trail. None of them is a portal-only role.
 AGENT_ROLES = (
@@ -15,7 +19,10 @@ AGENT_ROLES = (
 
 def after_install() -> None:
 	create_roles()
+	seed_default_profiles()
+	seed_agents_builder()
 	build_workspace_sidebar()
+	seed_default_catalog()
 
 
 def create_roles() -> None:
@@ -30,24 +37,54 @@ def create_roles() -> None:
 		role.insert(ignore_permissions=True)
 
 
+# The one display name, everywhere a route or a lookup derives from it. The desk
+# resolves the desktop tile by matching Desktop Icon.label against the Workspace
+# Sidebar's name (lowercased), and routes the workspace by slugging its record
+# name — so the workspace name, its title, the sidebar name, and the tile label
+# must all be this same word or the tile 404s (the v0.5.0 regression).
+WORKSPACE = "Agents"
+
+# What the installer called the sidebar before the rename above. Nothing writes
+# it any more; the v0_6_0 rename patch converges old sites onto WORKSPACE, and
+# the v0_7_0 sidebar patch keeps this as the fallback lookup for a site whose
+# rename has not run yet.
+SIDEBAR_NAME = "Frappe Agents"
+
+# The app the sidebar belongs to, and the reason every list view in this module
+# shows it. The desk narrows the sidebars that link a doctype down to the ones
+# whose `app` matches `frappe.boot.module_app[module]`, and falls back to the
+# auto-generated module sidebar — the flat, hammer-icon one — when nothing
+# survives. A sidebar without `app` never survives, so this is what keeps the
+# curated sidebar on screen.
+SIDEBAR_APP = "frappe_agents"
+# The section the agent, its access and the things it is made of live under. The
+# sidebar patch appends into it and needs to find it by the name shipped here.
+BUILD_SECTION = "Build"
+# The section the records an agent leaves behind live under. Same contract as
+# BUILD_SECTION: a patch appends into it by this name.
+ACTIVITY_SECTION = "Activity"
+
 SIDEBAR = (
-	("Link", "Home", "Workspace", "Frappe Agents", "home", 0),
+	("Link", "Home", "Workspace", WORKSPACE, "home", 0),
 	("Link", "Agent Chat", "Page", "agent-chat", "messages-square", 0),
 	("Section Break", "Review", None, None, "check-check", 0),
 	("Link", "Pending Actions", "DocType", "Agent Action", None, 1),
 	("Link", "Needs Review", "DocType", "Document Extraction", None, 1),
 	("Link", "Review Quality", "Report", "Agent Action Review Quality", None, 1),
-	("Section Break", "Build", None, None, "bot", 0),
+	("Section Break", BUILD_SECTION, None, None, "bot", 0),
 	("Link", "Agents", "DocType", "Agent", None, 1),
+	("Link", "Access Profiles", "DocType", "Agent Access Profile", None, 1),
+	("Link", "Blueprints", "DocType", "Agent Blueprint", None, 1),
 	("Link", "Skills", "DocType", "Agent Skill", None, 1),
 	("Link", "Tools", "DocType", "Agent Tool", None, 1),
 	("Link", "Settings", "DocType", "Agent Settings", None, 1),
 	("Section Break", "Models", None, None, "plug", 0),
 	("Link", "LLM Providers", "DocType", "LLM Provider", None, 1),
 	("Link", "Model Profiles", "DocType", "LLM Model Profile", None, 1),
-	("Section Break", "Activity", None, None, "activity", 0),
+	("Section Break", ACTIVITY_SECTION, None, None, "activity", 0),
 	("Link", "Conversations", "DocType", "Agent Conversation", None, 1),
 	("Link", "Runs", "DocType", "Agent Run", None, 1),
+	("Link", "Tool Calls", "DocType", "Agent Tool Call", None, 1),
 )
 
 
@@ -57,11 +94,17 @@ def build_workspace_sidebar():
 	Only when none exists yet: the flat auto-seeded sidebar appears the first
 	time someone opens the workspace, so building here, at install time, wins
 	the race — and an existing sidebar is the user's to keep, never stomped.
+
+	Every non-child doctype in the module is linked, on purpose. The desk picks a
+	sidebar for a list view from the sidebars that link that doctype, so one that
+	is missing sends its own list view to the auto-generated module sidebar.
+	`tests/test_sidebar_coverage.py` fails when a new doctype arrives without one.
 	"""
-	if frappe.db.exists("Workspace Sidebar", "Frappe Agents"):
+	if frappe.db.exists("Workspace Sidebar", WORKSPACE):
 		return
 	doc = frappe.new_doc("Workspace Sidebar")
-	doc.name = "Frappe Agents"
+	doc.title = WORKSPACE
+	doc.app = SIDEBAR_APP
 	for type_, label, link_type, link_to, icon, child in SIDEBAR:
 		row = {"type": type_, "label": label, "child": child, "collapsible": 1}
 		if type_ == "Section Break":
@@ -72,4 +115,4 @@ def build_workspace_sidebar():
 				row["icon"] = icon
 		doc.append("items", row)
 	doc.flags.ignore_permissions = True
-	doc.insert(ignore_permissions=True, set_name="Frappe Agents")
+	doc.insert(ignore_permissions=True, set_name=WORKSPACE)

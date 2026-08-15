@@ -32,6 +32,9 @@ broad rights. This app is built the other way around:
 
 - **Agent Chat** and an **Ask Agent** panel on any document — with conversation
   history, per-conversation model choice, and live tool progress.
+- **A permission matrix, not a tool list.** Per doctype: read, draft new, edit
+  drafts, propose, extract — plus row caps. Reusable access profiles, and an
+  effective-access panel on the agent that says what the rules actually come to.
 - **Approval queue** for anything that commits the business, with separation of
   duties and an edited-before-approval quality metric.
 - **Document extraction**: an attached PDF or image becomes a draft for human
@@ -61,6 +64,12 @@ Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
 Agent Auditor) and registers the built-in tools. Then, in the Desk: create an
 LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
 
+A new agent reaches nothing until you give it **access rules**: per doctype, may
+it read, draft, edit drafts, propose a submit, extract from a file. Attach the
+shipped **Personal Organizer** or **Site Reader** profile to start, or enable the
+**Agents Builder** and let it interview you. See [What an agent may
+reach](docs/access.md).
+
 A provider's **Base URL** is the host that receives your prompts and your API
 key, so it must be an `https://` address on the public internet. To point at a
 model you run yourself — Ollama on the same box, something on your own
@@ -70,6 +79,8 @@ before every request. Redirects are never followed.
 
 ## Docs
 
+- [What an agent may reach](docs/access.md) — access rules, profiles, the two
+  shipped profiles, and the Agents Builder.
 - [Agent Chat](docs/chat.md) — conversations, the composer chips, and the
   document a conversation is about.
 - [Files in chat](docs/files-in-chat.md) — naming a file an agent may read,
