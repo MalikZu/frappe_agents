@@ -48,7 +48,7 @@ its output).
 ```bash
 docker exec fa-backend-1 bash -lc 'cd /home/frappe/frappe-bench && bench --site clean_test migrate && bench --site clean_test run-tests --app frappe_agents'
 ```
-759 green on 2026-08-16 (integration branch). Check the COUNT moved as expected.
+827 green on 2026-08-16 (v0.6.0). Check the COUNT moved as expected.
 
 ## Updating frappe_agents code on the running stack
 
@@ -110,5 +110,5 @@ client-cached (`auto_generate_sidebar_from_module` is @site_cache).
   "frappe_agents" — list views filter sidebars by app and fall back to the
   auto module sidebar ("Frappe Agents", hammer icon) when it's empty.
 
-Last verified: 2026-08-16 — stack built, 759 tests green on clean_test, UAE demo
-site live, sidebar fix applied via method 1.
+Last verified: 2026-08-16 — v0.6.0 RELEASED; 827 tests green on clean_test;
+running image = the released tree; apps.json now pins tag v0.6.0 for rebuilds.
