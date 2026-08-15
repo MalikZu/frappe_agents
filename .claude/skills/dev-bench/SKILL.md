@@ -87,6 +87,11 @@ client-cached (`auto_generate_sidebar_from_module` is @site_cache).
   the frontend service so the auth fetch resolves. Also `sites/currentsite.txt`
   = test_site. VERIFY REALTIME WITH A BROWSER, NOT CURL — curl passes the
   transport handshake without ever hitting the namespace auth that fails.
+- HOT-COPIES MUST REACH EVERY PYTHON CONTAINER: backend, queue-long,
+  queue-short, scheduler each have their OWN container-local app tree. A
+  docker cp to fa-backend-1 alone leaves chat runs (queue workers!) on old
+  code — symptom: console-driven runs use new code, browser sends use old
+  (burned us on the Responses wire). Copy to all four + restart, or rebuild.
 - Fast JS iteration without an image rebuild: node lives at
   /home/frappe/.nvm/versions/node/v24.12.0/bin in the image — docker cp the
   source, then `export PATH=<that>:$PATH && bench build --app frappe_agents`;
