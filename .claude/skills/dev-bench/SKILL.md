@@ -15,7 +15,7 @@ Everything lives in `/Users/malik/Projects/fa-docker-bench/`:
 `scripts/{setup_wizard,grant_roles,seed_agents}.py`, `build.log`, `tests*.log`.
 
 Two sites on the stack:
-- **test_site** — Malik's hands-on site: UAE company (Falcon Trading LLC, AED),
+- **test_site** — the maintainer's hands-on site: UAE company (Falcon Trading LLC, AED),
   ERPNext demo data, users Administrator/admin + malik@leam.ae/admin.
   **Never run the suite here** — test records (13 _Test Company rows) already
   polluted it once.

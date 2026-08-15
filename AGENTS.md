@@ -31,3 +31,15 @@ The permission model is the product.
   They have no upstream license — never commit them.
 - Docs are for users: short sentences, plain words, no filler.
 - Keep this file small. Details go in `docs/` and get linked, not inlined.
+
+## Releases
+
+- Versions are computed (semantic-release); release notes are AUTHORED for the
+  person upgrading — never ship the generated commit list as the body.
+- Notes template: one sentence on what the release is, then **New** (user
+  language, where to find it), **After you upgrade** (what migrate does, what
+  to enable, what changed), **Fixed** (human sentences). The generated commit
+  list goes inside a collapsed `<details>`. Breaking changes first, bold.
+- Full procedure: `.claude/skills/release/SKILL.md`.
+- Public-facing text (release notes, docs, skills) never credits individuals
+  by name.

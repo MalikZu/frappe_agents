@@ -29,7 +29,7 @@ feat→minor, fix/perf→patch; docs/chore/refactor/test/ci→no release.
 3. Re-stamp any skill whose "Last verified" numbers changed (dev-bench test count).
 
 
-## Notes are WRITTEN, not generated (Malik's rule, 2026-08-16)
+## Notes are WRITTEN, not generated (house rule, 2026-08-16)
 
 The version is computed; the notes are authored. semantic-release still decides
 the number and creates the tag — then the generated body gets REPLACED. Never
@@ -58,7 +58,7 @@ merge time, not users at upgrade time.
    changes go FIRST, bold, before New; patch releases = intro line + Fixed only;
    screenshots when the change is visible.
 
-2. Show Malik the draft (30-second read) before anything is public.
+2. Show the maintainer the draft (30-second read) before anything is public.
 
 3. Dry-run -> dispatch -> then IMMEDIATELY:
    gh release edit vX.Y.Z --notes-file <the draft>
