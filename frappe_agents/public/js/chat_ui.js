@@ -647,7 +647,12 @@ frappe_agents.ChatUI = class ChatUI {
 		// The runs already drawn as failed. A failure reaches this surface up to
 		// twice — the run's own failure event and the error frame behind it, live
 		// or replayed from the log — and it is one piece of news.
-		this.failures = {};
+		//
+		// A Set of run names, not an object keyed by them: an object answers for
+		// `constructor` and `toString` whatever was put in it, and a run whose
+		// name collided with one of those would have its failure silently
+		// swallowed. Two runs that both failed are two failures, always.
+		this.failures = new Set();
 		// Events that arrived for a run this surface could not place yet, held
 		// until it can. See `hold_orphan`.
 		this.orphans = [];
@@ -1839,7 +1844,7 @@ frappe_agents.ChatUI = class ChatUI {
 				// run had a name here — the waiting line it should have taken down
 				// comes down now instead of sitting there for the rest of the
 				// session.
-				if (this.failures[r.message.run]) this.clear_pending(r.message.run);
+				if (this.failures.has(r.message.run)) this.clear_pending(r.message.run);
 				this.update_busy();
 				if (is_new && this.on_conversation) this.on_conversation(this.conversation, null);
 			},
@@ -2495,11 +2500,23 @@ frappe_agents.ChatUI = class ChatUI {
 	 * line's error.
 	 */
 	render_failure(run, error) {
-		if (this.failures[run]) return;
-		this.failures[run] = true;
+		// Deduplicated per run and only per run. A frame that cannot say which
+		// run it belongs to is drawn rather than counted: one failure shown
+		// twice is a blemish, and a failure shown to nobody is the bug this
+		// whole path exists to fix.
+		if (run) {
+			if (this.failures.has(run)) return;
+			this.failures.add(run);
+		}
 
 		this.clear_empty();
-		this.insert_before_pending(run, this.make_bubble(error || __("The run failed."), "is-error"));
+		const $row = this.make_bubble(error || __("The run failed."), "is-error");
+		// The run this failure belongs to, on the row itself. Two runs that fail
+		// in one session are two rows, and the reason each carries is the
+		// provider's own words — so this is what tells them apart, for a person
+		// scrolling back and for anyone checking that both of them drew.
+		if (run) $row.attr("data-failed-run", run);
+		this.insert_before_pending(run, $row);
 		this.clear_pending(run);
 		this.announce(__("The run failed."));
 	}
