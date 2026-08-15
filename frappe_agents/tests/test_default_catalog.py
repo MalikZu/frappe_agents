@@ -16,7 +16,12 @@ test transaction and reseeds, instead of trusting whatever state migrate left.
 import frappe
 
 from frappe_agents.default_catalog import PROFILES, PROVIDERS, seed_default_catalog
-from frappe_agents.runner.providers import endpoint_refusal
+from frappe_agents.runner.providers import (
+	PROVIDER_ANTHROPIC,
+	PROVIDER_OPENAI,
+	PROVIDER_RESPONSES,
+	endpoint_refusal,
+)
 from frappe_agents.tests.fixtures import AgentTestCase
 
 PROVIDER_NAMES = tuple(row["provider_name"] for row in PROVIDERS)
@@ -117,9 +122,25 @@ class TestDefaultCatalog(AgentTestCase):
 			)
 
 	def test_every_seeded_wire_format_is_implemented(self):
-		implemented = {"OpenAI Compatible", "Anthropic"}
+		# Named from the wire module rather than spelled out again here, so a
+		# renamed Select option breaks at import instead of passing quietly.
+		implemented = {PROVIDER_OPENAI, PROVIDER_RESPONSES, PROVIDER_ANTHROPIC}
 		for row in PROVIDERS:
 			self.assertIn(row["provider_type"], implemented)
+
+	def test_openai_seeds_on_the_responses_wire(self):
+		# A fresh site must not start OpenAI on the compat wire: the first thing
+		# an agent does there is call a tool, and GPT-5.4 and later answer that
+		# with a 400. Every other seeded row stays on compat deliberately.
+		wires = {row["provider_name"]: row["provider_type"] for row in PROVIDERS}
+		self.assertEqual(wires["OpenAI"], PROVIDER_RESPONSES)
+		self.assertEqual(wires["Google Gemini"], PROVIDER_OPENAI)
+		self.assertEqual(wires["xAI"], PROVIDER_OPENAI)
+		self.assertEqual(wires["DeepSeek"], PROVIDER_OPENAI)
+
+		_purge_catalog()
+		seed_default_catalog()
+		self.assertEqual(frappe.db.get_value("LLM Provider", "OpenAI", "provider_type"), PROVIDER_RESPONSES)
 
 	def test_every_profile_links_a_seeded_provider(self):
 		for row in PROFILES:

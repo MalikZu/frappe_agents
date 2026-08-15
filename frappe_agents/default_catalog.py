@@ -26,9 +26,15 @@ wire gets native PDF).
 import frappe
 
 PROVIDERS = (
+	# OpenAI's own endpoint seeds on the Responses wire, and it is the only row
+	# here that does. GPT-5.4 and later refuse to call tools on
+	# /v1/chat/completions unless reasoning is switched off, and calling tools is
+	# the whole of what an agent does — so the compat wire is a dead end on this
+	# host. Everyone below serves /v1/chat/completions and mostly does not serve
+	# /v1/responses at all, which is why they stay where they are.
 	{
 		"provider_name": "OpenAI",
-		"provider_type": "OpenAI Compatible",
+		"provider_type": "OpenAI Responses",
 		"base_url": "https://api.openai.com/v1",
 	},
 	{
