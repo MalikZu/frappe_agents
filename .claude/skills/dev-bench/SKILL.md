@@ -64,6 +64,9 @@ Two ways:
    `fa-docker-bench/frappe_docker/`, NOTHING ELSE HEAVY RUNNING:
    `docker build --build-arg=FRAPPE_PATH=https://github.com/frappe/frappe --build-arg=FRAPPE_BRANCH=version-16 --secret=id=apps_json,src=apps.json --build-arg=CACHE_BUST=$(date +%s) --tag=fa-apps:v0.6.0-preview --file=images/layered/Containerfile .`
    (~28 min) then `docker compose -p fa up -d` recreates onto the new image.
+   AFTER any recreate of backend: `docker restart fa-frontend-1` — its nginx
+   resolves the backend hostname at startup and keeps the DEAD container's IP,
+   serving 502/504 until restarted (bit us 2026-08-16).
    NOTE: current frappe_docker uses the **secret mount**, not APPS_JSON_BASE64 —
    the base64 build-arg is dead, docs forbid it.
 
