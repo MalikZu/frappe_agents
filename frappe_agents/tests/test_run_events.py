@@ -20,17 +20,20 @@ import frappe
 from frappe_agents.api import get_conversation, start_run
 from frappe_agents.runner.providers import ProviderError
 from frappe_agents.runner.run import (
+	ERROR_LIMIT,
 	EVENT,
 	EVENT_LOG_BYTES,
 	EVENT_LOG_HEAD,
 	EVENT_LOG_TAIL,
 	EVENT_TEXT_LIMIT,
+	RUN_FAILED,
 	STREAM_FLUSH_CHARS,
 	STREAM_FLUSH_MS,
 	STREAM_FRAME_CHARS,
 	TRUNCATION_NOTE,
 	StreamThrottle,
 	_event_log,
+	execute_run,
 )
 from frappe_agents.tests.fixtures import (
 	AGENT,
@@ -274,7 +277,94 @@ class TestRunEvents(AgentTestCase):
 		name = self.run_once([ProviderError("The provider is unreachable.")])
 
 		self.assertEqual(frappe.db.get_value("Agent Run", name, "status"), "Failed")
-		self.assertEqual(event_types(run_events(name)), ["agent_start", "turn_start"])
+		self.assertEqual(event_types(run_events(name)), ["agent_start", "turn_start", RUN_FAILED])
+
+	# --- how a run says it failed --------------------------------------------
+
+	def failure(self, events: list[dict]) -> dict:
+		failures = [event for event in events if event.get("type") == RUN_FAILED]
+		self.assertEqual(len(failures), 1)
+		return failures[0]
+
+	def test_a_failed_run_writes_the_failure_into_its_own_log(self):
+		"""The failure belongs with the rest of the run, not only on the row.
+
+		The log is what a reopened conversation is redrawn from. A failure that
+		lived in one realtime frame and a column was news the surface heard once
+		and could never ask for again.
+		"""
+		name = self.run_once([ProviderError("HTTP 401 from the provider.")])
+
+		failure = self.failure(run_events(name))
+		self.assertEqual(failure["status"], "Failed")
+		self.assertEqual(failure["error"], "HTTP 401 from the provider.")
+
+	def test_the_failure_is_the_last_thing_the_log_says(self):
+		"""Log order is draw order, so the reason comes after what led to it."""
+		name = self.run_once([SEARCH, ProviderError("The provider is unreachable.")])
+
+		stored = run_events(name)
+		self.assertEqual(stored[-1]["type"], RUN_FAILED)
+		self.assertIn("tool_execution_end", event_types(stored))
+
+	def test_the_failure_carries_the_number_it_went_out_with(self):
+		"""It is one more event in the sequence, numbered like the rest."""
+		name = self.run_once([SEARCH, ProviderError("The provider is unreachable.")])
+
+		stored = run_events(name)
+		self.assertEqual([event["seq"] for event in stored], list(range(1, len(stored) + 1)))
+
+	def test_a_run_refused_before_the_loop_still_says_why_in_its_log(self):
+		"""The identity checks happen before there is a loop to have events.
+
+		A run refused there used to store nothing at all, so the chat had a turn
+		that stopped at "Queued…" and a log with no reason in it.
+		"""
+		run = make_run(effective_user=RESTRICTED_USER)
+		frappe.db.set_value("Agent Run", run.name, "effective_user", "Administrator", update_modified=False)
+
+		execute_run(run.name)
+
+		failure = self.failure(run_events(run.name))
+		self.assertEqual(failure["status"], "Failed")
+		self.assertEqual(failure["error"], "Refusing to run as Administrator.")
+		self.assertEqual(failure["seq"], 1)
+
+	def test_the_stored_reason_is_bounded(self):
+		"""A provider may answer with a megabyte. The log keeps a summary of it."""
+		name = self.run_once([ProviderError("x" * (ERROR_LIMIT * 10))])
+
+		failure = self.failure(run_events(name))
+		self.assertEqual(len(failure["error"]), ERROR_LIMIT)
+		self.assertEqual(failure["error"], frappe.db.get_value("Agent Run", name, "error"))
+
+	def test_the_failure_goes_out_in_the_envelope_the_log_stores(self):
+		"""Live and replayed are the same event, so the surface draws it one way.
+
+		The legacy error frame still goes out behind it: a browser serving an
+		older bundle has never heard of this event kind and reads that one.
+		"""
+		run = make_run(effective_user=RESTRICTED_USER)
+
+		events = self.published(run.name, [ProviderError("The provider is unreachable.")])
+
+		published = [event["event"] for event in events if event["type"] == "harness_event"]
+		self.assertEqual(self.failure(published), self.failure(run_events(run.name)))
+		self.assertEqual(events[-1]["type"], "error")
+
+	def test_a_reload_gets_the_failure_back(self):
+		"""The rehydrate path end to end: the reason comes back through the API."""
+		with as_user(RESTRICTED_USER), patch("frappe.enqueue"):
+			started = start_run(agent=AGENT, message="How many tickets are open?")
+
+		run_with_model(started["run"], [ProviderError("HTTP 401 from the provider.")])
+
+		with as_user(RESTRICTED_USER):
+			runs = get_conversation(started["conversation"])["runs"]
+
+		replayed = next(run for run in runs if run["name"] == started["run"])
+		self.assertEqual(self.failure(replayed["event_log"])["error"], "HTTP 401 from the provider.")
+		self.assertEqual(replayed["status"], "Failed")
 
 	def test_a_conversation_replays_the_run_it_stored(self):
 		"""The rehydrate path end to end: the log comes back through the API.

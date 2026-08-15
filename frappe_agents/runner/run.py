@@ -63,6 +63,11 @@ EVENT = "frappe_agents:run_update"
 # The loop's own events, forwarded as they happen. The three legacy event types
 # still go out beside them, unchanged, because the chat surface reads those.
 HARNESS_EVENT = "harness_event"
+# The one event a run writes about itself. Every other entry in the log came off
+# the loop; this one says the loop never reached an answer, and it is written
+# down rather than only published because the log is what a reopened
+# conversation is redrawn from.
+RUN_FAILED = "run_failed"
 # The answer as it is written. This one is published and never stored: the log
 # keeps final state, and a run's own message_end says everything it said.
 UPDATE_EVENT = "message_update"
@@ -911,7 +916,7 @@ def _tool_content(result: dict) -> str:
 	return content
 
 
-def _event_log(entries: list[dict]) -> str:
+def _event_log(entries: list[dict], truncated: bool = False) -> str:
 	"""The run's events as stored JSON, capped in count, in size, and per event.
 
 	A run that called a tool a hundred times would otherwise put megabytes on one
@@ -920,9 +925,13 @@ def _event_log(entries: list[dict]) -> str:
 	Each event is cut down to what one event may say before any of that happens.
 	An event is a thing that happened, and every one of them is worth more to a
 	person reading the run than the tail of the longest one.
+
+	`truncated` is what a log being added to already said about itself. Rebuilt
+	from entries that were capped once already, the caps have nothing left to
+	drop and would otherwise report a whole log where the first pass reported a
+	cut one.
 	"""
 	kept = list(entries)
-	truncated = False
 
 	if len(kept) > EVENT_LOG_HEAD + EVENT_LOG_TAIL:
 		kept = kept[:EVENT_LOG_HEAD] + kept[-EVENT_LOG_TAIL:]
@@ -1015,7 +1024,61 @@ def _fail(run: Any, message: str, status: str = "Failed") -> None:
 		_update(run, {"status": status, "error": error, "ended_at": now_datetime()})
 	except Exception:
 		frappe.logger("frappe_agents").error(f"could not record failure on run {run.name}", exc_info=True)
+	_record_failure(run, status, error)
 	publish_event(run, "error", status=status, error=error)
+
+
+def _record_failure(run: Any, status: str, error: str) -> None:
+	"""Put the failure in the log, and on the wire in the envelope the log stores.
+
+	A failure used to live in two places a reopened conversation cannot read in
+	order: one realtime frame, gone the instant it was sent, and the run's own
+	`error` column, which is drawn after everything else or not at all. A chat
+	that was not listening at that instant — a reload mid-run, a conversation
+	switched and switched back, a panel opened a second later — had a turn that
+	stopped at "Queued…" and stayed there.
+
+	So the failure goes where the rest of the run already is. The log is what the
+	chat redraws a finished run from, and this is one more event in it, in its
+	place in the sequence. The live frame carries the same payload under the same
+	envelope as every other event, so the surface draws it the one way whether it
+	heard it live or read it back afterwards.
+
+	A log that will not write must not fail the run — the run has already failed,
+	and its `error` column is written by the caller either way.
+	"""
+	stored, truncated = _stored_events(run)
+	payload = {
+		"type": RUN_FAILED,
+		"status": status,
+		"error": error,
+		"seq": max((cint(event.get("seq")) for event in stored), default=len(stored)) + 1,
+	}
+	try:
+		_update(run, {"event_log": _event_log([*stored, payload], truncated)})
+	except Exception:
+		frappe.logger("frappe_agents").error(f"could not store the failure of run {run.name}", exc_info=True)
+	publish_event(run, HARNESS_EVENT, seq=payload["seq"], event=payload)
+
+
+def _stored_events(run: Any) -> tuple[list[dict], bool]:
+	"""What the run has written down so far, ready to be added to.
+
+	A run refused before the loop was built has no log at all, which is not a
+	problem to report: it is a run whose first event is the reason it stopped.
+	"""
+	raw = run.get("event_log")
+	if not raw:
+		return [], False
+	try:
+		log = frappe.parse_json(raw) or {}
+		events = [event for event in (log.get("events") or []) if isinstance(event, dict)]
+		return events, bool(log.get("truncated"))
+	except Exception:
+		# A log nobody can read is a log with nothing in it. Keeping the failure
+		# is worth more than keeping whatever the unreadable bytes were.
+		frappe.logger("frappe_agents").error(f"could not read the event log of run {run.name}")
+		return [], False
 
 
 def publish_event(run: Any, event_type: str, **payload: Any) -> None:
