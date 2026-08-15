@@ -569,13 +569,18 @@ def _responses_input(messages: list[dict]) -> tuple[str, list[dict]]:
 			continue
 
 		if role == "assistant":
-			# Reasoning leads the turn, because that is the order it was written
-			# in and the order the API wants it back in.
-			items.extend(_responses_reasoning_items(message))
 			content = _responses_content(message.get("content"), "output_text")
+			calls = message.get("tool_calls") or []
+			# Reasoning leads the turn, because that is the order it was written
+			# in and the order the API wants it back in — and it is only replayed
+			# when the thing it produced follows it. A reasoning item whose output
+			# item is missing is rejected by name, and the whole request with it,
+			# so a turn that thought and then said nothing hands back nothing.
+			if content or calls:
+				items.extend(_responses_reasoning_items(message))
 			if content:
 				items.append({"type": "message", "role": "assistant", "content": content})
-			for call in message.get("tool_calls") or []:
+			for call in calls:
 				items.append(
 					{
 						"type": "function_call",
@@ -1779,6 +1784,12 @@ def call_model_extract(
 	_check_wire_size(provider, media_type, len(encoded))
 
 	engine = pdf_engine if (openrouter and media_type == PDF_MEDIA_TYPE) else PDF_ENGINE_NATIVE
+	# Two extraction wires, not three: a Responses provider extracts over
+	# chat/completions like every other OpenAI-compatible row, and that is the
+	# decision rather than an oversight. What forced the Responses wire for chat
+	# was reasoning colliding with bound tools, and extraction binds none — so the
+	# older endpoint still answers it, and it is the one that takes a JSON schema
+	# in the shape this code already builds.
 	anthropic = provider.provider_type == PROVIDER_ANTHROPIC
 	if anthropic:
 		_check_anthropic_structured(profile)

@@ -321,6 +321,36 @@ class TestResponsesRequest(ResponsesCase):
 		payload = self.sent(messages).kwargs["json"]
 		self.assertEqual(items_of(payload, "reasoning"), [])
 
+	def test_reasoning_with_nothing_after_it_is_never_sent_on_its_own(self):
+		"""A reasoning item is only valid beside the thing it produced.
+
+		OpenAI refuses an input whose reasoning item is not followed by the output
+		item it led to — by name, with the whole request. A turn that thought and
+		then said nothing (a run cut short, a transcript trimmed to the wrong
+		place) would otherwise replay the reasoning as the last item and 400 every
+		later turn in that conversation.
+		"""
+		item = reasoning_item()
+		orphan = {
+			"role": "assistant",
+			"content": "",
+			"thinking": [{"thinking": "", "signature": packed(item)}],
+		}
+		payload = self.sent([*MESSAGES, orphan]).kwargs["json"]
+
+		self.assertEqual([entry["type"] for entry in payload["input"]], ["message"])
+		self.assertEqual(items_of(payload, "reasoning"), [])
+
+		# It still travels when the turn did produce something, either kind.
+		for tail in (
+			{**orphan, "content": "Three."},
+			{**orphan, "tool_calls": [{"id": "call_a", "name": "search_documents", "args": {}}]},
+		):
+			with self.subTest(produced="text" if tail.get("content") else "call"):
+				payload = self.sent([*MESSAGES, tail]).kwargs["json"]
+				self.assertEqual(items_of(payload, "reasoning"), [item])
+				self.assertNotEqual(payload["input"][-1]["type"], "reasoning")
+
 
 class TestResponsesAnswer(ResponsesCase):
 	"""The whole-answer path: `output` items in, text and tool calls out."""
