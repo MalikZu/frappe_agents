@@ -38,6 +38,20 @@ from frappe_agents.tests.fixtures import PROFILE, PROVIDER, AgentTestCase
 
 MESSAGES = [{"role": "user", "content": "How many tickets are open?"}]
 
+# One tool, in the shape the runner hands them to the provider. The body only
+# ever asks whether there are any, so one is the whole question.
+TOOL_SCHEMAS = [
+	{
+		"name": "search_documents",
+		"description": "Find documents.",
+		"args_schema": {"type": "object", "properties": {"doctype": {"type": "string"}}},
+	}
+]
+
+# Every name a provider has used for "think harder about this". None of them
+# belongs in a body nobody asked to put them in.
+REASONING_KEYS = ("reasoning_effort", "reasoning", "reasoning_config", "thinking")
+
 
 # --- canned streams ----------------------------------------------------------
 
@@ -902,6 +916,68 @@ class TestStreamTransport(AgentTestCase):
 			next(stream)
 			stream.close()
 		self.assertTrue(response.closed)
+
+
+class TestOpenAIRequestParameters(AgentTestCase):
+	"""Everything the OpenAI chat body carries — and nothing it does not.
+
+	A profile names a model and a window. It does not name a sampling
+	temperature, a token budget or a reasoning effort, and the wire says exactly
+	what the profile says: an inference parameter nobody configured is the
+	provider's default to pick, not ours to guess.
+
+	Reasoning is the one worth pinning. Some models refuse a request that carries
+	`reasoning_effort` beside function tools on this endpoint and answer with an
+	HTTP 400 naming the parameter — a failure that looks like ours and is not,
+	because the default effort those models apply is applied server-side. Sending
+	the parameter unasked would turn that into a request we really did break, on
+	every model that has an opinion about it. So the body stays what it is, and
+	these say so: with tools, without tools, streamed and whole.
+	"""
+
+	def streamed_body(self, tool_schemas=None) -> dict:
+		body = sse(openai_frame({"content": "Hi"}), openai_frame({}, finish_reason="stop"), "data: [DONE]")
+		with patch("frappe_agents.runner.providers.requests.post", return_value=FakeStream([body])) as post:
+			list(call_model_stream(PROFILE, MESSAGES, tool_schemas))
+		return post.call_args.kwargs["json"]
+
+	def whole_body(self, tool_schemas=None) -> dict:
+		answer = {"choices": [{"message": {"content": "Hi"}}]}
+		with patch("frappe_agents.runner.providers._post", return_value=answer) as post:
+			call_model(PROFILE, MESSAGES, tool_schemas)
+		return post.call_args.args[2]
+
+	def assert_no_reasoning(self, payload: dict) -> None:
+		for key in REASONING_KEYS:
+			self.assertNotIn(key, payload)
+
+	def test_a_streamed_request_names_no_reasoning_parameter(self):
+		self.assert_no_reasoning(self.streamed_body())
+
+	def test_a_streamed_request_with_tools_names_no_reasoning_parameter(self):
+		"""The combination some models refuse. It is not one we ever send."""
+		payload = self.streamed_body(TOOL_SCHEMAS)
+
+		self.assertEqual(payload["tools"][0]["function"]["name"], "search_documents")
+		self.assert_no_reasoning(payload)
+
+	def test_a_whole_request_names_no_reasoning_parameter(self):
+		"""The non-streaming path builds its own body, so it is asked separately."""
+		self.assert_no_reasoning(self.whole_body())
+
+	def test_a_whole_request_with_tools_names_no_reasoning_parameter(self):
+		payload = self.whole_body(TOOL_SCHEMAS)
+
+		self.assertEqual(payload["tools"][0]["function"]["name"], "search_documents")
+		self.assert_no_reasoning(payload)
+
+	def test_the_two_paths_send_the_same_body_apart_from_the_streaming(self):
+		"""One wire, built twice. A key added to one and not the other is a bug."""
+		streamed = self.streamed_body(TOOL_SCHEMAS)
+		whole = self.whole_body(TOOL_SCHEMAS)
+
+		self.assertEqual(set(streamed) - set(whole), {"stream", "stream_options"})
+		self.assertEqual(set(whole) - set(streamed), set())
 
 
 class TestProviderEndpoint(AgentTestCase):
