@@ -596,6 +596,10 @@ frappe_agents.ChatUI = class ChatUI {
 		// What each run is writing right now: the message on screen, the text
 		// accumulated for it, and the thinking strips open beside it.
 		this.streams = {};
+		// The runs already drawn as failed. A failure reaches this surface up to
+		// twice — the run's own failure event and the error frame behind it, live
+		// or replayed from the log — and it is one piece of news.
+		this.failures = {};
 		this.update_busy();
 		this.render_attachments();
 	}
@@ -1531,16 +1535,19 @@ frappe_agents.ChatUI = class ChatUI {
 		// every message the agent wrote, in the order they happened. A run from
 		// before the log was stored has only its final message to show.
 		const events = Array.isArray(run.event_log) ? run.event_log : [];
-		const said = events.length ? this.replay_run_events(run.name, events) : "";
+		const replayed = events.length ? this.replay_run_events(run.name, events) : {};
 
 		if (run.output_message) {
 			// Already on screen when the log carried it, which it does for every
 			// run that recorded one.
-			if (run.output_message !== said) {
+			if (run.output_message !== replayed.said) {
 				this.$log.append(this.make_bubble(run.output_message, "", true));
 			}
 		} else if (run.error) {
-			this.$log.append(this.make_bubble(run.error, "is-error"));
+			// Same as the answer above: on screen already when the log carried the
+			// failure, and drawn from the row for a run that failed before the log
+			// held one.
+			if (!replayed.failed) this.$log.append(this.make_bubble(run.error, "is-error"));
 		} else if (["Queued", "Running"].includes(run.status)) {
 			// Still in flight: keep a pending line so realtime updates land in place.
 			const $pending = $("<div class='agent-chat-status'></div>")
@@ -1583,14 +1590,20 @@ frappe_agents.ChatUI = class ChatUI {
 	 * A reopened conversation used to show the questions and the answers and
 	 * nothing in between: the tool lines, the thinking and the proposal cards
 	 * were published while the run was going and never drawn again. All of it is
-	 * in the run's event log. Returns the last thing the agent said, which is how
-	 * the caller knows the stored answer is already on screen.
+	 * in the run's event log. Returns the last thing the agent said and whether
+	 * the run wrote down a failure, which is how the caller knows what the row
+	 * holds is already on screen.
+	 *
+	 * An event kind this browser does not know is skipped, not drawn and not
+	 * fatal: a log written by a newer version of the app has to replay as much
+	 * of itself as this one understands.
 	 */
 	replay_run_events(run, events) {
 		// The reason the agent gave is an argument of the call, not part of its
 		// result, so it is picked up when the call starts.
 		const reasons = {};
 		let said = "";
+		let failed = false;
 
 		events.forEach((event) => {
 			if (!event || !event.type) return;
@@ -1601,6 +1614,11 @@ frappe_agents.ChatUI = class ChatUI {
 			}
 			if (event.type === "message_end") {
 				said = this.replay_message(run, event.message) || said;
+				return;
+			}
+			if (event.type === "run_failed") {
+				failed = true;
+				this.render_failure(run, event.error);
 				return;
 			}
 			if (event.type !== "tool_execution_end") return;
@@ -1619,7 +1637,7 @@ frappe_agents.ChatUI = class ChatUI {
 				reason: reasons[event.toolCallId] || "",
 			});
 		});
-		return said;
+		return { said: said, failed: failed };
 	}
 
 	/**
@@ -1757,6 +1775,12 @@ frappe_agents.ChatUI = class ChatUI {
 				this.conversation = r.message.conversation;
 				$pending.attr("data-run", r.message.run);
 				this.pending[r.message.run] = $pending;
+				// A run can be refused before this answer gets back — the identity
+				// checks happen before the model is ever called. The failure was
+				// drawn when it arrived, against a run this surface could not yet
+				// name, so the waiting line it should have taken down comes down
+				// here instead of sitting there for the rest of the session.
+				if (this.failures[r.message.run]) this.clear_pending(r.message.run);
 				this.update_busy();
 				if (is_new && this.on_conversation) this.on_conversation(this.conversation, null);
 			},
@@ -1887,6 +1911,12 @@ frappe_agents.ChatUI = class ChatUI {
 			this.record_tool_result(data.run, event);
 		} else if (event.type === "message_end") {
 			this.finish_stream_message(data.run, event.message);
+		} else if (event.type === "run_failed") {
+			// The same event the log stores, so a failure heard live and a failure
+			// read back afterwards go through one path. The error frame behind this
+			// one is the same news and is dropped; a browser serving an older
+			// bundle never learns this kind and draws that frame instead.
+			this.render_failure(data.run, event.error);
 		}
 	}
 
@@ -2315,15 +2345,38 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	render_error(data) {
-		const text = data.error || data.text || __("The run failed.");
+		this.render_failure(data.run, data.error || data.text);
+	}
+
+	/**
+	 * A run that ended without an answer, drawn once and drawn the same way.
+	 *
+	 * Three things arrive here: the error frame the run publishes, the failure
+	 * event stored in its log and replayed on a reload, and the same failure
+	 * event live. They are one piece of news, so the first one draws it and the
+	 * rest are dropped — otherwise a reload would show the reason twice.
+	 *
+	 * The reason is model-adjacent text — a provider says what it likes in an
+	 * HTTP body — so it goes in as text, never as markdown, exactly like a tool
+	 * line's error.
+	 */
+	render_failure(run, error) {
+		if (this.failures[run]) return;
+		this.failures[run] = true;
+
 		this.clear_empty();
-		this.insert_before_pending(data.run, this.make_bubble(text, "is-error"));
-		const $pending = this.pending[data.run];
+		this.insert_before_pending(run, this.make_bubble(error || __("The run failed."), "is-error"));
+		this.clear_pending(run);
+		this.announce(__("The run failed."));
+	}
+
+	/** Take down the waiting line for a run that has landed, however it landed. */
+	clear_pending(run) {
+		const $pending = this.pending[run];
 		if ($pending) {
 			$pending.remove();
-			delete this.pending[data.run];
+			delete this.pending[run];
 		}
-		this.announce(__("The run failed."));
 		this.update_busy();
 	}
 
