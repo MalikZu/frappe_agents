@@ -3,6 +3,11 @@
 // the global is always there.
 frappe.provide("frappe_agents");
 
+// This page's own name in the desk, which is also what a workspace sidebar item
+// links to when it points here. It is how the sidebar is found again on a route
+// that names a conversation — see `keep_sidebar`.
+const PAGE_NAME = "agent-chat";
+
 const RAIL_STYLE_ID = "frappe-agents-rail-styles";
 // Remembered per browser, not per user record: which furniture is open is not
 // something to spend a server round trip on.
@@ -167,6 +172,7 @@ frappe.pages["agent-chat"].on_page_load = function (wrapper) {
 
 frappe.pages["agent-chat"].on_page_show = function () {
 	if (frappe_agents.chat_page) {
+		frappe_agents.chat_page.keep_sidebar();
 		frappe_agents.chat_page.refresh();
 	}
 };
@@ -449,6 +455,47 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		this.chat.load_conversation(name);
 		this.mark_active();
 		if (this.route_conversation() !== name) frappe.set_route("agent-chat", name);
+		this.keep_sidebar();
+	}
+
+	/**
+	 * Keep the desk's own sidebar on screen while the route names a conversation.
+	 *
+	 * The desk works out which sidebar to draw from one segment of the route, and
+	 * on `agent-chat/<conversation>` that segment is a conversation id. It links
+	 * to no workspace, so nothing resolves and the drawer comes up empty: the
+	 * page is fine and the furniture around it is gone. A deep link to a
+	 * conversation is exactly the link people send each other, so it is exactly
+	 * the one that must not land somewhere that looks broken.
+	 *
+	 * The page route is the one that should have been asked about, and this asks
+	 * it — by this page's own name, so nothing here repeats a workspace title
+	 * that the install owns and can rename.
+	 *
+	 * All of it is optional. A desk without this API, or an install whose sidebar
+	 * does not link to this page, is left exactly as it was: no sidebar is worth
+	 * more than a broken one.
+	 */
+	keep_sidebar() {
+		const sidebar = frappe.app && frappe.app.sidebar;
+		if (!sidebar || typeof sidebar.setup !== "function") return;
+		if (typeof sidebar.get_workspace_sidebars !== "function") return;
+
+		let candidates = [];
+		try {
+			candidates = sidebar.get_workspace_sidebars(PAGE_NAME) || [];
+		} catch (e) {
+			return;
+		}
+		// Nothing links here, or what is already up does: the desk's own first
+		// rule, and the answer to somebody who chose another sidebar on this page.
+		if (!candidates.length || candidates.includes(sidebar.sidebar_title)) return;
+
+		try {
+			sidebar.setup(candidates[0]);
+		} catch (e) {
+			console.error("frappe_agents: could not restore the sidebar", e);
+		}
 	}
 
 	/** A different agent is a different conversation, so the route stops naming one. */
@@ -492,6 +539,7 @@ frappe_agents.AgentChatPage = class AgentChatPage {
 		// Freshly created by the first message: make it linkable, and list it.
 		if (conversation && conversation !== this.route_conversation()) {
 			frappe.set_route("agent-chat", conversation);
+			this.keep_sidebar();
 		}
 		this.load_conversations();
 	}
