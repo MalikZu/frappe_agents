@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Malik AlZubaidi and contributors
 # For license information, please see LICENSE
 
-"""The two SSE parsers, fed canned bytes.
+"""The three SSE parsers, fed canned bytes.
 
 Nothing here touches the network. A stream is a list of byte chunks, and the
 chunk boundaries are the point: the network decides where a packet ends, and it
@@ -24,6 +24,7 @@ import requests
 from frappe_agents.runner.providers import (
 	ERROR_BODY_BYTES,
 	ERROR_BODY_LIMIT,
+	RESPONSES_REASONING_MARKER,
 	SSE_LINE_LIMIT,
 	STREAM_CONNECT_TIMEOUT,
 	STREAM_IDLE_TIMEOUT,
@@ -33,6 +34,7 @@ from frappe_agents.runner.providers import (
 	call_model_stream,
 	parse_anthropic_stream,
 	parse_openai_stream,
+	parse_responses_stream,
 )
 from frappe_agents.tests.fixtures import PROFILE, PROVIDER, AgentTestCase
 
@@ -74,6 +76,50 @@ def data_frame(payload: dict | str) -> str:
 
 def named_frame(event: str, payload: dict) -> str:
 	return f"event: {event}\ndata: {dumped(payload)}"
+
+
+def responses_frame(kind: str, **fields) -> str:
+	"""One semantic Responses event, named in the SSE header and in the body.
+
+	The wire says the type twice and the parser reads the body, so both are set:
+	a test that only sets one would pass against a parser reading the other.
+	"""
+	return named_frame(kind, {"type": kind, **fields})
+
+
+def item_added(output_index: int, item: dict) -> str:
+	return responses_frame("response.output_item.added", output_index=output_index, item=item)
+
+
+def item_done(output_index: int, item: dict) -> str:
+	return responses_frame("response.output_item.done", output_index=output_index, item=item)
+
+
+def responses_done(
+	status: str = "completed",
+	tokens_in: int = 0,
+	tokens_out: int = 0,
+	incomplete_reason: str | None = None,
+	error: dict | None = None,
+) -> str:
+	"""The whole response object that ends the stream, as each status sends it."""
+	kind = {
+		"completed": "response.completed",
+		"incomplete": "response.incomplete",
+		"failed": "response.failed",
+	}[status]
+	response: dict = {"id": "resp_1", "object": "response", "status": status}
+	if tokens_in or tokens_out:
+		response["usage"] = {
+			"input_tokens": tokens_in,
+			"output_tokens": tokens_out,
+			"total_tokens": tokens_in + tokens_out,
+		}
+	if incomplete_reason:
+		response["incomplete_details"] = {"reason": incomplete_reason}
+	if error:
+		response["error"] = error
+	return responses_frame(kind, response=response)
 
 
 def openai_frame(delta: dict, finish_reason: str | None = None) -> str:
@@ -679,6 +725,350 @@ class TestAnthropicStream(AgentTestCase):
 		self.assertIn("Overloaded", str(caught.exception))
 
 
+class TestResponsesStream(AgentTestCase):
+	"""The OpenAI Responses wire format, which names every boundary it has.
+
+	Nothing has to be inferred here — items are announced and closed, and deltas
+	say which item they belong to. What still has to be got right is that the
+	end of an item is where the truth is: a tool call's arguments are only
+	complete there, and a reasoning item's encrypted content may still be a
+	fragment when the item opens.
+	"""
+
+	def test_text_arrives_as_one_block_however_the_bytes_are_cut(self):
+		message = {"id": "msg_1", "type": "message", "role": "assistant", "content": []}
+		body = sse(
+			responses_frame("response.created", response={"id": "resp_1", "status": "in_progress"}),
+			item_added(0, message),
+			responses_frame("response.content_part.added", output_index=0, content_index=0),
+			responses_frame("response.output_text.delta", output_index=0, delta="Three "),
+			responses_frame("response.output_text.delta", output_index=0, delta="tickets "),
+			responses_frame("response.output_text.delta", output_index=0, delta="are open."),
+			responses_frame("response.output_text.done", output_index=0, text="Three tickets are open."),
+			item_done(0, message),
+			responses_done(tokens_in=41, tokens_out=7),
+		)
+
+		for label, stream in (("whole", [body]), ("byte by byte", one_byte_at_a_time(body))):
+			with self.subTest(label):
+				chunks = list(parse_responses_stream(stream, model="fa-test-model"))
+				self.assertEqual(chunks[0], {"type": "message_start", "model": "fa-test-model"})
+				self.assertEqual(joined(chunks, "text_delta"), "Three tickets are open.")
+				self.assertEqual(len(of_type(chunks, "text_start")), 1)
+				self.assertEqual(
+					of_type(chunks, "text_end")[0],
+					{"type": "text_end", "index": 0, "text": "Three tickets are open."},
+				)
+				self.assertEqual(
+					of_type(chunks, "usage")[-1],
+					{"type": "usage", "tokens_in": 41, "tokens_out": 7},
+				)
+				self.assertEqual(chunks[-1], {"type": "message_end", "reason": "stop"})
+
+	def test_a_chunk_cut_through_a_character_loses_nothing(self):
+		answer = "Café ✅ مرحبا"
+		message = {"id": "msg_1", "type": "message", "role": "assistant", "content": []}
+		body = sse(
+			item_added(0, message),
+			responses_frame("response.output_text.delta", output_index=0, delta=answer),
+			item_done(0, message),
+			responses_done(),
+		)
+
+		for position in range(1, len(body)):
+			chunks = list(parse_responses_stream(cut_at(body, position)))
+			self.assertEqual(joined(chunks, "text_delta"), answer)
+
+	def test_reasoning_becomes_a_thinking_block_carrying_the_item_to_replay(self):
+		"""The summary is what a human reads; the signature is what the model gets back."""
+		opening = {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "ENC-PART"}
+		finished = {
+			"id": "rs_1",
+			"type": "reasoning",
+			"summary": [{"type": "summary_text", "text": "Counting open tickets."}],
+			"encrypted_content": "ENC-WHOLE",
+			"status": "completed",
+		}
+		body = sse(
+			item_added(0, opening),
+			responses_frame("response.reasoning_summary_part.added", output_index=0, summary_index=0),
+			responses_frame(
+				"response.reasoning_summary_text.delta", output_index=0, summary_index=0, delta="Counting "
+			),
+			responses_frame(
+				"response.reasoning_summary_text.delta",
+				output_index=0,
+				summary_index=0,
+				delta="open tickets.",
+			),
+			item_done(0, finished),
+			responses_done(),
+		)
+
+		for label, stream in (("whole", [body]), ("byte by byte", one_byte_at_a_time(body))):
+			with self.subTest(label):
+				chunks = list(parse_responses_stream(stream))
+				start = of_type(chunks, "thinking_start")[0]
+				self.assertEqual(start, {"type": "thinking_start", "index": 0, "redacted": False})
+
+				end = of_type(chunks, "thinking_end")[0]
+				self.assertEqual(end["text"], "Counting open tickets.")
+				self.assertFalse(end["redacted"])
+				# The item that closed the block, not the fragment that opened it:
+				# the encrypted content in `.added` may be incomplete.
+				self.assertTrue(end["signature"].startswith(RESPONSES_REASONING_MARKER))
+				packed = json.loads(end["signature"][len(RESPONSES_REASONING_MARKER) :])
+				self.assertEqual(packed, finished)
+
+	def test_a_summary_in_two_parts_is_one_block_with_a_break_between_them(self):
+		item = {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "ENC"}
+		body = sse(
+			item_added(0, item),
+			responses_frame("response.reasoning_summary_part.added", output_index=0, summary_index=0),
+			responses_frame(
+				"response.reasoning_summary_text.delta", output_index=0, summary_index=0, delta="First."
+			),
+			responses_frame("response.reasoning_summary_part.added", output_index=0, summary_index=1),
+			responses_frame(
+				"response.reasoning_summary_text.delta", output_index=0, summary_index=1, delta="Second."
+			),
+			item_done(0, item),
+			responses_done(),
+		)
+
+		chunks = list(parse_responses_stream([body]))
+		self.assertEqual(len(of_type(chunks, "thinking_start")), 1)
+		self.assertEqual(of_type(chunks, "thinking_end")[0]["text"], "First.\n\nSecond.")
+
+	def test_reasoning_text_deltas_are_thinking_too(self):
+		"""Some models stream the reasoning itself, not only a summary of it."""
+		item = {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "ENC"}
+		body = sse(
+			item_added(0, item),
+			responses_frame(
+				"response.reasoning_text.delta", output_index=0, content_index=0, delta="Step one."
+			),
+			item_done(0, item),
+			responses_done(),
+		)
+
+		chunks = list(parse_responses_stream([body]))
+		self.assertEqual(joined(chunks, "thinking_delta"), "Step one.")
+
+	def test_a_tool_call_is_assembled_from_its_fragments(self):
+		opening = {
+			"id": "fc_1",
+			"type": "function_call",
+			"call_id": "call_a",
+			"name": "search_documents",
+			"arguments": "",
+			"status": "in_progress",
+		}
+		finished = dict(opening, arguments='{"doctype":"FA Test Ticket"}', status="completed")
+		body = sse(
+			item_added(0, opening),
+			responses_frame("response.function_call_arguments.delta", output_index=0, delta='{"doctype"'),
+			responses_frame(
+				"response.function_call_arguments.delta", output_index=0, delta=':"FA Test Ticket"}'
+			),
+			responses_frame(
+				"response.function_call_arguments.done",
+				output_index=0,
+				arguments='{"doctype":"FA Test Ticket"}',
+			),
+			item_done(0, finished),
+			responses_done(tokens_in=12, tokens_out=9),
+		)
+
+		for label, stream in (("whole", [body]), ("byte by byte", one_byte_at_a_time(body))):
+			with self.subTest(label):
+				chunks = list(parse_responses_stream(stream))
+				self.assertEqual(
+					of_type(chunks, "toolcall_start")[0],
+					{"type": "toolcall_start", "index": 0, "id": "call_a", "name": "search_documents"},
+				)
+				self.assertEqual(joined(chunks, "toolcall_delta"), '{"doctype":"FA Test Ticket"}')
+				end = of_type(chunks, "toolcall_end")[0]
+				# The call_id, never the item id: that is what a function_call_output
+				# is paired on, and the two are different strings.
+				self.assertEqual(end["id"], "call_a")
+				self.assertEqual(end["name"], "search_documents")
+				self.assertEqual(end["args"], {"doctype": "FA Test Ticket"})
+				self.assertEqual(chunks[-1], {"type": "message_end", "reason": "toolUse"})
+
+	def test_a_call_whose_arguments_never_streamed_is_still_whole(self):
+		"""The finished item is the only copy an endpoint is obliged to send."""
+		item = {
+			"id": "fc_1",
+			"type": "function_call",
+			"call_id": "call_a",
+			"name": "search_documents",
+			"arguments": '{"doctype":"FA Test Ticket"}',
+			"status": "completed",
+		}
+		body = sse(item_added(0, dict(item, arguments="")), item_done(0, item), responses_done())
+
+		end = of_type(list(parse_responses_stream([body])), "toolcall_end")[0]
+		self.assertEqual(end["args"], {"doctype": "FA Test Ticket"})
+
+	def test_two_calls_keep_their_own_arguments(self):
+		def call(index: int, name: str, args: str) -> tuple[str, str, str]:
+			opening = {
+				"id": f"fc_{index}",
+				"type": "function_call",
+				"call_id": f"call_{index}",
+				"name": name,
+				"arguments": "",
+			}
+			return (
+				item_added(index, opening),
+				responses_frame("response.function_call_arguments.delta", output_index=index, delta=args),
+				item_done(index, dict(opening, arguments=args)),
+			)
+
+		first = call(0, "search_documents", '{"doctype":"FA Test Ticket"}')
+		second = call(1, "read_document", '{"doctype":"FA Test Order"}')
+		body = sse(*first, *second, responses_done())
+
+		ends = of_type(list(parse_responses_stream([body])), "toolcall_end")
+		self.assertEqual([end["id"] for end in ends], ["call_0", "call_1"])
+		self.assertEqual([end["name"] for end in ends], ["search_documents", "read_document"])
+		self.assertEqual(ends[0]["args"], {"doctype": "FA Test Ticket"})
+		self.assertEqual(ends[1]["args"], {"doctype": "FA Test Order"})
+
+	def test_truncation_is_reported_as_length(self):
+		message = {"id": "msg_1", "type": "message", "role": "assistant", "content": []}
+		body = sse(
+			item_added(0, message),
+			responses_frame("response.output_text.delta", output_index=0, delta="It was going to be"),
+			responses_done(status="incomplete", incomplete_reason="max_output_tokens"),
+		)
+
+		chunks = list(parse_responses_stream([body]))
+		# The block was still open when the answer ran out. It closes anyway.
+		self.assertEqual(of_type(chunks, "text_end")[0]["text"], "It was going to be")
+		self.assertEqual(chunks[-1], {"type": "message_end", "reason": "length"})
+
+	def test_a_failed_response_ends_the_stream_in_plain_words(self):
+		body = sse(
+			responses_frame("response.created", response={"id": "resp_1", "status": "in_progress"}),
+			responses_done(
+				status="failed",
+				error={"code": "server_error", "message": "The model could not be reached."},
+			),
+		)
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("The model could not be reached.", str(caught.exception))
+
+	def test_an_error_event_ends_the_stream(self):
+		body = sse(responses_frame("error", code="rate_limit_exceeded", message="Slow down."))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("Slow down.", str(caught.exception))
+
+	def test_an_enormous_error_message_is_cut_to_the_cap(self):
+		body = sse(responses_frame("error", code="server_error", message="x" * (4 * ERROR_BODY_LIMIT)))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertLessEqual(len(str(caught.exception)), ERROR_BODY_LIMIT + 200)
+
+	def test_blocks_left_open_by_a_dropped_connection_are_closed(self):
+		"""The socket dies mid-answer. Every block that opened still closes."""
+		message = {"id": "msg_1", "type": "message", "role": "assistant", "content": []}
+		body = sse(
+			item_added(0, message),
+			responses_frame("response.output_text.delta", output_index=0, delta="Half a sen"),
+		)
+
+		chunks = list(parse_responses_stream([body]))
+		self.assertEqual(chunk_types(chunks)[-3:], ["text_delta", "text_end", "message_end"])
+		self.assertEqual(of_type(chunks, "text_end")[0]["text"], "Half a sen")
+
+	def test_frames_it_has_no_use_for_are_ignored(self):
+		"""An event we do not read is not an event that breaks the run."""
+		message = {"id": "msg_1", "type": "message", "role": "assistant", "content": []}
+		body = sse(
+			responses_frame("response.in_progress", response={"id": "resp_1", "status": "in_progress"}),
+			responses_frame("response.queued", response={"id": "resp_1", "status": "queued"}),
+			item_added(0, message),
+			responses_frame("response.content_part.added", output_index=0, content_index=0),
+			responses_frame("response.output_text.delta", output_index=0, delta="Hi"),
+			responses_frame("response.output_text.annotation.added", output_index=0),
+			responses_frame("response.content_part.done", output_index=0, content_index=0),
+			item_done(0, message),
+			responses_done(),
+			": keep-alive",
+		)
+
+		chunks = list(parse_responses_stream([body]))
+		self.assertEqual(joined(chunks, "text_delta"), "Hi")
+		self.assertEqual(chunks[-1], {"type": "message_end", "reason": "stop"})
+
+	def test_an_item_type_it_has_never_seen_does_not_derail_the_answer(self):
+		message = {"id": "msg_1", "type": "message", "role": "assistant", "content": []}
+		body = sse(
+			item_added(0, {"id": "x_1", "type": "some_future_item"}),
+			item_done(0, {"id": "x_1", "type": "some_future_item"}),
+			item_added(1, message),
+			responses_frame("response.output_text.delta", output_index=1, delta="Hi"),
+			item_done(1, message),
+			responses_done(),
+		)
+
+		chunks = list(parse_responses_stream([body]))
+		self.assertEqual(joined(chunks, "text_delta"), "Hi")
+		self.assertEqual(chunks[-1], {"type": "message_end", "reason": "stop"})
+
+	def test_arguments_stop_at_the_cap(self):
+		fragment = "x" * 32_000
+		opening = {
+			"id": "fc_1",
+			"type": "function_call",
+			"call_id": "call_a",
+			"name": "search_documents",
+			"arguments": "",
+		}
+		frames = [item_added(0, opening)]
+		frames += [
+			responses_frame("response.function_call_arguments.delta", output_index=0, delta=fragment)
+			for _ in range(TOOL_ARGUMENTS_LIMIT // len(fragment) + 2)
+		]
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([sse(*frames)]))
+		self.assertIn(str(TOOL_ARGUMENTS_LIMIT), str(caught.exception))
+		self.assertIn("search_documents", str(caught.exception))
+
+	def test_arguments_arriving_only_at_the_end_stop_at_the_cap_too(self):
+		"""The settle path is the same buffer and gets the same ceiling."""
+		opening = {
+			"id": "fc_1",
+			"type": "function_call",
+			"call_id": "call_a",
+			"name": "search_documents",
+			"arguments": "",
+		}
+		body = sse(
+			item_added(0, opening),
+			item_done(0, dict(opening, arguments="x" * (TOOL_ARGUMENTS_LIMIT + 1))),
+		)
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn(str(TOOL_ARGUMENTS_LIMIT), str(caught.exception))
+
+	def test_a_line_that_never_ends_stops_at_the_cap(self):
+		body = b"data: " + b"x" * (SSE_LINE_LIMIT + 1)
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn(str(SSE_LINE_LIMIT), str(caught.exception))
+
+
 class TestStreamCeilings(AgentTestCase):
 	"""The two things a stream may not do: grow a line forever, or an argument.
 
@@ -697,7 +1087,11 @@ class TestStreamCeilings(AgentTestCase):
 			yield chunk
 
 	def test_a_line_that_never_ends_is_dropped_at_the_cap(self):
-		for label, parser in (("openai", parse_openai_stream), ("anthropic", parse_anthropic_stream)):
+		for label, parser in (
+			("openai", parse_openai_stream),
+			("anthropic", parse_anthropic_stream),
+			("responses", parse_responses_stream),
+		):
 			with self.subTest(label):
 				pulled: list[int] = []
 				with self.assertRaises(ProviderError) as caught:
@@ -831,7 +1225,10 @@ class TestStreamTransport(AgentTestCase):
 	"""What goes on the wire, and what happens when nothing comes back."""
 
 	def use_anthropic_provider(self) -> None:
-		frappe.db.set_value("LLM Provider", PROVIDER, "provider_type", "Anthropic", update_modified=False)
+		self.use_provider("Anthropic")
+
+	def use_provider(self, provider_type: str) -> None:
+		frappe.db.set_value("LLM Provider", PROVIDER, "provider_type", provider_type, update_modified=False)
 		frappe.clear_document_cache("LLM Provider", PROVIDER)
 		self.addCleanup(frappe.clear_document_cache, "LLM Provider", PROVIDER)
 
@@ -884,6 +1281,40 @@ class TestStreamTransport(AgentTestCase):
 		self.assertNotIn("fa-test-key", message)
 		self.assertIn("***", message)
 		self.assertTrue(response.closed)
+
+	def test_an_error_inside_a_200_body_never_shows_the_key_either(self):
+		"""A refusal that arrives mid-stream is still a refusal quoting our key.
+
+		The non-200 path redacts because the transport builds that message and
+		still holds the key. An in-band error is built by the parser instead, and
+		the parsers take bytes and a model name — they never see the key and
+		cannot redact it. So an endpoint that names the credential it is rejecting
+		would put it straight into the run's failure message. Every wire is
+		checked, because the leak was never specific to one.
+		"""
+		wires = (
+			("OpenAI Compatible", data_frame({"error": {"message": "bad key fa-test-key rejected"}})),
+			(
+				"Anthropic",
+				named_frame("error", {"type": "error", "error": {"message": "bad key fa-test-key"}}),
+			),
+			(
+				"OpenAI Responses",
+				responses_frame("error", code="invalid_api_key", message="bad key fa-test-key"),
+			),
+		)
+		for provider_type, frame in wires:
+			with self.subTest(provider_type):
+				self.use_provider(provider_type)
+				response = FakeStream([sse(frame)])
+				with patch("frappe_agents.runner.providers.requests.post", return_value=response):
+					with self.assertRaises(ProviderError) as caught:
+						list(call_model_stream(PROFILE, MESSAGES))
+
+				message = str(caught.exception)
+				self.assertNotIn("fa-test-key", message)
+				self.assertIn("***", message)
+				self.assertTrue(response.closed)
 
 	def test_an_enormous_error_body_is_capped_on_the_socket_not_afterwards(self):
 		"""The endpoint decides how big its refusal is; we decide how much we read."""

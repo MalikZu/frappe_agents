@@ -28,7 +28,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Provider Type",
-   "options": "OpenAI Compatible\nAnthropic",
+   "options": "OpenAI Compatible\nOpenAI Responses\nAnthropic",
    "reqd": 1
   },
   {
