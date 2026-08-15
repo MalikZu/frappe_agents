@@ -50,9 +50,19 @@ WORKSPACE = "Agents"
 # rename has not run yet.
 SIDEBAR_NAME = "Frappe Agents"
 
+# The app the sidebar belongs to, and the reason every list view in this module
+# shows it. The desk narrows the sidebars that link a doctype down to the ones
+# whose `app` matches `frappe.boot.module_app[module]`, and falls back to the
+# auto-generated module sidebar — the flat, hammer-icon one — when nothing
+# survives. A sidebar without `app` never survives, so this is what keeps the
+# curated sidebar on screen.
+SIDEBAR_APP = "frappe_agents"
 # The section the agent, its access and the things it is made of live under. The
 # sidebar patch appends into it and needs to find it by the name shipped here.
 BUILD_SECTION = "Build"
+# The section the records an agent leaves behind live under. Same contract as
+# BUILD_SECTION: a patch appends into it by this name.
+ACTIVITY_SECTION = "Activity"
 
 SIDEBAR = (
 	("Link", "Home", "Workspace", WORKSPACE, "home", 0),
@@ -71,9 +81,10 @@ SIDEBAR = (
 	("Section Break", "Models", None, None, "plug", 0),
 	("Link", "LLM Providers", "DocType", "LLM Provider", None, 1),
 	("Link", "Model Profiles", "DocType", "LLM Model Profile", None, 1),
-	("Section Break", "Activity", None, None, "activity", 0),
+	("Section Break", ACTIVITY_SECTION, None, None, "activity", 0),
 	("Link", "Conversations", "DocType", "Agent Conversation", None, 1),
 	("Link", "Runs", "DocType", "Agent Run", None, 1),
+	("Link", "Tool Calls", "DocType", "Agent Tool Call", None, 1),
 )
 
 
@@ -83,11 +94,17 @@ def build_workspace_sidebar():
 	Only when none exists yet: the flat auto-seeded sidebar appears the first
 	time someone opens the workspace, so building here, at install time, wins
 	the race — and an existing sidebar is the user's to keep, never stomped.
+
+	Every non-child doctype in the module is linked, on purpose. The desk picks a
+	sidebar for a list view from the sidebars that link that doctype, so one that
+	is missing sends its own list view to the auto-generated module sidebar.
+	`tests/test_sidebar_coverage.py` fails when a new doctype arrives without one.
 	"""
 	if frappe.db.exists("Workspace Sidebar", WORKSPACE):
 		return
 	doc = frappe.new_doc("Workspace Sidebar")
 	doc.title = WORKSPACE
+	doc.app = SIDEBAR_APP
 	for type_, label, link_type, link_to, icon, child in SIDEBAR:
 		row = {"type": type_, "label": label, "child": child, "collapsible": 1}
 		if type_ == "Section Break":
