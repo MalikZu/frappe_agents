@@ -352,6 +352,29 @@ class TestRunEvents(AgentTestCase):
 		self.assertEqual(self.failure(published), self.failure(run_events(run.name)))
 		self.assertEqual(events[-1]["type"], "error")
 
+	def test_every_frame_says_which_run_and_which_conversation_it_is_for(self):
+		"""The two keys a chat surface places a live frame by.
+
+		It cannot place one by the run alone. A run refused before the model is
+		called — the identity checks, a disabled agent, a provider answering 400
+		in under a second — publishes its whole turn before `start_run` has
+		answered with the name of the run, so for those milliseconds the browser
+		knows only which conversation it is looking at. A frame that did not say
+		would be a frame it could only drop, and a turn stuck at "Queued…" until
+		somebody reloaded.
+		"""
+		with as_user(RESTRICTED_USER), patch("frappe.enqueue"):
+			started = start_run(agent=AGENT, message="How many tickets are open?")
+
+		with patch("frappe.publish_realtime") as publish:
+			run_with_model(started["run"], [ProviderError("HTTP 401 from the provider.")])
+
+		frames = [call.args[1] for call in publish.call_args_list if call.args[0] == EVENT]
+		self.assertTrue(frames)
+		for frame in frames:
+			self.assertEqual(frame["run"], started["run"])
+			self.assertEqual(frame["conversation"], started["conversation"])
+
 	def test_a_reload_gets_the_failure_back(self):
 		"""The rehydrate path end to end: the reason comes back through the API."""
 		with as_user(RESTRICTED_USER), patch("frappe.enqueue"):
