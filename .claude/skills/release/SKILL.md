@@ -28,6 +28,45 @@ feat→minor, fix/perf→patch; docs/chore/refactor/test/ci→no release.
 
 3. Re-stamp any skill whose "Last verified" numbers changed (dev-bench test count).
 
+
+## Notes are WRITTEN, not generated (Malik's rule, 2026-08-16)
+
+The version is computed; the notes are authored. semantic-release still decides
+the number and creates the tag — then the generated body gets REPLACED. Never
+ship the commit list as the body: commit subjects are written for reviewers at
+merge time, not users at upgrade time.
+
+1. BEFORE dispatching, draft the notes from the ROADMAP Done entry + PR bodies
+   into a file (scratchpad), using exactly this template:
+
+   <one sentence: what this release IS>
+
+   ### New
+   - <what the user can now do, where to find it — user words, one line each>
+
+   ### After you upgrade        <- mandatory; the section users actually need
+   - <what bench migrate does to their site, in effect-words>
+   - <what to enable/configure to benefit>
+   - <anything that behaves differently>
+
+   ### Fixed
+   - <one human sentence per fix a user could have noticed>
+
+   <details><summary>Full changelog</summary> compare link + generated list </details>
+
+   Hard rules: no commit subjects in the body; every line user-facing; breaking
+   changes go FIRST, bold, before New; patch releases = intro line + Fixed only;
+   screenshots when the change is visible.
+
+2. Show Malik the draft (30-second read) before anything is public.
+
+3. Dry-run -> dispatch -> then IMMEDIATELY:
+   gh release edit vX.Y.Z --notes-file <the draft>
+
+Reference rewrite in this style: the v0.6.0 notes (see the release page after
+2026-08-16, or artifact 3c382c95). Style models: esbuild (prose+examples),
+Biome (user-facing sentences, generated list demoted).
+
 ## Dispatch and verify
 
 ```bash
