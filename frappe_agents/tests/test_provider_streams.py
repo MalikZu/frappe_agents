@@ -1073,7 +1073,11 @@ class TestStreamCeilings(AgentTestCase):
 			yield chunk
 
 	def test_a_line_that_never_ends_is_dropped_at_the_cap(self):
-		for label, parser in (("openai", parse_openai_stream), ("anthropic", parse_anthropic_stream)):
+		for label, parser in (
+			("openai", parse_openai_stream),
+			("anthropic", parse_anthropic_stream),
+			("responses", parse_responses_stream),
+		):
 			with self.subTest(label):
 				pulled: list[int] = []
 				with self.assertRaises(ProviderError) as caught:
