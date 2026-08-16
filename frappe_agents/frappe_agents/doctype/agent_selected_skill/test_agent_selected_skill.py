@@ -2,7 +2,7 @@
 # For license information, please see LICENSE
 
 import frappe
-from frappe.tests import IntegrationTestCase
+from frappe_agents.tests.compat import IntegrationTestCase
 
 
 class TestAgentSelectedSkill(IntegrationTestCase):
