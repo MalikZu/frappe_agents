@@ -385,6 +385,19 @@ class TestOpenAIStream(AgentTestCase):
 			list(parse_openai_stream([body]))
 		self.assertIn("upstream is overloaded", str(caught.exception))
 
+	def test_an_error_with_only_a_code_is_still_reported(self):
+		"""A null message and a code is a reason. It used to come out as an empty tail."""
+		body = sse(data_frame({"error": {"message": None, "code": "rate_limit_exceeded"}}))
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_openai_stream([body]))
+		self.assertIn("rate_limit_exceeded", str(caught.exception))
+
+	def test_an_error_with_nothing_in_it_says_so(self):
+		body = sse(data_frame({"error": {"message": ""}}))
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_openai_stream([body]))
+		self.assertIn("no reason given", str(caught.exception))
+
 	def test_a_truncated_answer_is_reported_as_length(self):
 		body = sse(openai_frame({"content": "Three"}), openai_frame({}, finish_reason="length"))
 		chunks = list(parse_openai_stream([body]))
@@ -969,6 +982,57 @@ class TestResponsesStream(AgentTestCase):
 			list(parse_responses_stream([body]))
 		self.assertIn("Slow down.", str(caught.exception))
 
+	def test_an_error_wrapped_one_level_down_is_still_quoted(self):
+		"""The frame that made a run say "The model stream returned an error: error".
+
+		Some endpoints state the error flat on the frame and some wrap it one
+		level down. On the wrapped shape nothing at the top level says anything,
+		so the fallback chain used to land on the frame's own type — and `type`
+		on an error frame is the word `error`.
+		"""
+		body = sse(
+			named_frame(
+				"error",
+				{"type": "error", "error": {"type": "rate_limit_exceeded", "message": "Slow down."}},
+			)
+		)
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("Slow down.", str(caught.exception))
+		self.assertNotIn(": error", str(caught.exception))
+
+	def test_a_wrapped_error_with_no_message_falls_back_to_its_own_type(self):
+		"""Unwrapped, the last resort is the error's type — not the frame's."""
+		body = sse(named_frame("error", {"type": "error", "error": {"type": "overloaded_error"}}))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("overloaded_error", str(caught.exception))
+
+	def test_an_empty_error_object_does_not_blank_the_message(self):
+		"""An empty wrapper is not an unwrap. Falling through leaves something to say."""
+		body = sse(named_frame("error", {"type": "error", "code": "server_error", "error": {}}))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("server_error", str(caught.exception))
+
+	def test_a_failed_response_error_is_not_unwrapped_twice(self):
+		"""The other caller hands over an already-unwrapped object. It stays whole."""
+		body = sse(responses_done(status="failed", error={"code": "server_error"}))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("server_error", str(caught.exception))
+
+	def test_an_error_with_nothing_in_it_at_all_still_says_something(self):
+		body = sse(responses_frame("error"))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("no reason given", str(caught.exception))
+
 	def test_an_enormous_error_message_is_cut_to_the_cap(self):
 		body = sse(responses_frame("error", code="server_error", message="x" * (4 * ERROR_BODY_LIMIT)))
 
@@ -1293,18 +1357,27 @@ class TestStreamTransport(AgentTestCase):
 		checked, because the leak was never specific to one.
 		"""
 		wires = (
-			("OpenAI Compatible", data_frame({"error": {"message": "bad key fa-test-key rejected"}})),
+			("flat", "OpenAI Compatible", data_frame({"error": {"message": "bad key fa-test-key rejected"}})),
 			(
+				"flat",
 				"Anthropic",
 				named_frame("error", {"type": "error", "error": {"message": "bad key fa-test-key"}}),
 			),
 			(
+				"flat",
 				"OpenAI Responses",
 				responses_frame("error", code="invalid_api_key", message="bad key fa-test-key"),
 			),
+			# The wrapped shape quotes provider text that used to be thrown away,
+			# so it is a second place the key can arrive. Same wrapper, same pin.
+			(
+				"wrapped",
+				"OpenAI Responses",
+				named_frame("error", {"type": "error", "error": {"message": "bad key fa-test-key"}}),
+			),
 		)
-		for provider_type, frame in wires:
-			with self.subTest(provider_type):
+		for shape, provider_type, frame in wires:
+			with self.subTest(provider_type=provider_type, shape=shape):
 				self.use_provider(provider_type)
 				response = FakeStream([sse(frame)])
 				with patch("frappe_agents.runner.providers.requests.post", return_value=response):

@@ -1314,9 +1314,27 @@ def _responses_status(kind: str) -> str:
 
 
 def _raise_responses_error(error: Any) -> None:
-	"""An error delivered as its own event, or inside a failed response object."""
+	"""An error delivered as its own event, or inside a failed response object.
+
+	The unwrap is here rather than at the call site because both callers hand
+	over a different shape — one the whole SSE frame, one the error object out of
+	a failed response — and the next caller would get it wrong again. A frame
+	shaped `{"type": "error", "error": {…}}` carries no message and no code of its
+	own, so the chain below would land on the frame's own type and tell the
+	person reading the run that the model returned "error".
+	"""
 	if isinstance(error, dict):
-		message = error.get("message") or error.get("code") or error.get("type") or ""
+		# Only when there is something to unwrap. An empty `{}` or a non-dict must
+		# fall through to the frame, which at least still has a type, rather than
+		# blank the message entirely.
+		nested = error.get("error")
+		if isinstance(nested, dict) and nested:
+			error = nested
+		# `type` is the last resort and it is only worth quoting when it names the
+		# error — "rate_limit_exceeded", "overloaded_error". On a frame that had
+		# nothing to unwrap it is the word "error" itself, which is no reason at all.
+		kind = error.get("type")
+		message = error.get("message") or error.get("code") or (kind if kind != "error" else "") or ""
 	else:
 		message = str(error or "")
 	raise ProviderError(
@@ -1704,15 +1722,23 @@ def _stream_json(data: str) -> dict | None:
 
 
 def _raise_stream_error(payload: dict) -> None:
-	"""An error delivered inside a perfectly successful 200 body."""
+	"""An error delivered inside a perfectly successful 200 body.
+
+	Same chain and same fallback as `_raise_responses_error`: an endpoint that
+	sends `{"error": {"code": "rate_limit_exceeded"}}` with a null message says
+	something, and two helpers that build the same sentence should not disagree
+	about which fields count.
+	"""
 	error = payload.get("error")
 	if not error:
 		return
 	if isinstance(error, dict):
-		message = error.get("message") or error.get("type") or ""
+		message = error.get("message") or error.get("code") or error.get("type") or ""
 	else:
 		message = str(error)
-	raise ProviderError(f"The model stream returned an error: {str(message)[:ERROR_BODY_LIMIT]}")
+	raise ProviderError(
+		f"The model stream returned an error: {str(message or 'no reason given')[:ERROR_BODY_LIMIT]}"
+	)
 
 
 def _delta_text(content: Any) -> str:
