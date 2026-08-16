@@ -44,6 +44,7 @@ from frappe_agents.context.untrusted import wrap
 from frappe_agents.extraction.pipeline import (
 	DEFAULT_MAX_FILE_MB,
 	DEFAULT_MAX_PAGES,
+	file_bytes,
 	pick_profile,
 	read_source,
 	require_provenance,
@@ -259,11 +260,7 @@ def _summary(document_format: str, read: dict, chars: int) -> str:
 
 def _content(file_doc: Any, settings: Any) -> bytes:
 	"""The file's bytes, under the same size ceiling a document sent to a model has."""
-	content = file_doc.get_content(encodings=[])
-	if not isinstance(content, bytes):
-		# get_content decodes anything that survives a text codec and the round trip
-		# is lossy, which would turn a spreadsheet into plausible garbage.
-		content = content.encode("utf-8", "surrogateescape")
+	content = file_bytes(file_doc)
 
 	max_mb = cint(settings.get("max_extraction_file_mb")) or DEFAULT_MAX_FILE_MB
 	size_mb = len(content) / (1024 * 1024)

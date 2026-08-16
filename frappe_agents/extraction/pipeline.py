@@ -34,6 +34,7 @@ environment can turn a PDF page into an image, so the document goes to the
 provider as the document, or not at all.
 """
 
+import inspect
 from io import BytesIO
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -591,13 +592,39 @@ def _pdf_engine() -> str:
 	return settings.get("pdf_parser_engine") or PDF_ENGINE_NATIVE
 
 
+def file_bytes(file_doc: Any) -> bytes:
+	"""The file's raw bytes, whatever this framework's `get_content` looks like.
+
+	v16 takes an `encodings` list and may hand back a str; an empty list is how
+	you ask it not to decode at all. v15 takes no arguments and always returns
+	bytes. Either way the caller wants bytes and nothing else — decoding is
+	lossy, and a corrupted image would reach the model as plausible garbage.
+
+	The signature is inspected rather than the call being wrapped in
+	`except TypeError`, which would also swallow a real TypeError raised from
+	inside the read and turn a broken file into a silent one.
+	"""
+	if _accepts_encodings(file_doc.get_content):
+		content = file_doc.get_content(encodings=[])
+	else:
+		content = file_doc.get_content()
+	if not isinstance(content, bytes):
+		content = content.encode("utf-8", "surrogateescape")
+	return content
+
+
+def _accepts_encodings(method: Any) -> bool:
+	try:
+		return "encodings" in inspect.signature(method).parameters
+	except (TypeError, ValueError):
+		# A C-implemented or wrapped callable that will not describe itself. The
+		# no-argument call is the one both versions accept.
+		return False
+
+
 def read_source(file_doc: Any, settings: Any, doc: Any | None = None) -> dict:
 	"""The document bytes, its real media type, and the caps checked against them."""
-	content = file_doc.get_content(encodings=[])
-	if not isinstance(content, bytes):
-		# get_content decodes anything that survives a text codec, and the round trip
-		# is lossy — a corrupted image would reach the model as plausible garbage.
-		content = content.encode("utf-8", "surrogateescape")
+	content = file_bytes(file_doc)
 
 	max_mb = cint(settings.get("max_extraction_file_mb")) or DEFAULT_MAX_FILE_MB
 	size_mb = len(content) / (1024 * 1024)
