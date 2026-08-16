@@ -17,11 +17,13 @@ and putting that work back in front of the model is the one thing it must not do
 
 import frappe
 
-from frappe_agents.harness.messages import AssistantMessage, ThinkingContent
+from frappe_agents.harness.messages import AssistantMessage, ThinkingContent, message_text
 from frappe_agents.runner.providers import ProviderError
 from frappe_agents.runner.run import (
 	CONTEXT_CHARS_PER_TOKEN,
 	CONTEXT_PROMPT_SHARE,
+	EVENT_TEXT_LIMIT,
+	REPLAY_LIMIT,
 	_fitted_history,
 	_history,
 	_prompt_budget,
@@ -67,6 +69,7 @@ class TestFailedTurnReplay(AgentTestCase):
 	def setUp(self) -> None:
 		super().setUp()
 		self.conversation = make_conversation(RESTRICTED_USER).name
+		self._template: dict | None = None
 
 	# --- the fixtures --------------------------------------------------------
 
@@ -108,6 +111,65 @@ class TestFailedTurnReplay(AgentTestCase):
 		frappe.db.set_value(PROFILE_DT, PROFILE, "context_limit", limit, update_modified=False)
 		frappe.clear_document_cache(PROFILE_DT, PROFILE)
 		self.addCleanup(frappe.clear_document_cache, PROFILE_DT, PROFILE)
+
+	def prompt(self, provider) -> str:
+		"""Everything the model was handed on its first call, as one string."""
+		call = provider.calls[0]
+		return "\n".join([call["system"]] + [message_text(message) for message in call["messages"]])
+
+	def template_log(self) -> dict:
+		"""One real failed turn's stored log, to be cloned onto seeded rows.
+
+		Executed in a conversation of its own, so it is nobody's history. The
+		shape has to be a real one — the replay is a round trip through the same
+		models that wrote it — but a provider outage's twenty failed runs would
+		say nothing here that one does not, and cloning is how twenty of them are
+		put in front of the fitter without executing sixty tool calls to get them.
+		"""
+		if self._template is None:
+			elsewhere = make_conversation(RESTRICTED_USER).name
+			with as_user(RESTRICTED_USER):
+				run = make_run(
+					effective_user=RESTRICTED_USER,
+					agent=AGENT,
+					conversation=elsewhere,
+					message=FIRST,
+				)
+			run_with_model(run.name, [READ_ORDER, DEAD])
+			raw = frappe.db.get_value("Agent Run", run.name, "event_log")
+			self._template = frappe.parse_json(raw)
+			self.assertIn("toolResult", raw)
+		return frappe.parse_json(frappe.as_json(self._template))
+
+	def failed_turn(self, mark: str, size: int) -> str:
+		"""One failed turn in this conversation, replaying `size` characters of result.
+
+		Marked in both halves — the question it asked and the result it was
+		handed — because the two are bounded separately: a turn past the replay
+		limit still asks its question and no longer hands over its work.
+		"""
+		log = self.template_log()
+		for event in log.get("events") or []:
+			message = event.get("message") or {}
+			if message.get("role") != "toolResult":
+				continue
+			for block in message.get("content") or []:
+				if block.get("type") == "text":
+					block["text"] = f"{mark} result {'r' * size}"
+
+		with as_user(RESTRICTED_USER):
+			run = make_run(
+				effective_user=RESTRICTED_USER,
+				agent=AGENT,
+				conversation=self.conversation,
+				message=f"{mark} question",
+			)
+		run.flags.ignore_permissions = True
+		run.db_set(
+			{"status": "Failed", "error": str(DEAD), "event_log": frappe.as_json(log)},
+			update_modified=False,
+		)
+		return mark
 
 	# --- what a failed turn hands on -----------------------------------------
 
@@ -298,3 +360,88 @@ class TestFailedTurnReplay(AgentTestCase):
 		_run, wire, _provider = self.next_turn()
 
 		self.assertEqual([message["role"] for message in wire], ["system", "user", "user"])
+
+	# --- how much of it may come back ----------------------------------------
+
+	def test_a_conversation_of_failed_turns_is_bounded_with_no_context_limit(self):
+		"""The state a hand-made profile is actually in, and the one with no ceiling.
+
+		`context_limit` has no default and is not required, so every profile an
+		administrator typed in themselves — self-hosted, OpenRouter, a model the
+		catalog never heard of — has none. A history of failed turns is not twenty
+		questions and answers there: it is twenty full event logs, and the retry
+		is the request the provider refuses for length.
+
+		So the ceiling holds without the field. Every question still comes back;
+		six runs' worth of tool results does not.
+		"""
+		self.set_limit(0)
+		marks = [self.failed_turn(f"OLD-{index}", EVENT_TEXT_LIMIT) for index in range(6)]
+
+		run, wire, provider = self.next_turn()
+
+		prompt = self.prompt(provider)
+		# Six maximal failed runs in one request is what there was no ceiling for.
+		# Said as a flat number first and as the budget second, so what is pinned
+		# here is a size and not merely agreement with whatever the budget says.
+		self.assertLess(len(prompt), 3 * EVENT_TEXT_LIMIT)
+		self.assertLessEqual(len(prompt), _prompt_budget(PROFILE))
+		for mark in marks:
+			self.assertIn(f"{mark} question", prompt)
+		self.assertEqual(len([message for message in wire if message["role"] == "tool"]), REPLAY_LIMIT)
+		self.assertEqual(wire[-1]["content"], SECOND)
+
+		# And it says so, so a reader can tell a cut conversation from a model
+		# that forgot.
+		self.assertEqual(frappe.db.get_value("Agent Run", run.name, "history_truncated"), 1)
+
+	def test_only_the_newest_failed_turns_are_replayed(self):
+		"""A window with room for all of them is not a reason to send all of them.
+
+		Twenty failed turns is a provider outage, not a conversation. The newest
+		is the turn being retried and the one before it is the same person asking
+		twice; the rest come back as the questions they asked.
+		"""
+		self.set_limit(1_000_000)
+		marks = [self.failed_turn(f"OLD-{index}", 200) for index in range(5)]
+
+		run, wire, provider = self.next_turn()
+
+		results = [message["content"] for message in wire if message["role"] == "tool"]
+		self.assertEqual(len(results), REPLAY_LIMIT)
+
+		replayed = "\n".join(results)
+		for mark in marks[-REPLAY_LIMIT:]:
+			self.assertIn(f"{mark} result", replayed)
+		for mark in marks[:-REPLAY_LIMIT]:
+			self.assertNotIn(f"{mark} result", replayed)
+			self.assertIn(f"{mark} question", self.prompt(provider))
+
+		self.assertEqual(frappe.db.get_value("Agent Run", run.name, "history_truncated"), 1)
+
+	def test_only_the_newest_failed_turns_have_their_logs_read(self):
+		"""The fitter's break bounds what is parsed. Nothing bounded what was read.
+
+		Half a megabyte a row, selected for every failed turn in the history and
+		then thrown away by the fitter — the cost is paid in MariaDB before the
+		first character is costed. What may not be replayed is not fetched.
+		"""
+		self.set_limit(1_000_000)
+		for index in range(5):
+			self.failed_turn(f"OLD-{index}", 200)
+
+		run = make_run(
+			effective_user=RESTRICTED_USER,
+			agent=AGENT,
+			conversation=self.conversation,
+			message=SECOND,
+		)
+		with as_user(RESTRICTED_USER):
+			rows = _history(run)
+
+		self.assertEqual(len(rows), 5)
+		# Oldest first, so the logs that were read are the last two.
+		self.assertEqual(
+			[bool(row.get("event_log")) for row in rows],
+			[False] * (5 - REPLAY_LIMIT) + [True] * REPLAY_LIMIT,
+		)
