@@ -86,6 +86,20 @@ them under 3.11 with pydantic present and build a `TypeAdapter` before you push.
 `ruff` on that branch is set to `target-version = "py311"` and will catch these,
 but the compile above catches them faster.
 
+**`ruff format` on main will undo your fix.** main targets py314, and its
+formatter rewrites an inline `except (A, B):` into PEP 758 `except A, B:` — which
+version-15 cannot parse. Do not fight it file by file: name the tuple once and
+catch the name.
+
+```python
+SIGNATURE_ERRORS = (TypeError, ValueError)
+...
+except SIGNATURE_ERRORS:
+```
+
+A name is not a tuple literal, so neither branch's formatter touches it and the
+same source works on both.
+
 The vendored harness in `frappe_agents/harness/` is the usual offender —
 upstream writes for modern Python, so **every re-vendor reintroduces PEP 695**.
 Convert it again each time.
