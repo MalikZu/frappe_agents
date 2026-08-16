@@ -137,6 +137,8 @@ Issues and discussion are the most useful contribution — see
 [CONTRIBUTING.md](CONTRIBUTING.md). For anything security-related, do not open a
 public issue: [SECURITY.md](SECURITY.md).
 
+[Terms](TERMS.md) · [Privacy](PRIVACY.md) · [Licence](LICENSE)
+
 ## License
 
 MIT
