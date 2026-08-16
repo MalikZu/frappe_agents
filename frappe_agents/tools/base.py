@@ -11,6 +11,7 @@ Redaction happens here, at the write, and nowhere else: the tool's own return
 value is handed to the model untouched.
 """
 
+import inspect
 import time
 from typing import Any
 
@@ -265,10 +266,40 @@ def _stored_switch() -> bool:
 def _published_switch() -> bool | None:
 	"""The switch as the last save left it, or None when nothing has published it."""
 	try:
-		value = frappe.cache.get_value(KILL_SWITCH_KEY, use_local_cache=False)
+		value = _read_published()
 	except Exception:
+		# Redis being unreachable leaves the stored switch in charge, which is the
+		# safe direction. It is logged rather than swallowed: a published half that
+		# silently never answers is a kill switch that silently never stops a job.
+		frappe.logger("frappe_agents").warning("could not read the published kill switch", exc_info=True)
 		return None
 	return None if value is None else bool(cint(value))
+
+
+def _read_published() -> Any:
+	"""Read the published switch past every process-local memo.
+
+	The whole point of publishing is that a job already running sees the switch
+	move, so a cached answer is the one thing this read must not give.
+
+	v16 says that with `use_local_cache=False`. v15 has no such argument: its
+	`get_value` consults `frappe.local.cache` first and memoizes what it read, so
+	a worker that read the switch once would keep answering with that first value
+	for the rest of the run. There, the memo is dropped before the read and
+	`expires=True` stops the read putting it back.
+	"""
+	getter = frappe.cache.get_value
+	if _accepts(getter, "use_local_cache"):
+		return getter(KILL_SWITCH_KEY, use_local_cache=False)
+	frappe.local.cache.pop(frappe.cache.make_key(KILL_SWITCH_KEY), None)
+	return getter(KILL_SWITCH_KEY, expires=True)
+
+
+def _accepts(method: Any, name: str) -> bool:
+	try:
+		return name in inspect.signature(method).parameters
+	except (TypeError, ValueError):
+		return False
 
 
 def _check_kill_switch() -> None:
