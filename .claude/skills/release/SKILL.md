@@ -88,4 +88,9 @@ Verify all three: the tag exists, the notes have Features/Fixes sections, and th
 - A release that shipped with bad notes: `gh release edit vX.Y.Z --notes-file f`.
   Never re-run the workflow for that — the tag already exists.
 
-Last verified: 2026-08-13 — v0.3.0.
+- A **patch** release must contain only `fix:`/`perf:` commits (plus release-less
+  types like `test:`/`docs:`). One `feat:` makes it a minor. Check the range with
+  `git log --format='%s' <last-tag>..HEAD | sed 's/:.*//' | sort | uniq -c` BEFORE
+  the dry run, not after.
+
+Last verified: 2026-08-16 — v0.6.1 prepared (dry run not yet dispatched).
