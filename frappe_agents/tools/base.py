@@ -298,7 +298,7 @@ def _read_published() -> Any:
 def _accepts(method: Any, name: str) -> bool:
 	try:
 		return name in inspect.signature(method).parameters
-	except (TypeError, ValueError):
+	except TypeError, ValueError:
 		return False
 
 
@@ -442,6 +442,21 @@ def _doctype_sensitive_keys(doctype: str) -> set[str]:
 		keys |= _masked_fieldnames(one)
 		keys |= sensitive_fieldnames(one.name)
 	return {key.lower() for key in keys if key}
+
+
+def masking_supported() -> bool:
+	"""Whether this framework masks fields per user.
+
+	frappe_agents patch (version-15): `Meta.get_masked_fields` arrived in v16.
+	Where it is missing, a field an administrator masked is not automatically
+	held out of an audit row, and the extraction gate has one fewer source for
+	what to withhold. Nothing crashes — the protection is simply not there, and
+	`docs/admin.md` says so. Agent Settings' own sensitive-field list works on
+	both and is what to lean on.
+	"""
+	from frappe.model.meta import Meta
+
+	return hasattr(Meta, "get_masked_fields")
 
 
 def _masked_fieldnames(meta: Any) -> set[str]:

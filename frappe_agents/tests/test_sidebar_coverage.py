@@ -39,6 +39,7 @@ from frappe_agents.install import (
 	SIDEBAR_APP,
 	build_workspace_sidebar,
 	existing_sidebar,
+	sidebars_supported,
 )
 from frappe_agents.patches.v0_6_0.add_access_sidebar_links import SIDEBAR_DOCTYPE, app_sidebars
 from frappe_agents.patches.v0_6_0.adopt_sidebar_for_app import NEW_LINK, execute

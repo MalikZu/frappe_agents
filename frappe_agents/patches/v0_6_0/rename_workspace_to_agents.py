@@ -18,7 +18,7 @@ next to the old one.
 
 import frappe
 
-from frappe_agents.install import sidebars_supported
+from frappe_agents.install import desktop_tile_supported, sidebars_supported
 
 OLD = "Frappe Agents"
 NEW = "Agents"
@@ -46,5 +46,5 @@ def execute():
 		frappe.db.set_value("Workspace", NEW, {"title": NEW, "label": NEW}, update_modified=False)
 	if sidebars_supported() and frappe.db.exists("Workspace Sidebar", NEW):
 		frappe.db.set_value("Workspace Sidebar", NEW, "title", NEW, update_modified=False)
-	if frappe.db.exists("Desktop Icon", NEW):
+	if desktop_tile_supported() and frappe.db.exists("Desktop Icon", NEW):
 		frappe.db.set_value("Desktop Icon", NEW, {"label": NEW, "link_to": NEW}, update_modified=False)

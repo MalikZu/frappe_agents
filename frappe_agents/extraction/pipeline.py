@@ -616,7 +616,7 @@ def file_bytes(file_doc: Any) -> bytes:
 def _accepts_encodings(method: Any) -> bool:
 	try:
 		return "encodings" in inspect.signature(method).parameters
-	except (TypeError, ValueError):
+	except TypeError, ValueError:
 		# A C-implemented or wrapped callable that will not describe itself. The
 		# no-argument call is the one both versions accept.
 		return False

@@ -260,6 +260,20 @@ def desktop_icon_fields() -> dict:
 	}
 
 
+def desktop_tile_supported() -> bool:
+	"""Whether this framework's Desktop Icon is the shape our tile needs.
+
+	frappe_agents patch (version-15): v16's Desktop Icon points at a Workspace
+	Sidebar through `link_to` / `link_type`. v15's is the older module-icon
+	doctype — different columns entirely, and no sidebar to point at. So the desk
+	tile is a v16 surface. On v15 the workspace is reached at `/app/agents` and
+	nothing here should touch the row.
+	"""
+	if not sidebars_supported():
+		return False
+	return bool(frappe.get_meta("Desktop Icon").get_field("link_to"))
+
+
 def ensure_desktop_icon() -> bool:
 	"""Put the desk tile back when its row has gone missing.
 
@@ -294,6 +308,8 @@ def ensure_desktop_icon() -> bool:
 	`after_migrate` runs after `remove_orphan_entities`, so the rebuilt row is the
 	last word in the migrate and the tile is on the desk when it ends.
 	"""
+	if not desktop_tile_supported():
+		return False
 	if frappe.db.exists("Desktop Icon", WORKSPACE):
 		return False
 

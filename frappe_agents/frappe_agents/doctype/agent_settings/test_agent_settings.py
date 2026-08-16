@@ -2,6 +2,7 @@
 # For license information, please see LICENSE
 
 import frappe
+
 from frappe_agents.tests.compat import IntegrationTestCase
 
 

@@ -67,7 +67,6 @@ from typing import Any
 from unittest.mock import patch
 
 import frappe
-from frappe_agents.tests.compat import IntegrationTestCase
 from frappe.utils import cint, now_datetime
 
 from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction, run_extraction
@@ -90,6 +89,7 @@ from frappe_agents.harness.provider_events import (
 	ThinkingStartEvent,
 )
 from frappe_agents.runner.run import execute_run
+from frappe_agents.tests.compat import IntegrationTestCase
 from frappe_agents.tools.base import execute_tool, publish_kill_switch
 
 # Where the throwaway doctypes live. Deliberately NOT the app's own module:
