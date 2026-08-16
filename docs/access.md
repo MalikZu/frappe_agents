@@ -46,6 +46,14 @@ granted target, where the grant came from, and which rows the person looking at
 the form could not use anyway. That is the answer to "why can't my agent see
 this".
 
+![The Effective Access panel on an Agent, listing each granted doctype, what the
+agent may do with it, the limits that apply, and which rule granted
+it](images/effective-access.png)
+
+The panel also names the tools the rules add up to, and says when autonomy is
+overriding them — a Suggest agent is not offered the proposal tools whatever its
+rules say.
+
 ## What is never granted
 
 Two sets of doctypes cannot be named by a rule, and the check runs again on
