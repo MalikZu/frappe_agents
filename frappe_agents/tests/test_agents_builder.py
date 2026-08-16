@@ -9,6 +9,11 @@ fieldnames — and never a document; the site's exclusions apply to what it may
 name; the session user's own permissions apply on top; and fields above
 permlevel 0 are named but never described.
 
+One table sits deliberately on both sides of that line. The blueprint's own
+suggested-rules table is described, because a blueprint cannot be written
+without its fieldnames — and is still not listed, not grantable and not
+readable, because describing a shape is not reaching a record.
+
 The other half is the blueprint. A blueprint is paper: drafting one grants
 nobody anything, and turning it into an agent is a human act by an Agent
 Manager. What that act produces is asserted here too — a *disabled* agent, a
@@ -24,7 +29,7 @@ from frappe_agents.access.builder import (
 	BUILDER_PROFILE,
 	seed_agents_builder,
 )
-from frappe_agents.access.exclusions import BLUEPRINT
+from frappe_agents.access.exclusions import BLUEPRINT, describable_child_tables
 from frappe_agents.access.grants import BUILDER_TOOLS, compiled_grants, exposed_tool_names
 from frappe_agents.frappe_agents.doctype.agent_blueprint.agent_blueprint import (
 	STATUS_APPLIED,
@@ -56,6 +61,24 @@ BUILDER_RULE = rule(BLUEPRINT, can_read=1, can_create_draft=1, can_update_draft=
 
 APP_REPORT = "Agent Action Review Quality"
 SITE_REPORT = TEST_REPORT
+
+# The table a blueprint's suggested rules live in, and the fields a blueprint is
+# written out of. The Builder guessed at these once and could not do otherwise.
+RULE_DT = "Agent Access Rule"
+RULE_FIELDS = {
+	"target_type",
+	"target",
+	"can_read",
+	"can_create_draft",
+	"can_update_draft",
+	"can_propose",
+	"can_extract",
+	"update_any_draft",
+	"max_rows_per_call",
+}
+# Child tables of ours that the blueprint does not name. An agent's own tool
+# selection and role gating are exactly what it may not be shown the shape of.
+OTHER_CHILD_TABLES = ("Agent Selected Tool", "Agent Allowed Role", "Agent Access Profile Link")
 
 SECRET_FIELD = "secret_note"
 
@@ -140,6 +163,15 @@ class TestListingTheSite(BuilderCase):
 		"""Rows are granted through the parent, so a child table is not a target."""
 		self.assertNotIn(ORDER_ITEM_DT, self.listed(query="fa test", limit=100))
 
+	def test_the_table_it_may_describe_is_still_not_on_the_list(self):
+		"""The list is targets a rule could name. Describing one did not add it.
+
+		The two questions stay apart: the Builder reads this table's fields so it
+		can fill them in, and the list stays what it always was — the doctypes a
+		suggested rule may point at.
+		"""
+		self.assertNotIn(RULE_DT, self.listed(query="agent", limit=100))
+
 	def test_a_query_narrows_and_the_page_says_how_far_it_got(self):
 		everything = self.ask("list_site_doctypes", {"limit": 100})
 		narrowed = self.ask("list_site_doctypes", {"query": "fa test", "limit": 100})
@@ -179,6 +211,45 @@ class TestDescribingADoctype(BuilderCase):
 			described = self.described(TICKET_DT, user=user)
 			self.assertNotIn(SECRET_FIELD, [field["fieldname"] for field in described["fields"]])
 			self.assertEqual(described["restricted_fields"], [SECRET_FIELD])
+
+	def test_it_describes_the_table_its_own_suggested_rules_live_in(self):
+		"""Without this the Builder cannot write a blueprint at all.
+
+		A blueprint's suggested rules are rows of this table, and describing the
+		blueprint gives back only the table's name. The Builder used to have to
+		invent the fieldnames, and `create_draft` refused every guess.
+		"""
+		described = self.described(RULE_DT)
+
+		self.assertLessEqual(RULE_FIELDS, {field["fieldname"] for field in described["fields"]})
+
+	def test_the_hole_is_derived_from_the_blueprint_and_not_named(self):
+		"""A second child table added to the blueprint is covered without an edit."""
+		self.assertEqual(set(describable_child_tables()), {RULE_DT})
+
+	def test_our_other_child_tables_are_refused_in_the_usual_words(self):
+		"""Widened by the blueprint's own tables, not by 'a child table of ours'.
+
+		An agent's selected tools and allowed roles are child tables in the same
+		module. A predicate that let those through would hand the Builder the shape
+		of the gating that decides what agents may do.
+		"""
+		agent = self.builder()
+
+		for doctype in OTHER_CHILD_TABLES:
+			error = self.refusal("describe_site_doctype", {"doctype": doctype}, agent=agent)
+			self.assertEqual(error, NO_SUCH_DOCTYPE.format(doctype=doctype))
+
+	def test_the_matrix_scoped_describe_still_refuses_it(self):
+		"""Two describes, two questions, and only one of them was opened.
+
+		`get_doctype_meta` answers for granted targets, so opening it would mean
+		either opening the runtime grant check or minting a rule row the validator
+		has to keep refusing. One describe path is enough, and this one stays shut.
+		"""
+		error = self.refusal("get_doctype_meta", {"doctype": RULE_DT})
+
+		self.assertIn("agent framework", error)
 
 	def test_the_three_refusals_are_the_same_refusal(self):
 		"""Excluded, unreadable, or not there at all: one answer, word for word.

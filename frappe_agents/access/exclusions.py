@@ -21,6 +21,14 @@ The check runs twice — once when a rule row is saved, once again inside
 Reports are asked the same question through the doctype they read. A report over
 User is a way to read User, and an exclusion that only watched the DocType rows
 would be a lock on the front door with the side door open.
+
+Reading a *schema* is a narrower question, and it gets its own predicate.
+`is_describable` is `is_excluded` widened by exactly one thing: the blueprint's
+own child tables, the tables a blueprint is written out of. It is asked from one
+place — the Builder's `describe_site_doctype` — and it is never a grant. Nothing
+it admits may be named by a rule row, listed as a target, or reached by a tool
+that returns a document. Keeping the two predicates apart is what leaves every
+gate that asks `is_excluded` unchanged by construction rather than by review.
 """
 
 import frappe
@@ -82,6 +90,42 @@ def module_of(doctype: str) -> str | None:
 		return frappe.get_meta(doctype).module
 	except Exception:
 		return None
+
+
+def describable_child_tables() -> frozenset[str]:
+	"""The blueprint's own child tables, by name. Derived, never listed.
+
+	A blueprint cannot be written without naming the fields of the table its
+	suggested rules live in, so that table is the one shape the Builder has to be
+	able to read. Taking the set off the blueprint's own meta means a second child
+	table added to it next release is covered the day it lands — the same
+	discipline that makes the exclusion itself computed rather than listed.
+
+	Scoped to the blueprint on purpose. "Any child table this app ships" would
+	also hand over the shape of an agent's own tool selection and role gating,
+	which is precisely what an agent may not see.
+	"""
+	try:
+		return frozenset(df.options for df in frappe.get_meta(BLUEPRINT).get_table_fields() if df.options)
+	except Exception:
+		return frozenset()
+
+
+def is_describable(doctype: str | None) -> bool:
+	"""Whether the Builder may read this doctype's fields. Never a grant.
+
+	Wider than `is_excluded` by the blueprint's child tables and by nothing else.
+	A child table is written through its parent and can never be a rule target, so
+	describing one says nothing that describing the parent did not already say —
+	while not describing it left the Builder guessing at the fieldnames of its own
+	output. Fails closed on no doctype at all, the same as `is_excluded`.
+	"""
+	doctype = (doctype or "").strip()
+	if not doctype:
+		return False
+	if not is_excluded(doctype):
+		return True
+	return doctype in describable_child_tables()
 
 
 def report_is_excluded(report: str | None) -> bool:

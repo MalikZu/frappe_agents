@@ -9,11 +9,16 @@ ticked, a draft verb on a child table. The second is the exclusion, and it is
 asserted twice on purpose: once at validation, and once on a row put past
 validation the way a direct SQL write would. A gate that only holds on the way
 in is not a gate.
+
+One doctype tests both claims at once. The blueprint's own child table is the
+one thing the Builder may read the *shape* of, so it is the one place where
+"describable" and "grantable" come apart — and the rows below say, in both
+places, that reading its shape never made it nameable.
 """
 
 import frappe
 
-from frappe_agents.access.exclusions import is_excluded
+from frappe_agents.access.exclusions import is_describable, is_excluded
 from frappe_agents.access.grants import compiled_grants, grant_for, require_grant
 from frappe_agents.tests.fixtures import (
 	ORDER_DT,
@@ -32,6 +37,9 @@ from frappe_agents.tests.fixtures import (
 from frappe_agents.tools.base import RUN_FLAG, ToolDenied
 
 BLUEPRINT = "Agent Blueprint"
+# The table a blueprint's suggested rules live in. The Builder may read its
+# fields; nothing may ever name it in a rule.
+RULE_DT = "Agent Access Rule"
 REPORT = TEST_REPORT
 # The app's own report. It reads Agent Action, which is a doctype no rule may
 # name, so no rule may name the report over it either.
@@ -61,6 +69,22 @@ class TestAccessRuleValidation(AgentTestCase):
 		agent = make_matrix_agent([rule(BLUEPRINT, can_read=1, can_create_draft=1)])
 
 		self.assertTrue(grant_for(agent, BLUEPRINT).get("create_draft"))
+
+	def test_read_alone_on_the_blueprints_child_table_is_still_refused(self):
+		"""Describable is not grantable, and Read is the row that proves it.
+
+		The child-table refusal further down only fires when a draft verb is
+		ticked, so a row with nothing but Read on it would sail straight past that
+		check. What refuses this row is the exclusion — which is why the Builder's
+		schema hole is a second predicate and not a widening of this one. A rule
+		naming Agent Access Rule is an agent granted the rows that say what agents
+		may do.
+		"""
+		self.assertTrue(is_describable(RULE_DT))
+		self.assertTrue(is_excluded(RULE_DT))
+
+		with self.assertRaises(frappe.ValidationError):
+			make_matrix_agent([rule(RULE_DT, can_read=1)])
 
 	def test_a_row_that_grants_nothing_is_refused(self):
 		with self.assertRaises(frappe.ValidationError):
@@ -148,6 +172,29 @@ class TestGrantCompilation(AgentTestCase):
 		payload, _ = call_tool(
 			RESTRICTED_USER, "search_documents", {"doctype": "Agent Run"}, agent=agent.name
 		)
+		self.assertFalse(payload["ok"])
+		self.assertIn("agent framework", payload["error"])
+
+	def test_a_smuggled_row_on_the_blueprints_child_table_still_denies(self):
+		"""The same second check, on the one doctype whose schema is readable.
+
+		Validation is not the only thing keeping this row out, and it must not be
+		the only thing: `is_describable` widens the schema door for this exact
+		name, so the grant door is asserted separately. The row exists, compiles to
+		nothing, and the tool still refuses at call time.
+		"""
+		agent = make_matrix_agent(
+			[rule(TICKET_DT, can_read=1), rule(VAULT_DT, can_read=1)],
+			autonomy="Suggest",
+		)
+		smuggled = agent.access_rules[1]
+		frappe.db.set_value("Agent Access Rule", smuggled.name, "target", RULE_DT)
+		frappe.clear_document_cache("Agent", agent.name)
+
+		reloaded = frappe.get_cached_doc("Agent", agent.name)
+		self.assertNotIn(RULE_DT, compiled_grants(reloaded)["DocType"])
+
+		payload, _ = call_tool(RESTRICTED_USER, "search_documents", {"doctype": RULE_DT}, agent=agent.name)
 		self.assertFalse(payload["ok"])
 		self.assertIn("agent framework", payload["error"])
 

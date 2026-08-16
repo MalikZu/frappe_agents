@@ -16,7 +16,10 @@ a record, and the two questions get two tools.
 Three limits hold here, and together they are the whole gate:
 
 * **The exclusions apply.** A doctype the matrix may never name is not listed,
-  not described, and not confirmed to exist by these tools either.
+  not described, and not confirmed to exist by these tools either. One thing is
+  described and still never named: the blueprint's own child tables. A blueprint
+  cannot be written without their fieldnames, and describing a table that no rule
+  may target and no tool may read out of grants nothing — see `is_describable`.
 * **The session user's own permissions apply.** The list is the doctypes *they*
   may read — an agent never sees more of the site than the person it runs for.
 * **Permlevel 0 only.** Fields above the base level are named under
@@ -35,7 +38,12 @@ from frappe.model import no_value_fields
 from frappe.permissions import get_doctypes_with_read
 from frappe.utils import cint
 
-from frappe_agents.access.exclusions import is_excluded
+from frappe_agents.access.exclusions import (
+	BLUEPRINT,
+	describable_child_tables,
+	is_describable,
+	is_excluded,
+)
 from frappe_agents.tools.base import (
 	CAPABILITY_READ,
 	ToolDenied,
@@ -151,9 +159,9 @@ def describe_site_doctype(payload: dict) -> dict:
 	# refusal is the same one. `db.exists` runs before the permission check because
 	# `has_permission` on a name that is not a doctype is not a question.
 	if (
-		is_excluded(doctype)
+		not is_describable(doctype)
 		or not frappe.db.exists("DocType", doctype)
-		or not frappe.has_permission(doctype, "read")
+		or not frappe.has_permission(_permission_target(doctype), "read")
 	):
 		raise ToolDenied(NO_SUCH_DOCTYPE.format(doctype=doctype))
 
@@ -192,6 +200,18 @@ def describe_site_doctype(payload: dict) -> dict:
 		"_docs_touched": f"DocType: {doctype}",
 		"_result_summary": f"{len(fields)} field(s)",
 	}
+
+
+def _permission_target(doctype: str) -> str:
+	"""Whose read permission answers for this doctype.
+
+	A child table carries no permissions of its own — its rows are read through
+	the document they belong to — so asking frappe about the child answers False
+	for everybody but the Administrator, and the describe would refuse the users
+	it was opened for. The blueprint is the document those rows live on, so it is
+	the one to ask.
+	"""
+	return BLUEPRINT if doctype in describable_child_tables() else doctype
 
 
 def _may_run(report: str) -> bool:
