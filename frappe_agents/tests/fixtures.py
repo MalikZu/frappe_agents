@@ -67,7 +67,7 @@ from typing import Any
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
+from frappe_agents.tests.compat import IntegrationTestCase
 from frappe.utils import cint, now_datetime
 
 from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction, run_extraction
