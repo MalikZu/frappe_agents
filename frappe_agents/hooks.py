@@ -31,8 +31,16 @@ extend_bootinfo = ["frappe_agents.boot.boot_form_agents"]
 
 after_install = "frappe_agents.install.after_install"
 
-# Keep the Agent Tool registry in step with the code that ships the handlers.
-after_migrate = "frappe_agents.tools.registry.sync_tools"
+# Keep the Agent Tool registry in step with the code that ships the handlers,
+# then put back the workspace sidebar, which only ever got built at install
+# time. A patch fixes today's estate once; the hook is the floor under every
+# migrate after it. It guards itself and prints rather than raising — an
+# after_migrate hook that throws fails the migrate for every app on the site,
+# not just this one.
+after_migrate = [
+	"frappe_agents.tools.registry.sync_tools",
+	"frappe_agents.install.ensure_workspace_sidebar",
+]
 
 # Modules that expose agent tools. Each one defines a TOOLS list.
 # Other apps extend this from their own hooks.py.
