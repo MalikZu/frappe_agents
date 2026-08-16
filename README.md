@@ -53,12 +53,26 @@ broad rights. This app is built the other way around:
 ## Install
 
 Early software — expect sharp edges and breaking changes. On a real site, pin
-a release: `main` moves whenever something lands.
+a release: the branches move whenever something lands.
+
+**Frappe v16** (Python 3.14):
 
 ```bash
-bench get-app --branch v0.6.0 https://github.com/MalikZu/frappe_agents
+bench get-app --branch v0.6.1 https://github.com/MalikZu/frappe_agents
 bench --site yoursite install-app frappe_agents
 ```
+
+**Frappe v15** (Python 3.11+) — same app, from the `version-15` line:
+
+```bash
+bench get-app --branch v0.6.1-v15 https://github.com/MalikZu/frappe_agents
+bench --site yoursite install-app frappe_agents
+```
+
+On v15 the desk tile is not created (v15 has no Workspace Sidebar — the
+workspace is at `/app/agents`), and fields your administrator masked are not
+automatically redacted from audit rows. See
+[Running the app](docs/admin.md).
 
 Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
 Agent Auditor) and registers the built-in tools. Then, in the Desk: create an

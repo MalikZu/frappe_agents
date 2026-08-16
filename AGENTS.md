@@ -19,6 +19,19 @@ The permission model is the product.
 - **Use Frappe's own features first** — doctypes, roles, User Permissions,
   Workflow, RQ, realtime — before inventing a parallel mechanism.
 
+## Branches — there are two
+
+`main` targets **Frappe v16 / Python 3.14**. `version-15` targets **Frappe v15 /
+Python 3.11** and is a real, released branch, not an archive.
+
+**A fix on `main` is not done until it is ported to `version-15`.** Decide
+port / do-not-port / port-differently before you write it, and say which in the
+PR. `version-15` cannot use PEP 695 `type` aliases, PEP 758 `except A, B:`,
+`Workspace Sidebar`, or `meta.get_masked_fields()`.
+
+Read the `version-branches` skill before fixing anything, touching
+`pyproject.toml` or `install.py`, or cutting a release.
+
 ## Working on this repo
 
 - Committing? Use the `semantic-commit` skill.
