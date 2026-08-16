@@ -1,4 +1,4 @@
-name: Harness tests
+name: Harness tests (v15)
 
 on:
   pull_request:
@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.11"
 
       # Only pydantic and pytest: the vendored harness must not need anything else.
       - name: Install pydantic and pytest

@@ -1,4 +1,4 @@
-name: Server Tests
+name: Server Tests (v15)
 
 on:
   pull_request:
@@ -47,13 +47,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.11"
           cache: pip
+
+      - name: Reject v16-only syntax
+        # Fails in a second, before we spend ten minutes building a bench. A
+        # port from main that drags in PEP 695 `type` aliases or PEP 758
+        # `except A, B:` dies here with the file and line.
+        working-directory: frappe_agents
+        run: python -m compileall -q -x '(__pycache__)' frappe_agents
 
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 20
 
       - name: Add test site to hosts
         run: echo "127.0.0.1 test_site" | sudo tee -a /etc/hosts
@@ -69,7 +76,7 @@ jobs:
         run: pip install frappe-bench
 
       - name: Init bench
-        run: bench init --skip-assets --frappe-branch version-16 /home/runner/frappe-bench
+        run: bench init --skip-assets --frappe-branch version-15 /home/runner/frappe-bench
 
       - name: Start redis and point bench at the services
         working-directory: /home/runner/frappe-bench
