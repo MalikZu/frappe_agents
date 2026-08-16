@@ -67,6 +67,29 @@ Reference rewrite in this style: the v0.6.0 notes (see the release page after
 2026-08-16, or artifact 3c382c95). Style models: esbuild (prose+examples),
 Biome (user-facing sentences, generated list demoted).
 
+## The v15 line releases separately
+
+Two branches ship (see the `version-branches` skill): `main` tags `vX.Y.Z`,
+`version-15` tags `vX.Y.Z-v15`. **A `-v15` tag always matches the plain release
+of the same number** — it is the same app on the older framework, not a
+different version.
+
+Two things bite here, both learned cutting `v0.6.1-v15`:
+
+- **Check the number semantic-release proposes, every time.** The first v15
+  release had no `v*-v15` tag to count from, so it analysed the whole history
+  and proposed **1.0.0**. That one was cut by hand instead. Later ones can use
+  the workflow, because the tag now exists — but read the dry run before
+  dispatching.
+- **Re-point Latest afterwards.** GitHub marks the newest-published release
+  "Latest", and the `-v15` release is always published second, so it steals the
+  badge and `/releases/latest` starts serving the v15 build as if it superseded
+  the v16 one. Immediately after publishing:
+
+```bash
+gh release edit vX.Y.Z --latest      # the plain release, not the -v15 one
+```
+
 ## Dispatch and verify
 
 ```bash
