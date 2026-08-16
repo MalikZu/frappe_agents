@@ -111,7 +111,17 @@ before every request. Redirects are never followed.
 
 - [Running the app](docs/admin.md) — settings, the audit trail, scheduled work,
   and upgrading.
+- [Troubleshooting](docs/troubleshooting.md) — what to check when an agent is
+  silent, denied, or refusing a file.
+- [Built-in tools](docs/tools.md) — the sixteen tools, their capability
+  classes, and how to read a tool call.
 - [The agent harness](docs/harness.md) — the vendored run loop.
+
+## Contributing
+
+Issues and discussion are the most useful contribution — see
+[CONTRIBUTING.md](CONTRIBUTING.md). For anything security-related, do not open a
+public issue: [SECURITY.md](SECURITY.md).
 
 ## License
 
