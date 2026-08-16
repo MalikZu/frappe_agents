@@ -35,6 +35,7 @@ from frappe_agents.tests.fixtures import (
 	extraction_reply,
 	make_pdf_attachment,
 )
+from frappe_agents.tools.base import masking_supported
 
 NEEDS_REVIEW = "Needs Review"
 ACCEPTED = "Accepted"
@@ -160,6 +161,11 @@ class TestExtractionGate(AgentTestCase):
 		the query layer it is "XXXXXXXX" — assert that first, or the rest of this test
 		would keep passing after the mask was gone and prove nothing.
 		"""
+		# frappe_agents patch (version-15): this asserts v16 field masking.
+		# Where the framework masks nothing, Agent Settings' own sensitive
+		# field list is the protection — see docs/admin.md.
+		if not masking_supported():
+			self.skipTest("the gate has no masked-field source on this Frappe version")
 		with as_user(DRAFT_USER):
 			through_query_layer = frappe.db.get_value(VENDOR_DT, VENDOR_ACME, IBAN_FIELD)
 		self.assertEqual(through_query_layer, "XXXXXXXX")

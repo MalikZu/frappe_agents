@@ -94,6 +94,18 @@ SIDEBAR = (
 SIDEBAR_DOCTYPE = "Workspace Sidebar"
 
 
+def sidebars_supported() -> bool:
+	"""Whether this framework has the Workspace Sidebar doctype at all.
+
+	frappe_agents patch (version-15): sidebars arrived in v16. On v15 the doctype
+	does not exist, so every read of it would hit a missing table. Everything that
+	touches a sidebar — the build, the migrate self-heal, both sidebar patches and
+	their tests — asks here first. The workspace itself is unaffected: it simply
+	has no sidebar row, and the desk falls back to its own module sidebar.
+	"""
+	return bool(frappe.db.exists("DocType", SIDEBAR_DOCTYPE))
+
+
 def existing_sidebar() -> str | None:
 	"""This app's public sidebar here, under whatever name it now carries.
 
@@ -120,6 +132,8 @@ def existing_sidebar() -> str | None:
 	is a name collision whatever module it carries — a sidebar built before
 	`module` was said out loud carries none, and the module query cannot see it.
 	"""
+	if not sidebars_supported():
+		return None
 	by_module = frappe.get_all(
 		SIDEBAR_DOCTYPE,
 		filters={"module": APP_MODULE, "for_user": ("in", ("", None))},
@@ -148,7 +162,7 @@ def build_workspace_sidebar() -> str | None:
 	is missing sends its own list view to the auto-generated module sidebar.
 	`tests/test_sidebar_coverage.py` fails when a new doctype arrives without one.
 	"""
-	if existing_sidebar():
+	if not sidebars_supported() or existing_sidebar():
 		return None
 	doc = frappe.new_doc(SIDEBAR_DOCTYPE)
 	doc.title = WORKSPACE
@@ -188,7 +202,7 @@ def ensure_workspace_sidebar() -> str | None:
 	rolls back to the savepoint and prints — the same trade the sidebar patches
 	make. Returns the name it built, or None.
 	"""
-	if existing_sidebar():
+	if not sidebars_supported() or existing_sidebar():
 		return None
 
 	save_point = "frappe_agents_build_sidebar"
@@ -246,6 +260,20 @@ def desktop_icon_fields() -> dict:
 	}
 
 
+def desktop_tile_supported() -> bool:
+	"""Whether this framework's Desktop Icon is the shape our tile needs.
+
+	frappe_agents patch (version-15): v16's Desktop Icon points at a Workspace
+	Sidebar through `link_to` / `link_type`. v15's is the older module-icon
+	doctype — different columns entirely, and no sidebar to point at. So the desk
+	tile is a v16 surface. On v15 the workspace is reached at `/app/agents` and
+	nothing here should touch the row.
+	"""
+	if not sidebars_supported():
+		return False
+	return bool(frappe.get_meta("Desktop Icon").get_field("link_to"))
+
+
 def ensure_desktop_icon() -> bool:
 	"""Put the desk tile back when its row has gone missing.
 
@@ -280,6 +308,8 @@ def ensure_desktop_icon() -> bool:
 	`after_migrate` runs after `remove_orphan_entities`, so the rebuilt row is the
 	last word in the migrate and the tile is on the desk when it ends.
 	"""
+	if not desktop_tile_supported():
+		return False
 	if frappe.db.exists("Desktop Icon", WORKSPACE):
 		return False
 

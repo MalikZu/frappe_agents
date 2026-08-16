@@ -39,6 +39,7 @@ from frappe_agents.install import (
 	SIDEBAR_APP,
 	build_workspace_sidebar,
 	existing_sidebar,
+	sidebars_supported,
 )
 from frappe_agents.patches.v0_6_0.add_access_sidebar_links import SIDEBAR_DOCTYPE, app_sidebars
 from frappe_agents.patches.v0_6_0.adopt_sidebar_for_app import NEW_LINK, execute
@@ -129,6 +130,13 @@ def make_personal_sidebar(user: str = "Administrator") -> str:
 
 
 class SidebarBuildCase(AgentTestCase):
+	def setUp(self) -> None:
+		# frappe_agents patch (version-15): Workspace Sidebar is v16-only. These
+		# assertions describe a doctype this framework does not have.
+		if not sidebars_supported():
+			self.skipTest("Workspace Sidebar is not in this Frappe version")
+		super().setUp()
+
 	def build(self) -> str:
 		return build_test_sidebar()
 

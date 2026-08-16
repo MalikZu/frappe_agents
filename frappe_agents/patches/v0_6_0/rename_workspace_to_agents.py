@@ -18,12 +18,18 @@ next to the old one.
 
 import frappe
 
+from frappe_agents.install import desktop_tile_supported, sidebars_supported
+
 OLD = "Frappe Agents"
 NEW = "Agents"
 
 
 def execute():
-	for doctype in ("Workspace", "Workspace Sidebar", "Desktop Icon"):
+	# frappe_agents patch (version-15): Workspace Sidebar is v16-only.
+	doctypes = ["Workspace", "Desktop Icon"]
+	if sidebars_supported():
+		doctypes.insert(1, "Workspace Sidebar")
+	for doctype in doctypes:
 		if not frappe.db.exists(doctype, OLD):
 			continue
 		if frappe.db.exists(doctype, NEW):
@@ -38,7 +44,7 @@ def execute():
 	# (or where the JSON sync skipped on an unchanged modified stamp).
 	if frappe.db.exists("Workspace", NEW):
 		frappe.db.set_value("Workspace", NEW, {"title": NEW, "label": NEW}, update_modified=False)
-	if frappe.db.exists("Workspace Sidebar", NEW):
+	if sidebars_supported() and frappe.db.exists("Workspace Sidebar", NEW):
 		frappe.db.set_value("Workspace Sidebar", NEW, "title", NEW, update_modified=False)
-	if frappe.db.exists("Desktop Icon", NEW):
+	if desktop_tile_supported() and frappe.db.exists("Desktop Icon", NEW):
 		frappe.db.set_value("Desktop Icon", NEW, {"label": NEW, "link_to": NEW}, update_modified=False)

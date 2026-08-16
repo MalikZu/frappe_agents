@@ -34,7 +34,7 @@ from frappe_agents.tests.fixtures import (
 	make_run,
 	tool_calls_for,
 )
-from frappe_agents.tools.base import REDACTED, execute_tool
+from frappe_agents.tools.base import REDACTED, execute_tool, masking_supported
 
 
 class TestToolAudit(AgentTestCase):
@@ -119,6 +119,11 @@ class TestToolAuditRedaction(AgentTestCase):
 	TOKEN = "sk-live-never-stored-either"
 
 	def test_tool_audit_redacts_sensitive_arguments_on_success_and_error(self):
+		# frappe_agents patch (version-15): this asserts v16 field masking.
+		# Where the framework masks nothing, Agent Settings' own sensitive
+		# field list is the protection — see docs/admin.md.
+		if not masking_supported():
+			self.skipTest("this Frappe version masks no fields, so none are redacted by masking")
 		title = f"FA Redact {frappe.generate_hash(length=8)}"
 		run = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
 

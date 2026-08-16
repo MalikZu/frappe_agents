@@ -13,6 +13,7 @@ somebody's afternoon.
 
 import frappe
 
+from frappe_agents.install import sidebars_supported
 from frappe_agents.patches.v0_6_0.add_access_sidebar_links import (
 	BUILD_SECTION,
 	NEW_LINKS,
@@ -25,6 +26,10 @@ from frappe_agents.tests.test_sidebar_coverage import build_test_sidebar
 
 class SidebarCase(AgentTestCase):
 	def setUp(self) -> None:
+		# frappe_agents patch (version-15): Workspace Sidebar is v16-only. These
+		# assertions describe a doctype this framework does not have.
+		if not sidebars_supported():
+			self.skipTest("Workspace Sidebar is not in this Frappe version")
 		super().setUp()
 		# Built here rather than borrowed from the site. This used to skip the
 		# whole class when `app_sidebars()` came back empty — which is precisely

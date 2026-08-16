@@ -25,7 +25,9 @@ from frappe_agents.install import (
 	build_workspace_sidebar,
 	desktop_icon_fields,
 	desktop_icon_path,
+	desktop_tile_supported,
 	ensure_desktop_icon,
+	sidebars_supported,
 )
 from frappe_agents.patches.v0_6_0.rename_workspace_to_agents import execute as rename_patch
 from frappe_agents.tests.fixtures import AgentTestCase
@@ -44,6 +46,10 @@ def _load(relative_path: str) -> dict:
 
 class TestWorkspaceNamingContract(AgentTestCase):
 	def setUp(self):
+		# frappe_agents patch (version-15): Workspace Sidebar is v16-only. These
+		# assertions describe a doctype this framework does not have.
+		if not sidebars_supported():
+			self.skipTest("Workspace Sidebar is not in this Frappe version")
 		super().setUp()
 		self.refuse_to_delete_the_shipped_tile_file()
 
@@ -158,6 +164,13 @@ class TestTheDeskTileHealsItself(AgentTestCase):
 	stands in for the file being gone. The JSON is a tracked artifact of the app,
 	not test scratch space.
 	"""
+
+	def setUp(self) -> None:
+		# frappe_agents patch (version-15): v15's Desktop Icon is the older
+		# module-icon doctype — no link_to, and no sidebar to point at.
+		if not desktop_tile_supported():
+			self.skipTest("this Frappe version has no Workspace Sidebar desk tile")
+		super().setUp()
 
 	@contextmanager
 	def the_shipped_file_is_gone(self):

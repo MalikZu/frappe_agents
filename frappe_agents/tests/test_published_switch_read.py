@@ -64,9 +64,7 @@ class TestReadingThePublishedSwitch(IntegrationTestCase):
 		cache = OldCache(0)
 		with patch("frappe.cache", cache):
 			self.assertEqual(_read_published(), 0)
-		self.assertIs(
-			cache.asked_with["expires"], True, "expires=True is what stops v15 caching the read"
-		)
+		self.assertIs(cache.asked_with["expires"], True, "expires=True is what stops v15 caching the read")
 
 	def test_a_stale_memo_is_dropped_before_the_old_cache_is_read(self):
 		"""The memo is the failure. A worker holding one never sees the switch move."""
