@@ -120,8 +120,17 @@ keep that note true.
 Two streams, released separately.
 
 - `main` → normal `release` skill, normal version numbers.
-- `version-15` → same flow, but the tag carries a `-v15` suffix so the two
-  streams never collide.
+- `version-15` → same flow. Its own `.releaserc` names `version-15` as the
+  release branch and sets `tagFormat` to `v${version}-v15`, so the two streams
+  never collide.
+
+**The first v15 release needs a dry run.** No `v*-v15` tag exists yet, so
+semantic-release has no previous release to count from and will pick a version
+off the whole history. Dry-run it exactly as the `release` skill describes and
+read the version it proposes before dispatching anything.
+
+`.releaserc` is one of the files that legitimately differs between the branches.
+Never resolve a merge conflict there by taking main's copy.
 
 **Never release `version-15` with ports outstanding.** Run the drift check
 first, below.
