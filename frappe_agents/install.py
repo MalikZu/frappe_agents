@@ -95,13 +95,40 @@ SIDEBAR_DOCTYPE = "Workspace Sidebar"
 
 
 def existing_sidebar() -> str | None:
-	"""Whichever of the two names this app's sidebar carries here, or None.
+	"""This app's public sidebar here, under whatever name it now carries.
 
-	Both names have to be asked about. A site whose rename patch has not run —
-	or errored — still carries "Frappe Agents", and building on top of that gives
-	the module a *second* public sidebar: two candidates for every list view, and
-	both sidebar patches appending into both.
+	Resolved **by module**, because that is how every consumer resolves it —
+	`add_access_sidebar_links.app_sidebars` filters on `module` and `for_user`,
+	and `adopt_sidebar_for_app` loops over what it returns. A guard that asked a
+	different question could say "nothing here" about a sidebar they can all see.
+
+	It could, and it did. `Workspace Sidebar` is `allow_rename: 1` with
+	`autoname: field:title` and an `after_rename` of its own, so a Workspace
+	Manager renaming "Agents" to "AI Agents" in the desk is a supported action —
+	and the renamed row keeps `module`. Against the old two-name guard both
+	literals were then False, so the after_migrate self-heal inserted a SECOND
+	public sidebar called "Agents": two candidates for every list view, both
+	sidebar patches appending into both, and — because the self-heal runs on
+	every migrate rather than once — another one waiting on the next migrate.
+
+	`for_user` is excluded. A sidebar with it set is somebody's personal copy,
+	which is never the app's public sidebar, and counting one would make the
+	build refuse on a site that has no public sidebar at all.
+
+	The two names are still asked about, for what is now a different question.
+	The build inserts under `WORKSPACE`, so a row already sitting on either name
+	is a name collision whatever module it carries — a sidebar built before
+	`module` was said out loud carries none, and the module query cannot see it.
 	"""
+	by_module = frappe.get_all(
+		SIDEBAR_DOCTYPE,
+		filters={"module": APP_MODULE, "for_user": ("in", ("", None))},
+		pluck="name",
+		order_by="creation asc",
+	)
+	if by_module:
+		return by_module[0]
+
 	for name in (WORKSPACE, SIDEBAR_NAME):
 		if frappe.db.exists(SIDEBAR_DOCTYPE, name):
 			return name
