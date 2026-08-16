@@ -24,8 +24,8 @@ import frappe
 
 from frappe_agents.access.exclusions import APP_MODULE
 from frappe_agents.install import ACTIVITY_SECTION, SIDEBAR, SIDEBAR_APP, build_workspace_sidebar
-from frappe_agents.patches.v0_7_0.add_access_sidebar_links import SIDEBAR_DOCTYPE
-from frappe_agents.patches.v0_7_0.adopt_sidebar_for_app import NEW_LINK, execute
+from frappe_agents.patches.v0_6_0.add_access_sidebar_links import SIDEBAR_DOCTYPE
+from frappe_agents.patches.v0_6_0.adopt_sidebar_for_app import NEW_LINK, execute
 from frappe_agents.tests.fixtures import AgentTestCase
 
 # A throwaway name for the sidebar these tests build. The real one is already on

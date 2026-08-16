@@ -45,9 +45,9 @@ def create_roles() -> None:
 WORKSPACE = "Agents"
 
 # What the installer called the sidebar before the rename above. Nothing writes
-# it any more; the v0_6_0 rename patch converges old sites onto WORKSPACE, and
-# the v0_7_0 sidebar patch keeps this as the fallback lookup for a site whose
-# rename has not run yet.
+# it any more; the rename patch converges old sites onto WORKSPACE, and the
+# sidebar patches keep this as the fallback lookup for a site whose rename has
+# not run yet.
 SIDEBAR_NAME = "Frappe Agents"
 
 # The app the sidebar belongs to, and the reason every list view in this module

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Malik AlZubaidi and contributors
 # For license information, please see LICENSE
 
-"""What the v0_7_0 patch does to an agent that predates the access matrix.
+"""What the v0_6_0 patch does to an agent that predates the access matrix.
 
 The release-blocking question is whether a site can take this upgrade without
 anybody noticing. Two answers count as yes, and both are asserted here:
@@ -22,7 +22,7 @@ point of the matrix, and a test is the right place to say it out loud.
 import frappe
 
 from frappe_agents.access.grants import DOCTYPE_TOOL_VERBS, exposed_tool_names, in_legacy_mode
-from frappe_agents.patches.v0_7_0.convert_tool_selection_to_access_rules import (
+from frappe_agents.patches.v0_6_0.convert_tool_selection_to_access_rules import (
 	convert_agent,
 	execute,
 )

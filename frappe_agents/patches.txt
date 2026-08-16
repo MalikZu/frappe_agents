@@ -6,9 +6,9 @@ frappe_agents.patches.v0_6_0.rename_workspace_to_agents
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
 frappe_agents.patches.v0_6_0.seed_default_model_catalog
-frappe_agents.patches.v0_7_0.seed_default_access_profiles
-frappe_agents.patches.v0_7_0.convert_tool_selection_to_access_rules
-frappe_agents.patches.v0_7_0.seed_agents_builder
-frappe_agents.patches.v0_7_0.add_access_sidebar_links
-frappe_agents.patches.v0_7_0.adopt_sidebar_for_app
-frappe_agents.patches.v0_7_0.flip_openai_to_responses_wire
+frappe_agents.patches.v0_6_0.seed_default_access_profiles
+frappe_agents.patches.v0_6_0.convert_tool_selection_to_access_rules
+frappe_agents.patches.v0_6_0.seed_agents_builder
+frappe_agents.patches.v0_6_0.add_access_sidebar_links
+frappe_agents.patches.v0_6_0.adopt_sidebar_for_app
+frappe_agents.patches.v0_6_0.flip_openai_to_responses_wire
