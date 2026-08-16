@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import Field
 
@@ -94,7 +94,7 @@ class AssistantErrorEvent(WireModel):
     error: AssistantMessage
 
 
-type AssistantMessageEvent = Annotated[
+AssistantMessageEvent: TypeAlias = Annotated[
     AssistantStartEvent
     | TextStartEvent
     | TextDeltaEvent

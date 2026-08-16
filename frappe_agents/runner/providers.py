@@ -667,7 +667,7 @@ def _reasoning_signature(item: dict) -> str | None:
 	"""
 	try:
 		packed = json.dumps(item, separators=(",", ":"))
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return None
 	if len(packed) > RESPONSES_REASONING_LIMIT:
 		return None

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from time import time
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -88,9 +88,9 @@ class ToolCall(WireModel):
     thought_signature: str | None = None
 
 
-type UserContent = str | list[TextContent | ImageContent]
-type AssistantContent = TextContent | ThinkingContent | ToolCall
-type ToolResultContent = TextContent | ImageContent
+UserContent: TypeAlias = str | list[TextContent | ImageContent]
+AssistantContent: TypeAlias = TextContent | ThinkingContent | ToolCall
+ToolResultContent: TypeAlias = TextContent | ImageContent
 
 
 class UserMessage(WireModel):
@@ -237,7 +237,7 @@ class CompactionSummaryMessage(WireModel):
     timestamp: int = Field(default_factory=current_timestamp_ms)
 
 
-type AgentMessage = Annotated[
+AgentMessage: TypeAlias = Annotated[
     UserMessage
     | AssistantMessage
     | ToolResultMessage

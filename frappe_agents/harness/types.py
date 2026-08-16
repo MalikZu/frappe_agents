@@ -6,7 +6,18 @@
 
 from __future__ import annotations
 
-# Pydantic needs PEP 695 named recursive aliases for JSON-like values.
-type JSONPrimitive = str | int | float | bool | None
-type JSONValue = JSONPrimitive | list[JSONValue] | dict[str, JSONValue]
-type JSONObject = dict[str, JSONValue]
+from typing import Union
+
+from typing_extensions import TypeAliasType
+
+# frappe_agents patch: upstream writes these as PEP 695 `type` aliases, which are
+# Python 3.12+. This branch targets 3.11, and a plain `TypeAlias` is NOT a
+# substitute here — pydantic expands it eagerly and recurses until it dies.
+# TypeAliasType is the backport of the same lazy, *named* alias pydantic needs to
+# tie the recursive knot. typing_extensions is a direct frappe dependency, so
+# this adds nothing to the bench.
+JSONPrimitive = TypeAliasType("JSONPrimitive", Union[str, int, float, bool, None])
+JSONValue = TypeAliasType(
+    "JSONValue", Union[JSONPrimitive, list["JSONValue"], dict[str, "JSONValue"]]
+)
+JSONObject = TypeAliasType("JSONObject", dict[str, JSONValue])

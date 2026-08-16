@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import Field
 
@@ -76,7 +76,7 @@ class ToolExecutionEndEvent(WireModel):
     is_error: bool
 
 
-type AgentEvent = Annotated[
+AgentEvent: TypeAlias = Annotated[
     AgentStartEvent
     | AgentEndEvent
     | TurnStartEvent
