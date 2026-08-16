@@ -1253,16 +1253,22 @@ class FakeStream:
 	the whole body in memory, which is the thing the transport must not do.
 	"""
 
-	def __init__(self, chunks, status_code: int = 200, text: str = "", raises=None):
+	def __init__(
+		self, chunks, status_code: int = 200, text: str = "", raises=None, headers=None, json_body=None
+	):
 		self.chunks = chunks
 		self.status_code = status_code
 		self.text = text
 		self.raises = raises
+		self.json_body = json_body
+		# A real response always has them, and the retry reads `Retry-After` off
+		# a refusal. Empty is the ordinary case, not a special one.
+		self.headers = headers or {}
 		self.closed = False
 		self.pulled = 0
 
 	def iter_content(self, chunk_size=None):
-		if self.raises is not None:
+		if self.raises is not None and not self.chunks:
 			raise self.raises
 		if self.status_code != 200 and self.text:
 			body = self.text.encode()
@@ -1273,6 +1279,16 @@ class FakeStream:
 				yield chunk
 			return
 		yield from self.chunks
+		if self.raises is not None:
+			# The socket died with the answer half-written. What has already been
+			# handed over cannot be unsaid, which is what makes it different from
+			# a stream that never opened.
+			raise self.raises
+
+	def json(self):
+		if self.json_body is None:
+			raise ValueError("not a JSON body")
+		return self.json_body
 
 	def close(self):
 		self.closed = True
@@ -1283,6 +1299,30 @@ class FakeStream:
 	def __exit__(self, *exc):
 		self.close()
 		return False
+
+
+class Waits:
+	"""The retry backoff, served instantly and written down.
+
+	Every test that drives a retryable refusal goes through this. A suite that
+	really waited would spend its life proving that waiting works, and the delays
+	are worth asserting on anyway.
+	"""
+
+	def __init__(self):
+		self.delays = []
+
+	def __call__(self, stream, delay):
+		self.delays.append(delay)
+		return True
+
+	def patched(self):
+		return patch("frappe_agents.runner.providers._wait_before_retry", new=self)
+
+
+def no_backoff():
+	"""Retry without the waiting, for a test that does not care how long."""
+	return Waits().patched()
 
 
 class TestStreamTransport(AgentTestCase):
@@ -1390,9 +1430,14 @@ class TestStreamTransport(AgentTestCase):
 				self.assertTrue(response.closed)
 
 	def test_an_enormous_error_body_is_capped_on_the_socket_not_afterwards(self):
-		"""The endpoint decides how big its refusal is; we decide how much we read."""
+		"""The endpoint decides how big its refusal is; we decide how much we read.
+
+		500 is retryable, so the same response is refused three times and only the
+		last of them is read. `pulled` accumulates across all three, which is the
+		point: an attempt that will be repeated must not touch the body at all.
+		"""
 		response = FakeStream([], status_code=500, text="x" * (4 * ERROR_BODY_BYTES))
-		with patch("frappe_agents.runner.providers.requests.post", return_value=response):
+		with no_backoff(), patch("frappe_agents.runner.providers.requests.post", return_value=response):
 			with self.assertRaises(ProviderError) as caught:
 				list(call_model_stream(PROFILE, MESSAGES))
 
