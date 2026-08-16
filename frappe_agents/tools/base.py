@@ -295,10 +295,17 @@ def _read_published() -> Any:
 	return getter(KILL_SWITCH_KEY, expires=True)
 
 
+# Named rather than written inline: `ruff format` on a py314 target rewrites an
+# inline `except (A, B):` into PEP 758 `except A, B:`, which the version-15
+# branch cannot parse. A name is not a tuple literal, so both formatters leave
+# it alone and the same source works on either Python.
+SIGNATURE_ERRORS = (TypeError, ValueError)
+
+
 def _accepts(method: Any, name: str) -> bool:
 	try:
 		return name in inspect.signature(method).parameters
-	except TypeError, ValueError:
+	except SIGNATURE_ERRORS:
 		return False
 
 

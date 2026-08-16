@@ -613,10 +613,17 @@ def file_bytes(file_doc: Any) -> bytes:
 	return content
 
 
+# Named rather than written inline: `ruff format` on a py314 target rewrites an
+# inline `except (A, B):` into PEP 758 `except A, B:`, which the version-15
+# branch cannot parse. A name is not a tuple literal, so both formatters leave
+# it alone and the same source works on either Python.
+SIGNATURE_ERRORS = (TypeError, ValueError)
+
+
 def _accepts_encodings(method: Any) -> bool:
 	try:
 		return "encodings" in inspect.signature(method).parameters
-	except TypeError, ValueError:
+	except SIGNATURE_ERRORS:
 		# A C-implemented or wrapped callable that will not describe itself. The
 		# no-argument call is the one both versions accept.
 		return False
