@@ -16,6 +16,9 @@ promise that a key never reaches an error message.
 """
 
 import json
+import time
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from unittest.mock import patch
 
 import frappe
@@ -24,12 +27,19 @@ import requests
 from frappe_agents.runner.providers import (
 	ERROR_BODY_BYTES,
 	ERROR_BODY_LIMIT,
+	EXTRACT_TIMEOUT,
 	RESPONSES_REASONING_MARKER,
+	RETRY_ATTEMPTS,
+	RETRY_BASE_DELAY,
+	RETRY_MAX_DELAY,
 	SSE_LINE_LIMIT,
 	STREAM_CONNECT_TIMEOUT,
 	STREAM_IDLE_TIMEOUT,
 	TOOL_ARGUMENTS_LIMIT,
 	ProviderError,
+	ProviderStream,
+	_post,
+	_retry_delay,
 	call_model,
 	call_model_stream,
 	parse_anthropic_stream,
@@ -384,6 +394,19 @@ class TestOpenAIStream(AgentTestCase):
 		with self.assertRaises(ProviderError) as caught:
 			list(parse_openai_stream([body]))
 		self.assertIn("upstream is overloaded", str(caught.exception))
+
+	def test_an_error_with_only_a_code_is_still_reported(self):
+		"""A null message and a code is a reason. It used to come out as an empty tail."""
+		body = sse(data_frame({"error": {"message": None, "code": "rate_limit_exceeded"}}))
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_openai_stream([body]))
+		self.assertIn("rate_limit_exceeded", str(caught.exception))
+
+	def test_an_error_with_nothing_in_it_says_so(self):
+		body = sse(data_frame({"error": {"message": ""}}))
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_openai_stream([body]))
+		self.assertIn("no reason given", str(caught.exception))
 
 	def test_a_truncated_answer_is_reported_as_length(self):
 		body = sse(openai_frame({"content": "Three"}), openai_frame({}, finish_reason="length"))
@@ -969,6 +992,57 @@ class TestResponsesStream(AgentTestCase):
 			list(parse_responses_stream([body]))
 		self.assertIn("Slow down.", str(caught.exception))
 
+	def test_an_error_wrapped_one_level_down_is_still_quoted(self):
+		"""The frame that made a run say "The model stream returned an error: error".
+
+		Some endpoints state the error flat on the frame and some wrap it one
+		level down. On the wrapped shape nothing at the top level says anything,
+		so the fallback chain used to land on the frame's own type — and `type`
+		on an error frame is the word `error`.
+		"""
+		body = sse(
+			named_frame(
+				"error",
+				{"type": "error", "error": {"type": "rate_limit_exceeded", "message": "Slow down."}},
+			)
+		)
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("Slow down.", str(caught.exception))
+		self.assertNotIn(": error", str(caught.exception))
+
+	def test_a_wrapped_error_with_no_message_falls_back_to_its_own_type(self):
+		"""Unwrapped, the last resort is the error's type — not the frame's."""
+		body = sse(named_frame("error", {"type": "error", "error": {"type": "overloaded_error"}}))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("overloaded_error", str(caught.exception))
+
+	def test_an_empty_error_object_does_not_blank_the_message(self):
+		"""An empty wrapper is not an unwrap. Falling through leaves something to say."""
+		body = sse(named_frame("error", {"type": "error", "code": "server_error", "error": {}}))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("server_error", str(caught.exception))
+
+	def test_a_failed_response_error_is_not_unwrapped_twice(self):
+		"""The other caller hands over an already-unwrapped object. It stays whole."""
+		body = sse(responses_done(status="failed", error={"code": "server_error"}))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("server_error", str(caught.exception))
+
+	def test_an_error_with_nothing_in_it_at_all_still_says_something(self):
+		body = sse(responses_frame("error"))
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("no reason given", str(caught.exception))
+
 	def test_an_enormous_error_message_is_cut_to_the_cap(self):
 		body = sse(responses_frame("error", code="server_error", message="x" * (4 * ERROR_BODY_LIMIT)))
 
@@ -1189,16 +1263,22 @@ class FakeStream:
 	the whole body in memory, which is the thing the transport must not do.
 	"""
 
-	def __init__(self, chunks, status_code: int = 200, text: str = "", raises=None):
+	def __init__(
+		self, chunks, status_code: int = 200, text: str = "", raises=None, headers=None, json_body=None
+	):
 		self.chunks = chunks
 		self.status_code = status_code
 		self.text = text
 		self.raises = raises
+		self.json_body = json_body
+		# A real response always has them, and the retry reads `Retry-After` off
+		# a refusal. Empty is the ordinary case, not a special one.
+		self.headers = headers or {}
 		self.closed = False
 		self.pulled = 0
 
 	def iter_content(self, chunk_size=None):
-		if self.raises is not None:
+		if self.raises is not None and not self.chunks:
 			raise self.raises
 		if self.status_code != 200 and self.text:
 			body = self.text.encode()
@@ -1209,6 +1289,16 @@ class FakeStream:
 				yield chunk
 			return
 		yield from self.chunks
+		if self.raises is not None:
+			# The socket died with the answer half-written. What has already been
+			# handed over cannot be unsaid, which is what makes it different from
+			# a stream that never opened.
+			raise self.raises
+
+	def json(self):
+		if self.json_body is None:
+			raise ValueError("not a JSON body")
+		return self.json_body
 
 	def close(self):
 		self.closed = True
@@ -1219,6 +1309,30 @@ class FakeStream:
 	def __exit__(self, *exc):
 		self.close()
 		return False
+
+
+class Waits:
+	"""The retry backoff, served instantly and written down.
+
+	Every test that drives a retryable refusal goes through this. A suite that
+	really waited would spend its life proving that waiting works, and the delays
+	are worth asserting on anyway.
+	"""
+
+	def __init__(self):
+		self.delays = []
+
+	def __call__(self, stream, delay):
+		self.delays.append(delay)
+		return True
+
+	def patched(self):
+		return patch("frappe_agents.runner.providers._wait_before_retry", new=self)
+
+
+def no_backoff():
+	"""Retry without the waiting, for a test that does not care how long."""
+	return Waits().patched()
 
 
 class TestStreamTransport(AgentTestCase):
@@ -1293,18 +1407,27 @@ class TestStreamTransport(AgentTestCase):
 		checked, because the leak was never specific to one.
 		"""
 		wires = (
-			("OpenAI Compatible", data_frame({"error": {"message": "bad key fa-test-key rejected"}})),
+			("flat", "OpenAI Compatible", data_frame({"error": {"message": "bad key fa-test-key rejected"}})),
 			(
+				"flat",
 				"Anthropic",
 				named_frame("error", {"type": "error", "error": {"message": "bad key fa-test-key"}}),
 			),
 			(
+				"flat",
 				"OpenAI Responses",
 				responses_frame("error", code="invalid_api_key", message="bad key fa-test-key"),
 			),
+			# The wrapped shape quotes provider text that used to be thrown away,
+			# so it is a second place the key can arrive. Same wrapper, same pin.
+			(
+				"wrapped",
+				"OpenAI Responses",
+				named_frame("error", {"type": "error", "error": {"message": "bad key fa-test-key"}}),
+			),
 		)
-		for provider_type, frame in wires:
-			with self.subTest(provider_type):
+		for shape, provider_type, frame in wires:
+			with self.subTest(provider_type=provider_type, shape=shape):
 				self.use_provider(provider_type)
 				response = FakeStream([sse(frame)])
 				with patch("frappe_agents.runner.providers.requests.post", return_value=response):
@@ -1317,9 +1440,14 @@ class TestStreamTransport(AgentTestCase):
 				self.assertTrue(response.closed)
 
 	def test_an_enormous_error_body_is_capped_on_the_socket_not_afterwards(self):
-		"""The endpoint decides how big its refusal is; we decide how much we read."""
+		"""The endpoint decides how big its refusal is; we decide how much we read.
+
+		500 is retryable, so the same response is refused three times and only the
+		last of them is read. `pulled` accumulates across all three, which is the
+		point: an attempt that will be repeated must not touch the body at all.
+		"""
 		response = FakeStream([], status_code=500, text="x" * (4 * ERROR_BODY_BYTES))
-		with patch("frappe_agents.runner.providers.requests.post", return_value=response):
+		with no_backoff(), patch("frappe_agents.runner.providers.requests.post", return_value=response):
 			with self.assertRaises(ProviderError) as caught:
 				list(call_model_stream(PROFILE, MESSAGES))
 
@@ -1347,6 +1475,294 @@ class TestStreamTransport(AgentTestCase):
 			next(stream)
 			stream.close()
 		self.assertTrue(response.closed)
+
+
+class TestStreamRetry(AgentTestCase):
+	"""Asking again, and the two places where asking again would be wrong.
+
+	A rate limit is a bad minute, not a bad run: a new key is allowed three
+	requests a minute and one turn is one request, so an agent that calls two
+	tools used to die on its third turn. What makes this safe is where it sits.
+	The retry happens while opening the socket, before a single chunk has been
+	handed to anybody, so nothing has been written to the transcript, drawn in
+	the browser or executed as a tool. Everything past that point is final, and
+	the tests for both halves are here.
+	"""
+
+	def stream_it(self):
+		return list(call_model_stream(PROFILE, MESSAGES))
+
+	def answer(self) -> bytes:
+		return sse(openai_frame({"content": "Hi"}), openai_frame({}, finish_reason="stop"))
+
+	def test_a_rate_limited_turn_is_asked_again_and_answers(self):
+		refused = FakeStream([], status_code=429, text="rate limit reached")
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				side_effect=[refused, FakeStream([self.answer()])],
+			) as post,
+		):
+			chunks = self.stream_it()
+
+		self.assertEqual(post.call_count, 2)
+		self.assertEqual(joined(chunks, "text_delta"), "Hi")
+		self.assertTrue(refused.closed)
+
+	def test_every_retryable_status_is_asked_again(self):
+		for status in (429, 500, 502, 503, 504):
+			with self.subTest(status=status):
+				with (
+					no_backoff(),
+					patch(
+						"frappe_agents.runner.providers.requests.post",
+						side_effect=[
+							FakeStream([], status_code=status, text="later"),
+							FakeStream([self.answer()]),
+						],
+					) as post,
+				):
+					self.stream_it()
+				self.assertEqual(post.call_count, 2)
+
+	def test_a_refusal_we_caused_is_not_asked_again(self):
+		"""400, 401, 404: the request was wrong and it will be wrong next time too."""
+		for status in (400, 401, 403, 404, 422):
+			with self.subTest(status=status):
+				with (
+					no_backoff(),
+					patch(
+						"frappe_agents.runner.providers.requests.post",
+						return_value=FakeStream([], status_code=status, text="no"),
+					) as post,
+				):
+					with self.assertRaises(ProviderError):
+						self.stream_it()
+				self.assertEqual(post.call_count, 1)
+
+	def test_a_redirect_is_not_asked_again(self):
+		"""A 30x is refused on purpose. Asking again would only refuse it again."""
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				return_value=FakeStream([], status_code=302, text="Moved"),
+			) as post,
+		):
+			with self.assertRaises(ProviderError):
+				self.stream_it()
+		self.assertEqual(post.call_count, 1)
+
+	def test_a_transport_failure_before_the_response_is_asked_again(self):
+		"""DNS, TLS, a reset connection: the one failure that certainly reached nobody."""
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				side_effect=[requests.ConnectionError("connection reset"), FakeStream([self.answer()])],
+			) as post,
+		):
+			chunks = self.stream_it()
+		self.assertEqual(post.call_count, 2)
+		self.assertEqual(joined(chunks, "text_delta"), "Hi")
+
+	def test_it_gives_up_and_says_what_the_last_refusal_said(self):
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				return_value=FakeStream([], status_code=429, text="rate limit reached"),
+			) as post,
+		):
+			with self.assertRaises(ProviderError) as caught:
+				self.stream_it()
+
+		self.assertEqual(post.call_count, RETRY_ATTEMPTS)
+		self.assertIn("429", str(caught.exception))
+		self.assertIn("rate limit reached", str(caught.exception))
+
+	def test_a_stream_that_breaks_after_the_first_chunk_is_not_asked_again(self):
+		"""The whole reason the retry lives where it does.
+
+		Half an answer has already reached the transcript and the browser. Asking
+		again would write the first half of it twice.
+		"""
+		body = sse(openai_frame({"content": "Half a sen"}))
+		broken = FakeStream([body], raises=requests.Timeout("read timed out"))
+		with no_backoff(), patch("frappe_agents.runner.providers.requests.post", return_value=broken) as post:
+			with self.assertRaises(ProviderError):
+				self.stream_it()
+		self.assertEqual(post.call_count, 1)
+
+	def test_an_error_inside_a_200_body_is_not_asked_again(self):
+		"""A rate limit stated in a 200 body arrives after the stream is open.
+
+		It is the same rate limit and it is not retryable here: the parser holds
+		bytes, not a status, and the stream has already been handed over.
+		"""
+		frame = data_frame({"error": {"code": "rate_limit_exceeded", "message": "Slow down."}})
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post", return_value=FakeStream([sse(frame)])
+			) as post,
+		):
+			with self.assertRaises(ProviderError):
+				self.stream_it()
+		self.assertEqual(post.call_count, 1)
+
+	def test_the_provider_decides_the_wait_when_it_names_one(self):
+		waits = Waits()
+		refused = FakeStream([], status_code=429, text="later", headers={"Retry-After": "7"})
+		with (
+			waits.patched(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				side_effect=[refused, FakeStream([self.answer()])],
+			),
+		):
+			self.stream_it()
+		self.assertEqual(waits.delays, [7.0])
+
+	def test_a_retry_after_date_is_read_as_a_wait_too(self):
+		when = format_datetime(datetime.now(UTC) + timedelta(seconds=6))
+		refused = FakeStream([], status_code=429, text="later", headers={"Retry-After": when})
+		waits = Waits()
+		with (
+			waits.patched(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				side_effect=[refused, FakeStream([self.answer()])],
+			),
+		):
+			self.stream_it()
+		self.assertAlmostEqual(waits.delays[0], 6.0, delta=2.0)
+
+	def test_a_wait_nobody_can_read_falls_back_to_our_own(self):
+		refused = FakeStream([], status_code=429, text="later", headers={"Retry-After": "whenever"})
+		waits = Waits()
+		with (
+			waits.patched(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				side_effect=[refused, FakeStream([self.answer()])],
+			),
+		):
+			self.stream_it()
+		self.assertEqual(len(waits.delays), 1)
+		self.assertLessEqual(waits.delays[0], RETRY_MAX_DELAY)
+
+	def test_an_unreasonable_wait_is_clamped(self):
+		"""The header is somebody else's number. An hour of it is an hour of worker."""
+		refused = FakeStream([], status_code=429, text="later", headers={"Retry-After": "3600"})
+		waits = Waits()
+		with (
+			waits.patched(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				side_effect=[refused, FakeStream([self.answer()])],
+			),
+		):
+			self.stream_it()
+		self.assertEqual(waits.delays, [RETRY_MAX_DELAY])
+
+	def test_the_backoff_is_jittered_and_never_passes_the_ceiling(self):
+		"""Picked, not fixed: workers that back off in step rate-limit each other again."""
+		self.assertLessEqual(max(_retry_delay(0) for _ in range(20)), RETRY_BASE_DELAY)
+		for attempt in range(8):
+			with self.subTest(attempt=attempt):
+				delays = [_retry_delay(attempt) for _ in range(20)]
+				self.assertGreaterEqual(min(delays), 0)
+				self.assertLessEqual(max(delays), RETRY_MAX_DELAY)
+				self.assertGreater(len(set(delays)), 1)
+
+	def test_cancelling_a_run_ends_the_wait_instead_of_serving_it(self):
+		"""The kill switch during a backoff, with the real wait in place.
+
+		Nothing polls the switch while the worker is inside the wire, so a plain
+		sleep here would not be a slow response to a cancel — it would be no
+		response at all. Dropping the stream is what `stream_adapter` does on
+		cancel, and it has to end the wait.
+		"""
+		stream = call_model_stream(PROFILE, MESSAGES)
+
+		def refuse(*args, **kwargs):
+			# The switch goes while the request is in flight, so the wait that
+			# follows this refusal is one nobody is waiting for. The provider asks
+			# for an hour, which is clamped to the ceiling — long enough that a
+			# wait actually served would be unmissable here.
+			stream.close_response()
+			return FakeStream([], status_code=429, text="rate limit reached", headers={"Retry-After": "3600"})
+
+		started = time.monotonic()
+		with patch("frappe_agents.runner.providers.requests.post", side_effect=refuse) as post:
+			with self.assertRaises(ProviderError):
+				list(stream)
+		elapsed = time.monotonic() - started
+
+		self.assertEqual(post.call_count, 1)
+		self.assertLess(elapsed, RETRY_MAX_DELAY / 4)
+
+	def test_a_wait_nobody_interrupts_is_served_and_asks_again(self):
+		"""The other half of the same switch: nothing dropped, the wait is served."""
+		stream = ProviderStream()
+		started = time.monotonic()
+		self.assertTrue(stream.backoff(0.05))
+		self.assertGreaterEqual(time.monotonic() - started, 0.05)
+
+
+class TestPostRetry(AgentTestCase):
+	"""The same retry on the whole-answer path, and the budget extraction keeps.
+
+	Extraction shares this function and does not share the retry. It runs on the
+	long timeout inside a background job that its own timeouts can already
+	exhaust, and a rate-limited extraction fails one row that can be run again —
+	where a rate-limited chat turn kills a live conversation.
+	"""
+
+	def post(self, timeout=None):
+		kwargs = {"timeout": timeout} if timeout is not None else {}
+		return _post("https://api.example.com/v1/chat/completions", {}, {}, "fa-test-key", **kwargs)
+
+	def test_a_rate_limited_call_is_asked_again(self):
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				side_effect=[
+					FakeStream([], status_code=429, text="later"),
+					FakeStream([], json_body={"ok": True}),
+				],
+			) as post,
+		):
+			self.assertEqual(self.post(), {"ok": True})
+		self.assertEqual(post.call_count, 2)
+
+	def test_a_refusal_we_caused_is_not_asked_again(self):
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				return_value=FakeStream([], status_code=400, text="no"),
+			) as post,
+		):
+			with self.assertRaises(ProviderError):
+				self.post()
+		self.assertEqual(post.call_count, 1)
+
+	def test_extraction_is_never_asked_again(self):
+		"""Its job budget is already the tight one. Waits on top would blow it."""
+		with (
+			no_backoff(),
+			patch(
+				"frappe_agents.runner.providers.requests.post",
+				return_value=FakeStream([], status_code=429, text="later"),
+			) as post,
+		):
+			with self.assertRaises(ProviderError):
+				self.post(timeout=EXTRACT_TIMEOUT)
+		self.assertEqual(post.call_count, 1)
 
 
 class TestOpenAIRequestParameters(AgentTestCase):
