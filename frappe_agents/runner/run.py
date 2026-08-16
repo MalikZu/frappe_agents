@@ -987,10 +987,10 @@ def _read_logs(rows: list[dict]) -> None:
 	"""Put the event log on the rows that need one, and on no others.
 
 	A log is up to half a megabyte and there can be twenty rows in a history, so
-	it is never selected by the query that finds the turns — that query stays the
-	three small columns it has always read. A conversation has one failed turn
-	waiting to be retried, not twenty, so this second read is almost always for a
-	single row and often for none.
+	it is never selected by the query that finds the turns — that one reads small
+	columns and stays as cheap as it has always been. A conversation has one
+	failed turn waiting to be retried, not twenty, so this second read is almost
+	always for a single row and often for none.
 
 	It goes through `get_list` like the first one. The log holds tool results as
 	the model saw them, unredacted, and the ownership check on Agent Run is what
