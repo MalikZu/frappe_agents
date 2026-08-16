@@ -84,9 +84,10 @@ Tick **Enabled** when the key works.
 by hand. This is the important field on the form and it has its own page:
 [What an agent may reach](access.md).
 
-**Autonomy.** Suggest reads only. Draft reads and creates drafts. Write adds
-editing existing drafts. No level lets an agent submit anything — see
-[How the agent is held to account](governance.md).
+**Autonomy.** Suggest reads only. Draft lets the agent create and edit drafts,
+extract documents, and propose. Write raises the ceiling for tools another app
+may add — nothing that ships today needs it, so pick Draft. No level lets an
+agent submit anything — see [How the agent is held to account](governance.md).
 
 **Instructions.** The system prompt: what this agent is for, in plain words.
 Short and specific beats long and hopeful.

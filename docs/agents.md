@@ -29,11 +29,19 @@ blast radius, so the form checks it:
 
 **Autonomy** sets the highest class of tool the agent may call.
 
-| Autonomy | The agent may |
+| Autonomy | The agent may call |
 |---|---|
-| **Suggest** | Read |
-| **Draft** | Read, and create drafts |
-| **Write** | Read, create drafts, and edit drafts |
+| **Suggest** | Read tools |
+| **Draft** | Read and Draft tools |
+| **Write** | Read, Draft and Write tools |
+
+Every built-in tool is Read or Draft. Creating a draft, editing one, extracting
+a document and proposing a submit are all **Draft**. Nothing that ships today is
+Write.
+
+So Draft and Write currently reach the same tools. Write exists as the ceiling
+for a Write-class tool another app registers. Choose **Draft** unless you have
+such a tool and mean to allow it. See [Built-in tools](tools.md).
 
 No level lets an agent submit, cancel or delete. To commit something, the agent
 writes a proposal and a different person decides. See
