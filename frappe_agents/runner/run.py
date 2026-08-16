@@ -19,6 +19,7 @@ from typing import Any
 
 import frappe
 from frappe.utils import cint, now_datetime
+from pydantic import TypeAdapter
 
 from frappe_agents.context.attachments import (
 	ATTACHMENT_LIMIT,
@@ -36,7 +37,9 @@ from frappe_agents.harness.messages import (
 	AgentMessage,
 	AssistantMessage,
 	TextContent,
+	ThinkingContent,
 	UserMessage,
+	message_text,
 )
 from frappe_agents.harness.provider_events import (
 	TextDeltaEvent,
@@ -99,6 +102,30 @@ FORBIDDEN_USERS = ("Administrator", "Guest")
 DEFAULT_MAX_STEPS = 10
 DEFAULT_MAX_DEPTH = 3
 HISTORY_LIMIT = 20
+
+# Which prior runs a new turn is allowed to read.
+#
+# A failed turn is not an empty turn. The tools ran, the documents were read, the
+# results came back — the run died on the way to the sentence that would have
+# summarised them. The person then asks the same question again, and the model
+# used to start from nothing, pay for all of it a second time, and often fail the
+# same way. So a failed turn comes back too, rebuilt from its own event log.
+#
+# Cancelled is deliberately not in here. A cancelled run is the kill switch or a
+# person pressing Stop, and replaying its tool results would put back into the
+# model's context exactly the work that was stopped.
+REPLAYABLE_STATUSES = ("Completed", "Failed")
+# What is worth taking out of a stored log: the model's own turns and the results
+# it was handed. The tool_execution events carry each result a second time, and
+# the run's own failure is a note to the reader, not to the model.
+REPLAYED_ROLES = ("assistant", "toolResult")
+# Where a rebuilt turn is kept once it has been read, so the fitter and the
+# builder ask for it once between them and not twice.
+REPLAY_KEY = "_replayed"
+# A stored event's message, back as the model it was written from. The log is
+# written by the same models with the same aliases, so this is a round trip and
+# not a parser.
+_MESSAGE = TypeAdapter(AgentMessage)
 ERROR_LIMIT = 500
 TOOL_RESULT_LIMIT = 20_000
 
@@ -813,6 +840,11 @@ def _build_messages(profile: str, run: Any, system: str = "") -> list[AgentMessa
 	the wire is what has always gone over the wire. It is passed in all the same,
 	because it takes up room in the model's window and the history has to fit
 	around it.
+
+	A finished turn is two messages, the question and the answer, exactly as it
+	has always been. A failed one has no answer to send, so what it did is sent
+	instead: the turns it took and the results they returned, read back out of
+	the log it wrote on its way down.
 	"""
 	history, dropped = _fitted_history(profile, run, system)
 
@@ -822,6 +854,8 @@ def _build_messages(profile: str, run: Any, system: str = "") -> list[AgentMessa
 			messages.append(UserMessage(content=prior["input_message"]))
 		if prior.get("output_message"):
 			messages.append(AssistantMessage(model=profile, content=prior["output_message"]))
+		elif _is_replayed(prior):
+			messages.extend(_replayed(prior))
 	messages.append(UserMessage(content=run.input_message or ""))
 
 	if dropped:
@@ -848,7 +882,7 @@ def _fitted_history(profile: str, run: Any, system: str) -> tuple[list[dict], in
 	kept: list[dict] = []
 	used = 0
 	for prior in reversed(rows):
-		cost = len(prior.get("input_message") or "") + len(prior.get("output_message") or "")
+		cost = _turn_cost(prior)
 		if used + cost > room:
 			break
 		used += cost
@@ -856,6 +890,34 @@ def _fitted_history(profile: str, run: Any, system: str) -> tuple[list[dict], in
 
 	kept.reverse()
 	return kept, len(rows) - len(kept)
+
+
+def _turn_cost(prior: dict) -> int:
+	"""What one prior turn takes out of the window, in characters.
+
+	A finished turn is its question and its answer. A failed one is its question
+	and everything the model was told before it stopped — tool results included,
+	which is nearly all of the size. Costing that turn the way a finished one is
+	costed would read as almost nothing, and the guard this fitter is would go on
+	reporting room that is not there.
+	"""
+	cost = len(prior.get("input_message") or "")
+	if _is_replayed(prior):
+		return cost + sum(_message_cost(message) for message in _replayed(prior))
+	return cost + len(prior.get("output_message") or "")
+
+
+def _message_cost(message: AgentMessage) -> int:
+	"""One replayed message as the number of characters it will occupy.
+
+	A tool call is arguments and nothing else — no text — so the arguments are
+	counted as well. Everything is counted the way the rest of this fitter counts:
+	high rather than low.
+	"""
+	cost = len(message_text(message))
+	if isinstance(message, AssistantMessage):
+		cost += sum(len(frappe.as_json(call.arguments)) for call in message.tool_calls)
+	return cost
 
 
 def _prompt_budget(profile: str) -> int | None:
@@ -898,15 +960,130 @@ def _history(run: Any) -> list[dict]:
 			filters={
 				"conversation": run.conversation,
 				"name": ("!=", run.name),
-				"status": "Completed",
+				"status": ("in", REPLAYABLE_STATUSES),
 			},
-			fields=["input_message", "output_message", "creation"],
+			fields=["name", "status", "input_message", "output_message", "creation"],
 			order_by="creation desc",
 			limit_page_length=HISTORY_LIMIT,
 		)
 	except frappe.PermissionError:
 		return []
-	return list(reversed(rows))
+	rows = list(reversed(rows))
+	_read_logs(rows)
+	return rows
+
+
+def _is_replayed(prior: dict) -> bool:
+	"""Whether this prior turn is one that has to be rebuilt from its log.
+
+	A finished turn never is: it has an answer, and the answer is the turn. Only
+	a run that failed with nothing written down as its answer gets read back out
+	of its events.
+	"""
+	return prior.get("status") == "Failed" and not prior.get("output_message")
+
+
+def _read_logs(rows: list[dict]) -> None:
+	"""Put the event log on the rows that need one, and on no others.
+
+	A log is up to half a megabyte and there can be twenty rows in a history, so
+	it is never selected by the query that finds the turns — that query stays the
+	three small columns it has always read. A conversation has one failed turn
+	waiting to be retried, not twenty, so this second read is almost always for a
+	single row and often for none.
+
+	It goes through `get_list` like the first one. The log holds tool results as
+	the model saw them, unredacted, and the ownership check on Agent Run is what
+	stands between that and somebody else's conversation.
+	"""
+	names = [row["name"] for row in rows if _is_replayed(row)]
+	if not names:
+		return
+	try:
+		logs = frappe.get_list(
+			"Agent Run",
+			filters={"name": ("in", names)},
+			fields=["name", "event_log"],
+			limit_page_length=len(names),
+		)
+	except frappe.PermissionError:
+		return
+	stored = {log["name"]: log.get("event_log") for log in logs}
+	for row in rows:
+		if row["name"] in stored:
+			row["event_log"] = stored[row["name"]]
+
+
+def _replayed(prior: dict) -> list[AgentMessage]:
+	"""What a failed turn actually did, as messages, read once and kept.
+
+	The fitter has to know what the turn costs before the builder can decide to
+	send it, and parsing half a megabyte of JSON twice to answer the same
+	question is the kind of waste that only shows up on a busy site.
+	"""
+	if REPLAY_KEY not in prior:
+		prior[REPLAY_KEY] = _replay(prior.get("event_log"))
+	return prior[REPLAY_KEY]
+
+
+def _replay(raw: Any) -> list[AgentMessage]:
+	"""A stored event log as the messages the model was handed inside that run.
+
+	The text comes back exactly as it was stored. A tool result reaches the model
+	already wrapped — the wrapping is put on inside the tool, long before the log
+	sees it — so replaying the stored string keeps the wrapper, and rebuilding
+	the result from its parts by any other route would quietly drop it.
+
+	Fail closed, one entry at a time, the way every other reader of this log
+	does: an entry nobody can parse contributes nothing and the rest of the turn
+	still comes back. A turn that returns short is a worse answer; a turn that
+	raises is no answer at all.
+	"""
+	if not raw:
+		return []
+	try:
+		entries = (frappe.parse_json(raw) or {}).get("events") or []
+	except Exception:
+		return []
+
+	messages: list[AgentMessage] = []
+	for entry in entries:
+		if not isinstance(entry, dict) or entry.get("type") != "message_end":
+			continue
+		stored = entry.get("message")
+		if not isinstance(stored, dict) or stored.get("role") not in REPLAYED_ROLES:
+			continue
+		try:
+			message = _MESSAGE.validate_python(stored)
+		except Exception:
+			continue
+		if isinstance(message, AssistantMessage):
+			if message.stop_reason in FAILED_STOPS and not message.content:
+				# The loop's own note that it stopped. It is not something the
+				# model said, and the provider context drops it anyway.
+				continue
+			_forget_reasoning(message)
+		messages.append(message)
+	return messages
+
+
+def _forget_reasoning(message: AssistantMessage) -> None:
+	"""Take the signature off a replayed turn's thinking, where it sits.
+
+	Anthropic will not accept a turn that asked for a tool unless the reasoning
+	that led to it comes back exactly as it was sent, signature and all — and
+	what is in the log is not exactly as it was sent. A long thinking block is
+	cut to the per-event ceiling on the way in, truncation note and all, while
+	the signature beside it is stored whole. Handing that pair back is a 400 on
+	the first turn after a failure, which is the one turn this replay exists for.
+
+	Without a signature the block never reaches a provider at all: the wire only
+	carries reasoning it can prove, and drops the rest.
+	"""
+	for block in message.content:
+		if isinstance(block, ThinkingContent):
+			block.thinking_signature = None
+			block.redacted = False
 
 
 def _tool_content(result: dict) -> str:
