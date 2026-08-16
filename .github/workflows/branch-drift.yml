@@ -1,0 +1,84 @@
+name: Branch Drift
+
+# Two branches ship: main (Frappe v16) and version-15 (Frappe v15). A fix on main
+# is not done until it is ported. Nothing enforces that but this job, so it runs
+# nightly and files an issue the moment the two diverge.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    name: Unported commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compare the branches
+        id: compare
+        run: |
+          if ! git rev-parse --verify origin/version-15 >/dev/null 2>&1; then
+            echo "version-15 does not exist yet; nothing to compare."
+            echo "drift=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Docs and workflows diverge on purpose. Ship code and its gates are
+          # what must be carried across.
+          git log --oneline --no-merges origin/version-15..origin/main -- \
+            frappe_agents/ pyproject.toml > unported.txt || true
+
+          count=$(wc -l < unported.txt | tr -d ' ')
+          echo "drift=$count" >> "$GITHUB_OUTPUT"
+          echo "$count commit(s) on main not on version-15"
+          cat unported.txt
+
+      - name: Open or update the drift issue
+        if: steps.compare.outputs.drift != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="version-15 is behind main (${{ steps.compare.outputs.drift }} commits)"
+          {
+            echo "\`version-15\` is missing commits that landed on \`main\`."
+            echo
+            echo "Triage each into port / do-not-port / port-differently — see the"
+            echo "\`version-branches\` skill."
+            echo
+            echo '```'
+            cat unported.txt
+            echo '```'
+          } > body.md
+
+          existing=$(gh issue list --state open --label branch-drift \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file body.md
+          else
+            gh label create branch-drift --color BFD4F2 \
+              --description "version-15 is behind main" 2>/dev/null || true
+            gh issue create --title "$title" --body-file body.md --label branch-drift
+          fi
+
+      - name: Close the drift issue when in sync
+        if: steps.compare.outputs.drift == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh issue list --state open --label branch-drift \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "version-15 is in sync with main."
+          fi

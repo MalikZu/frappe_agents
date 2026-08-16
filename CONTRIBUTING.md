@@ -43,6 +43,24 @@ the conversation worth having, and it is a design decision, not a review nit.
 [How the agent is held to account](docs/governance.md) explains why each of
 these exists.
 
+## Which branch
+
+There are two, and both are live:
+
+| Branch | For | Python |
+|---|---|---|
+| `main` | Frappe v16 | 3.14 |
+| `version-15` | Frappe v15 | 3.11 |
+
+**Open your PR against `main`** unless the bug only exists on v15. A fix that
+applies to both is ported across by the maintainer — you do not need to send it
+twice, but say in the PR if you know it affects v15.
+
+If you are touching `version-15` directly, note that it cannot use `type`
+aliases, `except A, B:`, `Workspace Sidebar`, or `meta.get_masked_fields()`.
+Run `python3.11 -m compileall -q -x '(tests|__pycache__)' frappe_agents` before
+you push.
+
 ## Setting up
 
 ```bash
@@ -50,7 +68,8 @@ bench get-app https://github.com/MalikZu/frappe_agents
 bench --site yoursite install-app frappe_agents
 ```
 
-Requires Frappe v16 and Python 3.14+.
+Requires Frappe v16 and Python 3.14+, or Frappe v15 and Python 3.11+ from the
+`version-15` branch.
 
 ## Running the tests
 

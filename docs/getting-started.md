@@ -5,19 +5,31 @@ most of it deciding what the agent is for.
 
 ## Before you start
 
-- Frappe **v16**
-- Python **3.14** or newer
+- Frappe **v16** with Python **3.14**, or Frappe **v15** with Python **3.11+**
 - An API key for a model provider, or a model you run yourself
 
 ## Install
 
 Early software — expect sharp edges and breaking changes. On a real site, pin a
-release: `main` moves whenever something lands.
+release.
+
+On **Frappe v16**:
 
 ```bash
-bench get-app --branch v0.6.0 https://github.com/MalikZu/frappe_agents
+bench get-app --branch v0.6.1 https://github.com/MalikZu/frappe_agents
 bench --site yoursite install-app frappe_agents
 ```
+
+On **Frappe v15**, take the `-v15` release of the same version:
+
+```bash
+bench get-app --branch v0.6.1-v15 https://github.com/MalikZu/frappe_agents
+bench --site yoursite install-app frappe_agents
+```
+
+The app is the same on both. Two things differ on v15, and both are noted where
+they matter: there is no desk tile, and masked fields are not redacted
+automatically. See [Running the app](admin.md).
 
 Installing sets up four roles, two starting access profiles, a catalog of known
 providers and models — all switched off and without keys — and the **Agents**
