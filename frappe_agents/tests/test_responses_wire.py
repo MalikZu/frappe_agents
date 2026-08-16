@@ -56,6 +56,7 @@ from frappe_agents.tests.test_provider_streams import (
 	FakeStream,
 	item_added,
 	item_done,
+	no_backoff,
 	responses_done,
 	responses_frame,
 	sse,
@@ -406,6 +407,9 @@ class TestResponsesErrors(ResponsesCase):
 	"""What a refusal may say. Never the key, never a whole megabyte of it."""
 
 	def test_a_refusal_is_bounded_and_never_shows_the_key(self):
+		# 429 and 500 are retryable, so those two are refused three times over.
+		# What is asserted is the refusal that is finally reported, and the backoff
+		# in between is served instantly rather than adding seconds to every run.
 		for status in (400, 401, 429, 500):
 			for stream in (True, False):
 				with self.subTest(status=status, stream=stream):
@@ -414,7 +418,10 @@ class TestResponsesErrors(ResponsesCase):
 						status_code=status,
 						text=f"rejected key fa-test-key {'y' * 40_000}",
 					)
-					with patch("frappe_agents.runner.providers.requests.post", return_value=response):
+					with (
+						no_backoff(),
+						patch("frappe_agents.runner.providers.requests.post", return_value=response),
+					):
 						with self.assertRaises(ProviderError) as caught:
 							if stream:
 								list(call_model_stream(PROFILE, MESSAGES))
@@ -429,8 +436,9 @@ class TestResponsesErrors(ResponsesCase):
 					self.assertTrue(response.closed)
 
 	def test_a_transport_failure_never_shows_the_key(self):
+		# Retried, so it is raised on every attempt and reported after the last.
 		broken = requests.RequestException("could not reach host with key fa-test-key")
-		with patch("frappe_agents.runner.providers.requests.post", side_effect=broken):
+		with no_backoff(), patch("frappe_agents.runner.providers.requests.post", side_effect=broken):
 			with self.assertRaises(ProviderError) as caught:
 				list(call_model_stream(PROFILE, MESSAGES))
 		self.assertNotIn("fa-test-key", str(caught.exception))

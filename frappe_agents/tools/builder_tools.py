@@ -16,7 +16,15 @@ a record, and the two questions get two tools.
 Three limits hold here, and together they are the whole gate:
 
 * **The exclusions apply.** A doctype the matrix may never name is not listed,
-  not described, and not confirmed to exist by these tools either.
+  not described, and not confirmed to exist by these tools either. One thing is
+  described and still never named: the blueprint's own child tables. A blueprint
+  cannot be written without their fieldnames, and describing a table that no rule
+  may target and no tool may read out of grants nothing — see `is_describable`.
+  A described doctype names its child tables under the Table field that holds
+  them, and only the ones the same caller could have described on their own: the
+  Builder is told to walk from the blueprint to its Suggested Rules table, and a
+  pointer it cannot follow would be a dead end, while a pointer to something it
+  may not describe would be this tool answering a question it just refused.
 * **The session user's own permissions apply.** The list is the doctypes *they*
   may read — an agent never sees more of the site than the person it runs for.
 * **Permlevel 0 only.** Fields above the base level are named under
@@ -31,11 +39,16 @@ through `tools/base` like all the rest.
 from typing import Any
 
 import frappe
-from frappe.model import no_value_fields
+from frappe.model import no_value_fields, table_fields
 from frappe.permissions import get_doctypes_with_read
 from frappe.utils import cint
 
-from frappe_agents.access.exclusions import is_excluded
+from frappe_agents.access.exclusions import (
+	BLUEPRINT,
+	describable_child_tables,
+	is_describable,
+	is_excluded,
+)
 from frappe_agents.tools.base import (
 	CAPABILITY_READ,
 	ToolDenied,
@@ -147,14 +160,7 @@ def describe_site_doctype(payload: dict) -> dict:
 	require_blueprint_drafting()
 
 	doctype = _require_str(payload, "doctype")
-	# Order is cheapest first and says nothing: whichever of the three it was, the
-	# refusal is the same one. `db.exists` runs before the permission check because
-	# `has_permission` on a name that is not a doctype is not a question.
-	if (
-		is_excluded(doctype)
-		or not frappe.db.exists("DocType", doctype)
-		or not frappe.has_permission(doctype, "read")
-	):
+	if not _may_describe(doctype):
 		raise ToolDenied(NO_SUCH_DOCTYPE.format(doctype=doctype))
 
 	meta = frappe.get_meta(doctype)
@@ -162,6 +168,16 @@ def describe_site_doctype(payload: dict) -> dict:
 	fields = []
 	restricted = []
 	for df in meta.fields:
+		if df.fieldtype in table_fields:
+			# A Table field is the only way to learn the name of the child doctype
+			# under it — nothing lists child tables — and the Builder is told to
+			# walk from Agent Blueprint to the table its suggested rules live in.
+			# It is named only when this same caller could have described it
+			# unprompted: pointing at a doctype the next call would refuse to
+			# confirm exists is exactly the oracle the single refusal prevents.
+			if not cint(df.permlevel) and _may_describe(df.options):
+				fields.append(_described_field(df))
+			continue
 		if df.fieldtype in no_value_fields:
 			continue
 		if cint(df.permlevel):
@@ -170,18 +186,12 @@ def describe_site_doctype(payload: dict) -> dict:
 			# does not even express.
 			restricted.append(df.fieldname)
 			continue
-		fields.append(
-			{
-				"fieldname": df.fieldname,
-				"label": df.label,
-				"fieldtype": df.fieldtype,
-				"options": df.options,
-				"reqd": cint(df.reqd),
-			}
-		)
+		fields.append(_described_field(df))
 
 	return {
-		"doctype": doctype,
+		# The site's own spelling, not the caller's. Everything above answered for
+		# the doctype frappe resolved the name to, so that is the name to hand back.
+		"doctype": meta.name,
 		"module": meta.module,
 		"description": meta.description or "",
 		"title_field": meta.title_field,
@@ -189,9 +199,53 @@ def describe_site_doctype(payload: dict) -> dict:
 		"is_single": cint(meta.issingle),
 		"fields": fields,
 		"restricted_fields": restricted,
-		"_docs_touched": f"DocType: {doctype}",
+		"_docs_touched": f"DocType: {meta.name}",
 		"_result_summary": f"{len(fields)} field(s)",
 	}
+
+
+def _may_describe(doctype: str | None) -> bool:
+	"""The whole gate on one name, asked once at the door and once per child table.
+
+	Order is cheapest first and says nothing: whichever of the three it was, the
+	refusal is the same one. `db.exists` runs before the permission check because
+	`has_permission` on a name that is not a doctype is not a question.
+
+	One predicate rather than two copies of it, because the second caller is the
+	Table field loop: a child table is named in the output on exactly the terms
+	that would let the caller describe it directly, and "exactly" has to mean the
+	same code.
+	"""
+	doctype = (doctype or "").strip()
+	return bool(
+		doctype
+		and is_describable(doctype)
+		and frappe.db.exists("DocType", doctype)
+		and frappe.has_permission(_permission_target(doctype), "read")
+	)
+
+
+def _described_field(df: Any) -> dict:
+	"""One field, as this tool answers for it. Names and shape, never a value."""
+	return {
+		"fieldname": df.fieldname,
+		"label": df.label,
+		"fieldtype": df.fieldtype,
+		"options": df.options,
+		"reqd": cint(df.reqd),
+	}
+
+
+def _permission_target(doctype: str) -> str:
+	"""Whose read permission answers for this doctype.
+
+	A child table carries no permissions of its own — its rows are read through
+	the document they belong to — so asking frappe about the child answers False
+	for everybody but the Administrator, and the describe would refuse the users
+	it was opened for. The blueprint is the document those rows live on, so it is
+	the one to ask.
+	"""
+	return BLUEPRINT if doctype in describable_child_tables() else doctype
 
 
 def _may_run(report: str) -> bool:
@@ -297,10 +351,12 @@ TOOLS = [
 		"description": (
 			"Describe one doctype's fields — fieldname, label, fieldtype, options, required — "
 			"so a blueprint can say what the agent would actually work with. Reads no "
-			"documents. Fields above the base permission level are named under "
-			"restricted_fields and not described: an agent is never granted those. "
-			"A doctype you cannot describe refuses in the same words whichever reason "
-			"it was, so do not read a refusal as evidence about the site."
+			"documents. A field of fieldtype Table holds rows of another doctype, and "
+			"its options is that doctype's name: call this tool again on that name to "
+			"get the fieldnames of the rows. Fields above the base permission level are "
+			"named under restricted_fields and not described: an agent is never granted "
+			"those. A doctype you cannot describe refuses in the same words whichever "
+			"reason it was, so do not read a refusal as evidence about the site."
 		),
 		"args_schema": {
 			"type": "object",

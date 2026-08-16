@@ -58,6 +58,16 @@ silence, so the flat total is replaced by a connect timeout plus a per-chunk idl
 timeout — `STREAM_IDLE_TIMEOUT` seconds with no bytes and the stream is dropped
 with a plain error.
 
+A request that never got started is asked again. Rate limits and bad minutes
+upstream are transient, and one of them should not end a conversation, so a
+refusal with a retryable status — and a transport failure before any response —
+is retried with a jittered backoff that honours `Retry-After`. The window is
+strictly before the first chunk: once bytes have been handed to the caller they
+are in the transcript and on the screen, and asking again would write them
+twice. A stream that breaks mid-answer, and an error delivered inside a 200
+body, are both final. Extraction is not retried at all — it runs under a job
+budget that its own timeouts can already exhaust.
+
 Abandoning the generator closes the connection. That is the cancellation path
 when the caller is between chunks: it stops pulling, and the socket goes away
 with it. A caller blocked *inside* a chunk has nothing to stop doing, so the
@@ -68,7 +78,13 @@ socket under the read and it ends there and then rather than at the idle timeout
 import base64
 import ipaddress
 import json
-from collections.abc import Iterable, Iterator
+import pickle
+import random
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -89,6 +105,33 @@ DEFAULT_MAX_TOKENS = 4096
 STREAM_CONNECT_TIMEOUT = 20
 STREAM_IDLE_TIMEOUT = 60
 DONE_SENTINEL = "[DONE]"
+
+# What is worth asking again, and why it is worth the risk. A new OpenAI key is
+# allowed three requests a minute and one agent turn is one request, so an agent
+# that calls two tools dies on its third turn — that is what this exists for.
+#
+# 429 is free to retry: the request was refused, not run. The 5xx codes are not
+# free, and they are here anyway. A 500 can mean the provider generated — and
+# billed — a completion whose response never reached us, so asking again can pay
+# twice for one turn. That was weighed against a whole conversation dying on a
+# blip that would have cleared in a second, and the conversation won.
+#
+# A transport failure before the response — DNS, TLS, a reset connection — is
+# retried too. It is the one failure that certainly reached nobody.
+RETRYABLE_STATUS = (429, 500, 502, 503, 504)
+RETRY_ATTEMPTS = 3
+# Full jitter, doubling: a wait picked out of 0-1s, then 0-2s. Picked rather than
+# fixed because workers that all backed off by exactly the same amount would come
+# back in step and rate-limit each other again. The ceiling applies to whatever
+# the provider asks for as well — a `Retry-After` of an hour is a worker held
+# open for an hour, and the run would rather be told.
+RETRY_BASE_DELAY = 1.0
+RETRY_MAX_DELAY = 20.0
+# How often a stream parked in a retry backoff asks whether the runtime is still
+# on. It is one redis GET, and the whole worst case — three attempts each held at
+# the ceiling — is a few hundred of them on a path that only runs when a provider
+# has already refused us.
+RUNTIME_POLL_INTERVAL = 0.25
 
 # What one SSE line may weigh before the stream is dropped. A frame that never
 # ends is not a slow answer, it is a body that would grow until the worker runs
@@ -807,6 +850,59 @@ def _is_tool_result(message: dict) -> bool:
 # --- streaming ---------------------------------------------------------------
 
 
+def _runtime_probe(key: str | None = None) -> "Callable[[], bool] | None":
+	"""A read of the kill switch that a worker thread is allowed to make.
+
+	A stream is pulled on a thread `asyncio.to_thread` owns, and frappe is bound
+	to the thread that connected: `frappe.cache`, `frappe.db` and `frappe.conf`
+	all raise there, so nothing on that thread can ask this app anything. That is
+	why a turn parked in a retry backoff cannot see a cancellation, and it is the
+	hole this closes.
+
+	What survives the thread boundary is the redis client itself, which is a
+	connection pool and safe to share, and a key rendered here where `frappe.conf`
+	still answers. A raw GET on that key is then a question the worker thread can
+	ask, and the answer is the switch as the process that saved Agent Settings
+	last published it — the same value `runtime_enabled` reads, and the one that
+	moves when somebody stops the runtime mid-run.
+
+	Only the published half is read. The stored half is a database round trip and
+	there is no connection here to make it on; reading one of the two can only
+	fail to notice a switch that went off, never invent one that did not.
+
+	None when there is no frappe to ask, which is every caller outside a site.
+	"""
+	try:
+		from frappe_agents.tools.base import KILL_SWITCH_KEY
+
+		cache = frappe.cache
+		full_key = cache.make_key(key or KILL_SWITCH_KEY)
+	except Exception:
+		return None
+
+	def stopped() -> bool:
+		try:
+			raw = cache.get(full_key)
+		except Exception:
+			# Redis unreachable is not the switch going off.
+			return False
+		if raw is None:
+			# Never published on this site. `runtime_enabled` treats that as on.
+			return False
+		try:
+			value = pickle.loads(raw)  # nosemgrep: python.lang.security.deserialization.pickle
+		except Exception:
+			return False
+		# Anything that is not one of the two integers this key is written with is
+		# not an answer, and an unreadable switch does not stop a run.
+		return value in (0, False)
+
+	# The rendered key, so a caller can see which switch this probe is watching
+	# without having to trip it — the real one cannot be flipped just to look.
+	stopped.key = full_key
+	return stopped
+
+
 class ProviderStream:
 	"""The normalized chunk stream, with the socket behind it still reachable.
 
@@ -819,12 +915,21 @@ class ProviderStream:
 	stop; what that thread can do is take the socket away. The read then ends at
 	once instead of at the idle timeout, and the worker thread holding it is free
 	a minute earlier.
+
+	Between two attempts at opening that socket there is no socket to take away,
+	so the same thread would be parked in a sleep nobody could reach. `backoff`
+	is the wait it does instead, and it ends on either of the two things that can
+	still reach it — the stream being let go of, and the kill switch going off.
 	"""
 
-	def __init__(self) -> None:
+	def __init__(self, stopped: "Callable[[], bool] | None" = None) -> None:
 		self._chunks: Iterator[dict] | None = None
 		self._response: Any = None
 		self._released = False
+		self._wake = threading.Event()
+		# Read from whichever thread is parked in `backoff`, so it must be
+		# answerable there. `_runtime_probe` builds the only one that is.
+		self._stopped = stopped
 
 	def pulling(self, chunks: Iterator[dict]) -> "ProviderStream":
 		self._chunks = chunks
@@ -862,7 +967,55 @@ class ProviderStream:
 		self._released = True
 		self._drop_response()
 
+	def backoff(self, delay: float) -> bool:
+		"""Wait out a retry delay, unless the run stops wanting it first.
+
+		A plain sleep here would be a hole in cancellation rather than a slow
+		response to it: the kill switch is read between turns, on the very
+		coroutine that is parked waiting for this thread, so while this thread
+		sleeps nothing in this process is watching the switch at all — and there
+		is no socket to take away either.
+
+		Two things can still end the wait, and neither is this process asking
+		itself. The event is set when the stream is let go of, which covers a run
+		already cancelled by the time the wait begins. `_stopped` covers the rest:
+		the switch is published to redis by whichever process saved Agent
+		Settings, and a raw read of that key is the one question a thread with no
+		frappe context of its own can still ask. It is polled rather than waited
+		on because redis has nothing to wake us with.
+
+		A delay that is zero, negative or not a number is still a question — it
+		asks both and returns at once, rather than assuming the answer is yes.
+
+		True when the delay was served in full and another attempt is wanted.
+		"""
+		if not delay > 0:  # nan included: it is not a wait anybody asked for.
+			delay = 0.0
+		deadline = time.monotonic() + delay
+		while True:
+			if self._wake.is_set() or self.stopped():
+				return False
+			remaining = deadline - time.monotonic()
+			if remaining <= 0:
+				return True
+			self._wake.wait(remaining if self._stopped is None else min(remaining, RUNTIME_POLL_INTERVAL))
+
+	def stopped(self) -> bool:
+		"""Has the run this stream belongs to been switched off under us?
+
+		No answer is not the same as yes: a probe that cannot be built or cannot
+		be read leaves the wait exactly as long as it was.
+		"""
+		if self._stopped is None:
+			return False
+		try:
+			return bool(self._stopped())
+		except Exception:
+			return False
+
 	def _drop_response(self) -> None:
+		# Whatever the reason for letting go, nobody is waiting to try again.
+		self._wake.set()
 		response, self._response = self._response, None
 		if response is None:
 			return
@@ -888,7 +1041,9 @@ def call_model_stream(
 	profile, provider, api_key = _resolve_profile(profile)
 	tool_schemas = tool_schemas or []
 
-	stream = ProviderStream()
+	# Built here, on the thread that still has a frappe context, because the
+	# thread that will read it does not. See `_runtime_probe`.
+	stream = ProviderStream(stopped=_runtime_probe())
 	if provider.provider_type == PROVIDER_ANTHROPIC:
 		build = _stream_anthropic
 	elif provider.provider_type == PROVIDER_RESPONSES:
@@ -930,7 +1085,7 @@ def _stream_openai(
 		]
 
 	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-	with _open_stream(url, headers, payload, api_key) as response:
+	with _open_stream(url, headers, payload, api_key, stream) as response:
 		stream.opened(response)
 		yield from _redacted_stream(
 			parse_openai_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
@@ -970,7 +1125,7 @@ def _stream_anthropic(
 		"anthropic-version": ANTHROPIC_VERSION,
 		"Content-Type": "application/json",
 	}
-	with _open_stream(url, headers, payload, api_key) as response:
+	with _open_stream(url, headers, payload, api_key, stream) as response:
 		stream.opened(response)
 		yield from _redacted_stream(
 			parse_anthropic_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
@@ -989,38 +1144,123 @@ def _stream_responses(
 	payload = _responses_payload(profile, messages, tool_schemas, stream=True)
 
 	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-	with _open_stream(url, headers, payload, api_key) as response:
+	with _open_stream(url, headers, payload, api_key, stream) as response:
 		stream.opened(response)
 		yield from _redacted_stream(
 			parse_responses_stream(_stream_bytes(response, url, api_key), model=profile.model_id), api_key
 		)
 
 
-def _open_stream(url: str, headers: dict, payload: dict, api_key: str) -> Any:
+def _open_stream(
+	url: str, headers: dict, payload: dict, api_key: str, stream: "ProviderStream | None" = None
+) -> Any:
 	"""Open the response without reading it, and refuse anything but a 200.
 
 	`allow_redirects=False` for the same reason `_post` sets it: requests follows
 	a redirect on POST by default and would carry the key to wherever it pointed.
 	A 30x is a status code like any other here, so it lands on the refusal below.
+
+	A retryable refusal is asked again, up to `RETRY_ATTEMPTS` times. Here is the
+	only safe place in the whole stream for that: the caller has not been handed
+	a chunk yet, so nothing has been written down, nothing has been drawn, and no
+	tool has run. Everything past this function is final.
 	"""
+	last = RETRY_ATTEMPTS - 1
+	for attempt in range(RETRY_ATTEMPTS):
+		try:
+			response = requests.post(
+				url,
+				headers=headers,
+				json=payload,
+				stream=True,
+				allow_redirects=False,
+				timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
+			)
+		except requests.RequestException as exc:
+			refusal = ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
+			delay = _retry_delay(attempt)
+		else:
+			if response.status_code == 200:
+				return response
+
+			if attempt < last and response.status_code in RETRYABLE_STATUS:
+				# The body is deliberately not read on an attempt that will be
+				# repeated. `_error_body` pulls up to ERROR_BODY_BYTES off the
+				# socket to quote a refusal, and only the last refusal is ever
+				# shown to anybody.
+				delay = _retry_delay(attempt, response)
+				response.close()
+				refusal = ProviderError(
+					f"Model request to {url} returned HTTP {response.status_code} and the stream "
+					f"was closed before it could be tried again."
+				)
+			else:
+				body = _error_body(response, api_key)
+				response.close()
+				raise ProviderError(f"Model request to {url} returned HTTP {response.status_code}: {body}")
+
+		if attempt == last or not _wait_before_retry(stream, delay):
+			raise refusal
+
+
+def _wait_before_retry(stream: "ProviderStream | None", delay: float) -> bool:
+	"""Hold off before asking again. False if the wait ended early and the caller should stop.
+
+	The streaming path waits on the stream itself, so a cancelled run stops
+	waiting the moment it is cancelled. The non-streaming path has nothing to
+	wait on and sleeps, which is part of why its budget is the smaller one.
+
+	A delay of zero is not a reason to skip the question. `Retry-After: 0`, a
+	negative one, and an HTTP date a second in the past all clamp to zero, and a
+	run that was stopped is stopped whatever the provider asked us to wait — the
+	old short circuit spent the whole retry budget on a run nobody wanted.
+	"""
+	if stream is not None:
+		return stream.backoff(delay)
+	if delay > 0:
+		_sleep(delay)
+	return True
+
+
+# The seam the tests reach for. A suite that really waited would spend its life
+# proving that a wait works.
+_sleep = time.sleep
+
+
+def _retry_delay(attempt: int, response: Any = None) -> float:
+	"""How long to wait before the attempt after this one, counting from zero."""
+	asked = _retry_after(response)
+	if asked is not None:
+		return asked
+	return random.uniform(0, min(RETRY_BASE_DELAY * (2**attempt), RETRY_MAX_DELAY))
+
+
+def _retry_after(response: Any) -> float | None:
+	"""What the provider asked us to wait, in whichever of the two forms it said it.
+
+	`Retry-After` is legal as a number of seconds and as an HTTP date, and a
+	provider naming a time knows more about its own limit than our jitter does.
+	It is still only advice: the number is somebody else's and it is clamped like
+	any other delay. Anything unreadable is no answer, and the jitter stands.
+	"""
+	headers = getattr(response, "headers", None) or {}
+	raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+	if raw is None or str(raw).strip() == "":
+		return None
+
+	text = str(raw).strip()
 	try:
-		response = requests.post(
-			url,
-			headers=headers,
-			json=payload,
-			stream=True,
-			allow_redirects=False,
-			timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
-		)
-	except requests.RequestException as exc:
-		raise ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
+		seconds = float(text)
+	except ValueError:
+		try:
+			when = parsedate_to_datetime(text)
+		except (TypeError, ValueError):
+			return None
+		if when.tzinfo is None:
+			when = when.replace(tzinfo=UTC)
+		seconds = (when - datetime.now(UTC)).total_seconds()
 
-	if response.status_code != 200:
-		body = _error_body(response, api_key)
-		response.close()
-		raise ProviderError(f"Model request to {url} returned HTTP {response.status_code}: {body}")
-
-	return response
+	return max(0.0, min(seconds, RETRY_MAX_DELAY))
 
 
 def _error_body(response: Any, api_key: str) -> str:
@@ -1051,14 +1291,22 @@ def _redacted_stream(chunks: Iterator[dict], api_key: str) -> Iterator[dict]:
 	put it straight into a run's failure message, where it is read by anyone who
 	can open the run and copied into every log that follows it. This is the last
 	point on the way out that still holds the key, so it is where that is undone.
+
+	The cap belongs here too, after the redaction and not before it. `_redact`
+	replaces the key where it appears in full, so a message cut to the cap first
+	hands this function a severed key it can no longer match — a quoted body that
+	ran out mid-credential kept the tail of one, which is the whole failure this
+	promise exists to prevent. `_error_body` has always had these two the right
+	way round; the wrapped shapes the parsers build had not.
+
+	The original is dropped rather than chained. It is the one object that still
+	carries the unredacted text, and a chained exception is printed with its
+	context by every traceback that touches it.
 	"""
 	try:
 		yield from chunks
 	except ProviderError as exc:
-		redacted = _redact(str(exc), api_key)
-		if redacted == str(exc):
-			raise
-		raise ProviderError(redacted)
+		raise ProviderError(_redact(str(exc), api_key)[:ERROR_BODY_LIMIT]) from None
 
 
 def _stream_bytes(response: Any, url: str, api_key: str) -> Iterator[bytes]:
@@ -1313,15 +1561,55 @@ def _responses_status(kind: str) -> str:
 	}.get(kind, "completed")
 
 
+def _error_reason(error: Any) -> str:
+	"""The best thing an error object has to say, wherever in it that is.
+
+	Two shapes arrive here. Some endpoints state the error flat, and some wrap it
+	one level down inside a frame that carries nothing of its own — read flat, a
+	wrapped one tells the person reading the run that the model returned "error",
+	which is the frame's type and not a reason at all.
+
+	Unwrapping is therefore a *widening*, never a replacement. An outer object
+	with a perfectly good message keeps it even when something is nested under
+	it: gateways and proxies routinely bolt a detail dict — `param`, `metadata`,
+	`request_id` — onto an error whose message is the only part worth quoting,
+	and stepping into that dict is how "Your credit balance is too low" became
+	"no reason given". Both levels are read, and the better field wins over the
+	nearer one: a message anywhere beats a code anywhere, which beats a type.
+
+	`type` is the last resort and only when it names the error —
+	"rate_limit_exceeded", "overloaded_error". The word "error" is not a reason.
+	"""
+	if not isinstance(error, dict):
+		return str(error or "")
+
+	levels = [error]
+	nested = error.get("error")
+	if isinstance(nested, dict) and nested:
+		levels.append(nested)
+
+	for field in ("message", "code", "type"):
+		for level in levels:
+			value = level.get(field)
+			if field == "type" and value == "error":
+				continue
+			if value:
+				return str(value)
+	return ""
+
+
 def _raise_responses_error(error: Any) -> None:
-	"""An error delivered as its own event, or inside a failed response object."""
-	if isinstance(error, dict):
-		message = error.get("message") or error.get("code") or error.get("type") or ""
-	else:
-		message = str(error or "")
-	raise ProviderError(
-		f"The model stream returned an error: {str(message or 'no reason given')[:ERROR_BODY_LIMIT]}"
-	)
+	"""An error delivered as its own event, or inside a failed response object.
+
+	The unwrap lives in `_error_reason` rather than at the call site because both
+	callers hand over a different shape — one the whole SSE frame, one the error
+	object out of a failed response — and the next caller would get it wrong again.
+
+	Nothing is cut to length here. The key is not in this module's hands by the
+	time a parser runs, so the redaction that has to happen before any truncation
+	happens on the way out, in `_redacted_stream`, and the cap goes with it.
+	"""
+	raise ProviderError(f"The model stream returned an error: {_error_reason(error) or 'no reason given'}")
 
 
 def _responses_reason(incomplete_reason: Any, saw_tool_calls: bool) -> str:
@@ -1704,15 +1992,19 @@ def _stream_json(data: str) -> dict | None:
 
 
 def _raise_stream_error(payload: dict) -> None:
-	"""An error delivered inside a perfectly successful 200 body."""
+	"""An error delivered inside a perfectly successful 200 body.
+
+	Same chain and same fallback as `_raise_responses_error`, and now literally
+	the same code: an endpoint that sends `{"error": {"code": "rate_limit_exceeded"}}`
+	with a null message says something, and two helpers that build the same
+	sentence should not disagree about which fields count.
+
+	Not cut to length here either, for the reason `_raise_responses_error` gives.
+	"""
 	error = payload.get("error")
 	if not error:
 		return
-	if isinstance(error, dict):
-		message = error.get("message") or error.get("type") or ""
-	else:
-		message = str(error)
-	raise ProviderError(f"The model stream returned an error: {str(message)[:ERROR_BODY_LIMIT]}")
+	raise ProviderError(f"The model stream returned an error: {_error_reason(error) or 'no reason given'}")
 
 
 def _delta_text(content: Any) -> str:
@@ -2107,36 +2399,57 @@ def _refusal_message(profile: Any, text: str) -> str:
 
 
 def _post(url: str, headers: dict, payload: dict, api_key: str, timeout: int = REQUEST_TIMEOUT) -> dict:
-	try:
-		# Streamed so that a refusal is read under a cap rather than downloaded
-		# whole and truncated afterwards. An answer is still read in full: that
-		# body is the reply we asked for, and it is what the caller parses.
-		#
-		# Redirects are not followed. The destination was checked before the call;
-		# a hop to somewhere else was not, and following one would hand the API key
-		# to a host nobody configured. A 30x comes back as an unexpected status.
-		response = requests.post(
-			url,
-			headers=headers,
-			json=payload,
-			timeout=timeout,
-			stream=True,
-			allow_redirects=False,
-		)
-	except requests.RequestException as exc:
-		raise ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
-
-	try:
-		if response.status_code != 200:
-			body = _error_body(response, api_key)
-			raise ProviderError(f"Model request to {url} returned HTTP {response.status_code}: {body}")
-
+	# Extraction gets no retries. It already runs on the long budget, the pipeline
+	# already allows several model calls in one background job, and that worst
+	# case already runs past the job's own timeout — waits on top would turn a
+	# latent overrun into the normal case. A rate-limited extraction fails one row
+	# and can be run again; a rate-limited chat turn kills a live conversation,
+	# which is what the retry is for.
+	attempts = 1 if timeout >= EXTRACT_TIMEOUT else RETRY_ATTEMPTS
+	last = attempts - 1
+	for attempt in range(attempts):
 		try:
-			return response.json()
-		except ValueError:
-			raise ProviderError(f"Model request to {url} returned a non-JSON body.")
-	finally:
-		response.close()
+			# Streamed so that a refusal is read under a cap rather than downloaded
+			# whole and truncated afterwards. An answer is still read in full: that
+			# body is the reply we asked for, and it is what the caller parses.
+			#
+			# Redirects are not followed. The destination was checked before the call;
+			# a hop to somewhere else was not, and following one would hand the API key
+			# to a host nobody configured. A 30x comes back as an unexpected status.
+			response = requests.post(
+				url,
+				headers=headers,
+				json=payload,
+				timeout=timeout,
+				stream=True,
+				allow_redirects=False,
+			)
+		except requests.RequestException as exc:
+			if attempt == last:
+				raise ProviderError(f"Model request to {url} failed: {_redact(str(exc), api_key)}")
+			delay = _retry_delay(attempt)
+		else:
+			if attempt < last and response.status_code in RETRYABLE_STATUS:
+				# Not read, for the same reason as the streaming path: only the
+				# refusal that is actually reported is worth pulling off the socket.
+				delay = _retry_delay(attempt, response)
+				response.close()
+			else:
+				try:
+					if response.status_code != 200:
+						body = _error_body(response, api_key)
+						raise ProviderError(
+							f"Model request to {url} returned HTTP {response.status_code}: {body}"
+						)
+
+					try:
+						return response.json()
+					except ValueError:
+						raise ProviderError(f"Model request to {url} returned a non-JSON body.")
+				finally:
+					response.close()
+
+		_wait_before_retry(None, delay)
 
 
 def _load_args(raw: Any) -> dict:

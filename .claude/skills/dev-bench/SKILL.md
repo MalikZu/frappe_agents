@@ -48,7 +48,24 @@ its output).
 ```bash
 docker exec fa-backend-1 bash -lc 'cd /home/frappe/frappe-bench && bench --site clean_test migrate && bench --site clean_test run-tests --app frappe_agents'
 ```
-827 green on 2026-08-16 (v0.6.0). Check the COUNT moved as expected.
+950 green on 2026-08-16 (v0.6.1; was 827 at v0.6.0). Check the COUNT moved as expected.
+
+One module, and one test inside it:
+```bash
+docker exec fa-backend-1 bash -lc 'cd /home/frappe/frappe-bench && bench --site clean_test run-tests --module frappe_agents.tests.test_workspace_naming'
+docker exec fa-backend-1 bash -lc 'cd /home/frappe/frappe-bench && bench --site clean_test run-tests --module frappe_agents.tests.test_workspace_naming --test test_sidebar_home_link_targets_the_workspace'
+```
+`pytest` is deliberately NOT installed in the bench env — the harness suite is
+`*_test.py` precisely so frappe's discovery ignores it. Do not pip-install pytest
+here to run the harness; use CI, or a throwaway venv with pydantic+pytest only.
+
+**Syncing a worktree in: sync the TRACKED TREE, never a hand-picked file list.**
+An incremental `docker cp` of "the files I changed" left the container ahead of the
+branch on 2026-08-16 and silently invalidated a whole suite run — the numbers were
+for a tree that existed nowhere. Tar `git ls-files 'frappe_agents/*'`, extract over
+the app, delete any `.py/.json/.txt` the manifest does not list, then verify with
+sha256 per file before believing any result. (macOS `tar` writes `._*` AppleDouble
+files into the archive; the delete pass sweeps them, or set `COPYFILE_DISABLE=1`.)
 
 ## Updating frappe_agents code on the running stack
 
@@ -108,7 +125,22 @@ client-cached (`auto_generate_sidebar_from_module` is @site_cache).
   unbracketed pgrep later in the line self-killed the shell once).
 - Sidebar looks wrong after app work? Check `tabWorkspace Sidebar`.app is
   "frappe_agents" — list views filter sidebars by app and fall back to the
-  auto module sidebar ("Frappe Agents", hammer icon) when it's empty.
+  auto module sidebar ("Frappe Agents", hammer icon) when it's empty. And check
+  the row EXISTS AT ALL: a migrate-only site had none until 0.6.1, because the
+  builder only ever ran in `after_install`. Symptom is the desk tile throwing
+  "Icon is not correctly configured" while `/app/agents` and every list view work.
+- **`frappe.rename_doc` on a Desktop Icon DELETES the app's shipped JSON file.**
+  `DesktopIcon.after_rename` calls `delete_desktop_icon_file` unconditionally, while
+  the matching `export_desktop_icon` is gated on `developer_mode` — so with
+  developer_mode 0 the file is removed and nothing writes it back. This is the whole
+  explanation for "the icon file vanished 4 times": our own
+  `test_rename_patch_converges_a_half_renamed_site` was doing it, and an
+  IntegrationTestCase rollback cannot undo a filesystem unlink. Any test that renames
+  a Desktop Icon must neutralise `delete_desktop_icon_file` or restore the file.
+  If it ever reaches a released tree the customer consequence is permanent:
+  `remove_orphan_entities` deletes the standard icon on every migrate, and
+  `restrict_removal` is NOT enforced server-side (`check_for_restrict_removal` is
+  defined in frappe and called from nowhere).
 
 Last verified: 2026-08-16 — v0.6.0 RELEASED; 827 tests green on clean_test;
 running image = the released tree; apps.json now pins tag v0.6.0 for rebuilds.

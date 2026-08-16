@@ -9,6 +9,19 @@ fieldnames — and never a document; the site's exclusions apply to what it may
 name; the session user's own permissions apply on top; and fields above
 permlevel 0 are named but never described.
 
+One table sits deliberately on both sides of that line. The blueprint's own
+suggested-rules table is described, because a blueprint cannot be written
+without its fieldnames — and is still not listed, not grantable and not
+readable, because describing a shape is not reaching a record.
+
+That hole is asserted as a *route*, not as a destination. The Builder is told to
+describe the blueprint and then the table its Suggested Rules names, so the test
+that matters walks it with nothing written down: opening the destination while
+the blueprint's answer still did not carry the name left the fix half-landed and
+the Builder still guessing. The other side of the same route is who gets to
+decide where it goes — a Custom Field on Agent Blueprint must not, which is its
+own class below.
+
 The other half is the blueprint. A blueprint is paper: drafting one grants
 nobody anything, and turning it into an agent is a human act by an Agent
 Manager. What that act produces is asserted here too — a *disabled* agent, a
@@ -24,7 +37,7 @@ from frappe_agents.access.builder import (
 	BUILDER_PROFILE,
 	seed_agents_builder,
 )
-from frappe_agents.access.exclusions import BLUEPRINT
+from frappe_agents.access.exclusions import BLUEPRINT, describable_child_tables
 from frappe_agents.access.grants import BUILDER_TOOLS, compiled_grants, exposed_tool_names
 from frappe_agents.frappe_agents.doctype.agent_blueprint.agent_blueprint import (
 	STATUS_APPLIED,
@@ -57,6 +70,24 @@ BUILDER_RULE = rule(BLUEPRINT, can_read=1, can_create_draft=1, can_update_draft=
 APP_REPORT = "Agent Action Review Quality"
 SITE_REPORT = TEST_REPORT
 
+# The table a blueprint's suggested rules live in, and the fields a blueprint is
+# written out of. The Builder guessed at these once and could not do otherwise.
+RULE_DT = "Agent Access Rule"
+RULE_FIELDS = {
+	"target_type",
+	"target",
+	"can_read",
+	"can_create_draft",
+	"can_update_draft",
+	"can_propose",
+	"can_extract",
+	"update_any_draft",
+	"max_rows_per_call",
+}
+# Child tables of ours that the blueprint does not name. An agent's own tool
+# selection and role gating are exactly what it may not be shown the shape of.
+OTHER_CHILD_TABLES = ("Agent Selected Tool", "Agent Allowed Role", "Agent Access Profile Link")
+
 SECRET_FIELD = "secret_note"
 
 
@@ -77,6 +108,9 @@ class BuilderCase(AgentTestCase):
 		result, _ = call_tool(user, tool, payload, agent=agent.name)
 		self.assertFalse(result["ok"], result["result"])
 		return result["error"]
+
+	def described(self, doctype: str, user: str = RESTRICTED_USER) -> dict:
+		return self.ask("describe_site_doctype", {"doctype": doctype}, user=user)
 
 
 class TestBuilderToolExposure(BuilderCase):
@@ -140,6 +174,15 @@ class TestListingTheSite(BuilderCase):
 		"""Rows are granted through the parent, so a child table is not a target."""
 		self.assertNotIn(ORDER_ITEM_DT, self.listed(query="fa test", limit=100))
 
+	def test_the_table_it_may_describe_is_still_not_on_the_list(self):
+		"""The list is targets a rule could name. Describing one did not add it.
+
+		The two questions stay apart: the Builder reads this table's fields so it
+		can fill them in, and the list stays what it always was — the doctypes a
+		suggested rule may point at.
+		"""
+		self.assertNotIn(RULE_DT, self.listed(query="agent", limit=100))
+
 	def test_a_query_narrows_and_the_page_says_how_far_it_got(self):
 		everything = self.ask("list_site_doctypes", {"limit": 100})
 		narrowed = self.ask("list_site_doctypes", {"query": "fa test", "limit": 100})
@@ -164,9 +207,6 @@ class TestListingTheSite(BuilderCase):
 
 
 class TestDescribingADoctype(BuilderCase):
-	def described(self, doctype: str, user: str = RESTRICTED_USER) -> dict:
-		return self.ask("describe_site_doctype", {"doctype": doctype}, user=user)
-
 	def test_it_describes_the_fields_a_blueprint_would_name(self):
 		described = self.described(TICKET_DT)
 
@@ -179,6 +219,117 @@ class TestDescribingADoctype(BuilderCase):
 			described = self.described(TICKET_DT, user=user)
 			self.assertNotIn(SECRET_FIELD, [field["fieldname"] for field in described["fields"]])
 			self.assertEqual(described["restricted_fields"], [SECRET_FIELD])
+
+	def test_it_describes_the_table_its_own_suggested_rules_live_in(self):
+		"""Without this the Builder cannot write a blueprint at all.
+
+		A blueprint's suggested rules are rows of this table. The Builder used to
+		have to invent the fieldnames, and `create_draft` refused every guess.
+
+		This asserts the destination only. It says nothing about whether the
+		Builder can get here from the blueprint — the name is written down at the
+		top of this file — so the walk is asserted separately below.
+		"""
+		described = self.described(RULE_DT)
+
+		self.assertLessEqual(RULE_FIELDS, {field["fieldname"] for field in described["fields"]})
+
+	def test_the_builder_walks_from_the_blueprint_to_its_rules_table(self):
+		"""The path the instructions describe, with no name hard-coded on it.
+
+		The Builder is told to describe Agent Blueprint and then "the doctype its
+		Suggested Rules table names". It could not: `Table` is one of frappe's
+		`no_value_fields`, and those were dropped before anything else looked at a
+		field, so the blueprint described as seven fields with the table — and the
+		only place that name appears — missing. Opening the destination while the
+		route to it was still a dead end left the Builder inventing fieldnames,
+		which is the failure this release set out to fix.
+
+		So the child's name is taken out of the first result and never written
+		here. Checking it against RULE_DT afterwards is what says the path led
+		somewhere right rather than merely somewhere.
+		"""
+		blueprint = self.described(BLUEPRINT)
+
+		tables = [field for field in blueprint["fields"] if field["fieldtype"] == "Table"]
+		self.assertEqual(len(tables), 1, blueprint["fields"])
+		# The label the instructions send it looking for, and the name it needs.
+		self.assertEqual(tables[0]["label"], "Suggested Rules")
+		named = tables[0]["options"]
+
+		described = self.described(named)
+
+		self.assertEqual(described["doctype"], named)
+		self.assertLessEqual(RULE_FIELDS, {field["fieldname"] for field in described["fields"]})
+		self.assertEqual(named, RULE_DT)
+
+	def test_a_child_table_it_could_not_describe_is_not_named_either(self):
+		"""Naming one is exactly as wide as describing one, and not a character wider.
+
+		A Table field is the only place a child doctype's name surfaces — the list
+		leaves child tables out — so surfacing them is what makes the walk above
+		possible. Surfacing one the caller cannot then describe would make this
+		tool an oracle: a name it refuses to confirm exists, printed inside the
+		answer to another question.
+		"""
+		described = self.described(ORDER_DT)
+
+		self.assertNotIn(ORDER_ITEM_DT, [field["options"] for field in described["fields"]])
+		self.assertEqual(
+			self.refusal("describe_site_doctype", {"doctype": ORDER_ITEM_DT}),
+			NO_SUCH_DOCTYPE.format(doctype=ORDER_ITEM_DT),
+		)
+
+	def test_an_excluded_doctype_is_refused_in_every_casing(self):
+		"""`User` refused and `user` described was the refusal oracle, on the tool.
+
+		The exclusion list was case-sensitive while every lookup under it —
+		`get_meta`, and the database's own collation on `tabDocType` — is not. So
+		the site's most sensitive doctype was one shift key away from being
+		described in full, and the difference between the two answers told the
+		caller they had found something.
+		"""
+		for spelling in ("User", "user", "uSeR"):
+			with self.subTest(doctype=spelling):
+				self.assertEqual(
+					self.refusal("describe_site_doctype", {"doctype": spelling}),
+					NO_SUCH_DOCTYPE.format(doctype=spelling),
+				)
+
+	def test_a_doctype_it_may_describe_answers_in_the_sites_own_spelling(self):
+		"""The other half of case-blindness: the good path still answers, once."""
+		described = self.described(TICKET_DT.lower())
+
+		self.assertEqual(described["doctype"], TICKET_DT)
+		self.assertEqual({field["fieldname"] for field in described["fields"]}, {"subject", "project"})
+
+	def test_the_hole_is_derived_from_the_blueprint_and_not_named(self):
+		"""A second child table added to the blueprint is covered without an edit."""
+		self.assertEqual(set(describable_child_tables()), {RULE_DT})
+
+	def test_our_other_child_tables_are_refused_in_the_usual_words(self):
+		"""Widened by the blueprint's own tables, not by 'a child table of ours'.
+
+		An agent's selected tools and allowed roles are child tables in the same
+		module. A predicate that let those through would hand the Builder the shape
+		of the gating that decides what agents may do.
+		"""
+		agent = self.builder()
+
+		for doctype in OTHER_CHILD_TABLES:
+			error = self.refusal("describe_site_doctype", {"doctype": doctype}, agent=agent)
+			self.assertEqual(error, NO_SUCH_DOCTYPE.format(doctype=doctype))
+
+	def test_the_matrix_scoped_describe_still_refuses_it(self):
+		"""Two describes, two questions, and only one of them was opened.
+
+		`get_doctype_meta` answers for granted targets, so opening it would mean
+		either opening the runtime grant check or minting a rule row the validator
+		has to keep refusing. One describe path is enough, and this one stays shut.
+		"""
+		error = self.refusal("get_doctype_meta", {"doctype": RULE_DT})
+
+		self.assertIn("agent framework", error)
 
 	def test_the_three_refusals_are_the_same_refusal(self):
 		"""Excluded, unreadable, or not there at all: one answer, word for word.
@@ -214,6 +365,92 @@ class TestDescribingADoctype(BuilderCase):
 			outcomes |= {call.outcome for call in tool_calls_for(run.name)}
 
 		self.assertEqual(outcomes, {"Denied"})
+
+
+class TestACustomizationCannotWidenTheSchemaHole(BuilderCase):
+	"""A Table field hung off Agent Blueprint must not choose what may be read.
+
+	`describe_site_doctype` answers a child table's read-permission question with
+	Agent Blueprint's, because a child table answers False for everybody but the
+	Administrator and the describe would refuse the users it was opened for. The
+	set that redirect applies to was read off the blueprint's *live* meta — which
+	is the shipped fields plus every Custom Field and Property Setter on the site.
+
+	So anything that could add a field to Agent Blueprint chose which doctype's
+	schema came back under Agent Blueprint's permission. One Custom Field of
+	fieldtype Table pointed at Has Role, and a user with no read permission on
+	Has Role got Has Role's schema. It generalises to any child table another app
+	or an implementer hangs off the blueprint.
+	"""
+
+	# A real child table, in another module, that this user may not read. Role
+	# assignments: the rows that decide what anybody on the site can do.
+	SNEAK_DT = "Has Role"
+	SNEAK_FIELD = "fa_smuggled_table"
+
+	def hang_a_table_field(self, options: str) -> None:
+		"""Add a Table field to Agent Blueprint the way another app's fixture would.
+
+		Written straight to the row rather than through the Custom Field
+		controller: saving one runs `frappe.db.updatedb`, whose DDL commits, and a
+		committed customization on Agent Blueprint would outlive this test. This
+		insert rolls back with everything else; the cache clear is what makes the
+		rollback visible to `get_meta` afterwards.
+		"""
+		field = frappe.get_doc(
+			{
+				"doctype": "Custom Field",
+				"dt": BLUEPRINT,
+				"fieldname": self.SNEAK_FIELD,
+				"label": "FA Smuggled Table",
+				"fieldtype": "Table",
+				"options": options,
+			}
+		)
+		field.name = f"{BLUEPRINT}-{self.SNEAK_FIELD}"
+		field.db_insert()
+		frappe.clear_cache(doctype=BLUEPRINT)
+		self.addCleanup(frappe.clear_cache, doctype=BLUEPRINT)
+
+	def test_the_setup_really_does_reach_the_blueprints_meta(self):
+		"""Otherwise the three tests below would pass on a customization that never landed."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		named = {df.options for df in frappe.get_meta(BLUEPRINT).get_table_fields()}
+		self.assertEqual(named, {RULE_DT, self.SNEAK_DT})
+
+	def test_the_user_it_is_asked_of_may_not_read_it(self):
+		"""And otherwise the refusal below would be proving nothing at all."""
+		with as_user(RESTRICTED_USER):
+			self.assertFalse(frappe.has_permission(self.SNEAK_DT, "read"))
+			self.assertTrue(frappe.has_permission(BLUEPRINT, "read"))
+
+	def test_a_custom_field_does_not_widen_the_describable_set(self):
+		"""Derived from what this app ships, so a row on the site cannot add to it."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		self.assertEqual(set(describable_child_tables()), {RULE_DT})
+
+	def test_the_smuggled_child_table_is_still_refused(self):
+		"""The bypass itself: its permission stays its own, not the blueprint's."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		self.assertEqual(
+			self.refusal("describe_site_doctype", {"doctype": self.SNEAK_DT}),
+			NO_SUCH_DOCTYPE.format(doctype=self.SNEAK_DT),
+		)
+
+	def test_describing_the_blueprint_does_not_name_it(self):
+		"""The other door into the same leak, opened by surfacing Table fields."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		described = self.described(BLUEPRINT)
+
+		self.assertNotIn(self.SNEAK_DT, [field["options"] for field in described["fields"]])
+		self.assertEqual(
+			[field["options"] for field in described["fields"] if field["fieldtype"] == "Table"],
+			[RULE_DT],
+		)
 
 
 class TestListingReports(BuilderCase):

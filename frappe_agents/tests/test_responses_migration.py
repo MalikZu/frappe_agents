@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Malik AlZubaidi and contributors
 # For license information, please see LICENSE
 
-"""What the v0_7_0 flip does to the provider rows already on a site.
+"""What the v0_6_0 flip does to the provider rows already on a site.
 
 This patch is the app's one sanctioned exception to never-clobber: it rewrites a
 field on a row an administrator may have typed by hand. So the release-blocking
@@ -28,7 +28,7 @@ rows would be pinning its neighbours' data as well as its own.
 
 import frappe
 
-from frappe_agents.patches.v0_7_0.flip_openai_to_responses_wire import (
+from frappe_agents.patches.v0_6_0.flip_openai_to_responses_wire import (
 	execute,
 	flip_openai_providers,
 )
