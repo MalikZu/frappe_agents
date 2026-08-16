@@ -1,6 +1,10 @@
 name: Harness tests (v15)
 
 on:
+  # Ports land on this branch by cherry-pick, not always by PR, so a push
+  # has to be tested or a port can arrive untested.
+  push:
+    branches: [version-15]
   pull_request:
   workflow_dispatch:
 

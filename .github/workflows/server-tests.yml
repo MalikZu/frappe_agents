@@ -1,6 +1,10 @@
 name: Server Tests (v15)
 
 on:
+  # Ports land on this branch by cherry-pick, not always by PR, so a push
+  # has to be tested or a port can arrive untested.
+  push:
+    branches: [version-15]
   pull_request:
     # Skip docs-only and stray-script changes, but keep the js we actually ship.
     paths:
