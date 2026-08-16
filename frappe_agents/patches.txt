@@ -14,3 +14,4 @@ frappe_agents.patches.v0_6_0.add_access_sidebar_links
 frappe_agents.patches.v0_6_0.adopt_sidebar_for_app
 frappe_agents.patches.v0_6_0.flip_openai_to_responses_wire
 frappe_agents.patches.v0_6_1.build_workspace_sidebar
+frappe_agents.patches.v0_6_1.update_agents_builder_instructions
