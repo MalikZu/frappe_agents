@@ -29,7 +29,7 @@ half the estate.
 import frappe
 
 from frappe_agents.install import ACTIVITY_SECTION, SIDEBAR_APP
-from frappe_agents.patches.v0_7_0.add_access_sidebar_links import (
+from frappe_agents.patches.v0_6_0.add_access_sidebar_links import (
 	SIDEBAR_DOCTYPE,
 	app_sidebars,
 )

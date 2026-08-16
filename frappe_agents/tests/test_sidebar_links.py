@@ -13,32 +13,34 @@ somebody's afternoon.
 
 import frappe
 
-from frappe_agents.patches.v0_7_0.add_access_sidebar_links import (
+from frappe_agents.patches.v0_6_0.add_access_sidebar_links import (
 	BUILD_SECTION,
 	NEW_LINKS,
 	SIDEBAR_DOCTYPE,
-	app_sidebars,
 	execute,
 )
 from frappe_agents.tests.fixtures import AgentTestCase
+from frappe_agents.tests.test_sidebar_coverage import build_test_sidebar
 
 
 class SidebarCase(AgentTestCase):
 	def setUp(self) -> None:
 		super().setUp()
-		names = app_sidebars()
-		if not names:
-			self.skipTest("this site has no Frappe Agents sidebar to append to")
-		self.sidebar = names[0]
+		# Built here rather than borrowed from the site. This used to skip the
+		# whole class when `app_sidebars()` came back empty — which is precisely
+		# the site shape the sidebar work exists for, so the one case that
+		# mattered was the one case never run. Building a throwaway sidebar
+		# exercises the patch on every site, whatever it already has.
+		self.sidebar = build_test_sidebar()
 		self._strip_new_links()
 		self.before = self.rows()
 
 	def _strip_new_links(self) -> None:
 		"""Put the sidebar back the way a site that never took this patch has it.
 
-		The patch has already run on the site the tests run against, so without
-		this every assertion below would be about rows that were already there.
-		Undone with the rest of the test's writes when the case rolls back.
+		A fresh build already carries the two links, so without this every
+		assertion below would be about rows that were already there. Undone with
+		the rest of the test's writes when the case rolls back.
 		"""
 		doc = frappe.get_doc(SIDEBAR_DOCTYPE, self.sidebar)
 		targets = {link[1] for link in NEW_LINKS}
