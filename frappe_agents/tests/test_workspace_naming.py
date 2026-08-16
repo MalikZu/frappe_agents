@@ -19,6 +19,7 @@ import frappe
 
 from frappe_agents.install import SIDEBAR, WORKSPACE, build_workspace_sidebar
 from frappe_agents.patches.v0_6_0.rename_workspace_to_agents import execute as rename_patch
+from frappe_agents.install import sidebars_supported
 from frappe_agents.tests.fixtures import AgentTestCase
 
 APP_PATH = frappe.get_app_path("frappe_agents")
@@ -30,6 +31,12 @@ def _load(relative_path: str) -> dict:
 
 
 class TestWorkspaceNamingContract(AgentTestCase):
+	def setUp(self) -> None:
+		# frappe_agents patch (version-15): Workspace Sidebar is v16-only. These
+		# assertions describe a doctype this framework does not have.
+		if not sidebars_supported():
+			self.skipTest("Workspace Sidebar is not in this Frappe version")
+
 	def test_workspace_name_title_and_label_agree(self):
 		ws = _load(f"frappe_agents/workspace/{frappe.scrub(WORKSPACE)}/{frappe.scrub(WORKSPACE)}.json")
 		self.assertEqual(ws["name"], WORKSPACE)

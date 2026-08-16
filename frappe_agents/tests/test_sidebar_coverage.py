@@ -26,6 +26,7 @@ from frappe_agents.access.exclusions import APP_MODULE
 from frappe_agents.install import ACTIVITY_SECTION, SIDEBAR, SIDEBAR_APP, build_workspace_sidebar
 from frappe_agents.patches.v0_7_0.add_access_sidebar_links import SIDEBAR_DOCTYPE
 from frappe_agents.patches.v0_7_0.adopt_sidebar_for_app import NEW_LINK, execute
+from frappe_agents.install import sidebars_supported
 from frappe_agents.tests.fixtures import AgentTestCase
 
 # A throwaway name for the sidebar these tests build. The real one is already on
@@ -36,6 +37,12 @@ TEST_SIDEBAR = "FA Test Sidebar"
 
 
 class SidebarBuildCase(AgentTestCase):
+	def setUp(self) -> None:
+		# frappe_agents patch (version-15): Workspace Sidebar is v16-only. These
+		# assertions describe a doctype this framework does not have.
+		if not sidebars_supported():
+			self.skipTest("Workspace Sidebar is not in this Frappe version")
+
 	def build(self) -> str:
 		with patch("frappe_agents.install.WORKSPACE", TEST_SIDEBAR):
 			build_workspace_sidebar()
