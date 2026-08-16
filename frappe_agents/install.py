@@ -179,32 +179,90 @@ def ensure_workspace_sidebar() -> str | None:
 	return built
 
 
+def desktop_icon_path() -> str:
+	"""Where the shipped tile lives, derived the way frappe looks for it.
+
+	The name is load-bearing: `remove_orphan_entities` deletes a standard Desktop
+	Icon whose file is not `desktop_icon/<scrub(name)>.json`, which is what
+	`tests/test_workspace_naming.py` pins. Deriving the path the same way keeps
+	the two from drifting apart.
+	"""
+	return os.path.join(
+		frappe.get_app_path("frappe_agents"), "desktop_icon", f"{frappe.scrub(WORKSPACE)}.json"
+	)
+
+
+def desktop_icon_fields() -> dict:
+	"""The shipped tile transcribed as fields, for when its file is not there.
+
+	A faithful copy of `desktop_icon/agents.json` minus the sync bookkeeping
+	(`doctype`, `modified`, the empty `roles` table). Written out literally rather
+	than assembled from other constants so there is one obvious place to look when
+	the JSON changes — and `tests/test_workspace_naming.py` compares the two field
+	by field, so they cannot drift apart quietly.
+
+	Built on each call, not frozen at import, so `WORKSPACE` is read now.
+	"""
+	return {
+		"label": WORKSPACE,
+		"link_to": WORKSPACE,
+		"link_type": "Workspace Sidebar",
+		"icon_type": "App",
+		"icon": "frappe_agents",
+		"app": "frappe_agents",
+		# the tile's own artwork, not the apps-screen logo in hooks.py
+		"logo_url": "/assets/frappe_agents/icons/desktop_icons/solid/frappe_agents.svg",
+		"idx": 0,
+		"hidden": 0,
+		"standard": 1,
+		"restrict_removal": 1,
+	}
+
+
 def ensure_desktop_icon() -> bool:
 	"""Put the desk tile back when its row has gone missing.
 
 	The tile is shipped as `desktop_icon/<scrub(WORKSPACE)>.json` and model sync
 	imports it early in every migrate, so a row missing at the end of one means
-	something removed it in between: migrate deletes a standard Desktop Icon whose
-	file it cannot find, and in developer mode deleting the row deletes the file
-	from the app tree as well. The tile has gone four times.
+	something removed it in between. Two things remove it, and neither needs
+	developer mode to be the cause:
 
-	Re-imported from the shipped file rather than rebuilt from constants, because
-	the file is what the app ships and what the next migrate will compare against.
-	When the file itself is gone there is nothing to import and nothing this can
-	honestly invent, so it says so and leaves the site alone.
+	* `frappe.model.sync.remove_orphan_entities` deletes every standard Desktop
+	  Icon whose `desktop_icon/<scrub(name)>.json` it cannot find, with
+	  `force=True`. `restrict_removal` does not stop it — that flag is only read
+	  by the desk's own JS, `check_for_restrict_removal` is called from nowhere
+	  in frappe, so nothing enforces it server-side.
+	* `DesktopIcon.after_rename` deletes `desktop_icon/<old name>.json` from the
+	  app tree unconditionally, and only writes the new name's file back in
+	  developer mode. `on_trash` deletes the file too, that one in developer mode.
+
+	So losing the file is what makes losing the row permanent: with no file, model
+	sync has nothing to import, and every later migrate deletes the row again. That
+	is the loop the tile has fallen into four times, and it is the one state that
+	cannot recover on its own — which is exactly why this refuses to give up in it.
+
+	The shipped file stays the source of truth and is imported whenever it is
+	there. Only when it is gone is the row rebuilt from `desktop_icon_fields()`,
+	and even then NOTHING is written into the app tree: a migrate has no business
+	authoring the app's released artifacts, and a regenerated file could differ
+	from the one that shipped. What has to come back is the row — the desk renders
+	the row; the file is only its usual carrier. A rebuilt row is also
+	self-correcting: the next migrate that runs against an intact tree re-imports
+	the file over it.
+
+	`after_migrate` runs after `remove_orphan_entities`, so the rebuilt row is the
+	last word in the migrate and the tile is on the desk when it ends.
 	"""
 	if frappe.db.exists("Desktop Icon", WORKSPACE):
 		return False
 
-	# The name is load-bearing: migrate deletes any icon whose file is not
-	# desktop_icon/<scrub(name)>.json, which is what `tests/test_workspace_naming.py`
-	# pins. Deriving the path the same way keeps the two from drifting apart.
-	path = os.path.join(
-		frappe.get_app_path("frappe_agents"), "desktop_icon", f"{frappe.scrub(WORKSPACE)}.json"
-	)
-	if not os.path.exists(path):
-		print(f"frappe_agents: the {WORKSPACE} desk tile is missing and so is {path}")
-		return False
+	path = desktop_icon_path()
+	shipped = os.path.exists(path)
+	if not shipped:
+		# Worth saying out loud: the app's own tree is missing a released file,
+		# and a redeploy is the real fix. The rebuild below only keeps the desk
+		# usable until then.
+		print(f"frappe_agents: {path} is missing — rebuilding the {WORKSPACE} desk tile without it")
 
 	# Same trade as the sidebar above, and it matters more here: after_migrate
 	# hooks run for every app on the site, so an exception raised here fails
@@ -212,14 +270,49 @@ def ensure_desktop_icon() -> bool:
 	save_point = "frappe_agents_desktop_icon"
 	frappe.db.savepoint(save_point)
 	try:
-		from frappe.modules.import_file import import_file_by_path
+		if shipped:
+			from frappe.modules.import_file import import_file_by_path
 
-		import_file_by_path(path, force=True, ignore_version=True)
+			import_file_by_path(path, force=True, ignore_version=True)
+		else:
+			rebuild_desktop_icon()
 	except Exception as exc:
 		frappe.db.rollback(save_point=save_point)
 		print(f"frappe_agents: could not restore the {WORKSPACE} desk tile — {exc}")
 		return False
 
 	frappe.db.release_savepoint(save_point)
+	# import_file_by_path reports a skipped import by returning False rather than
+	# raising, so the row itself is the only honest answer to "did that work".
+	if not frappe.db.exists("Desktop Icon", WORKSPACE):
+		print(f"frappe_agents: the {WORKSPACE} desk tile is still missing")
+		return False
+
 	print(f"frappe_agents: restored the {WORKSPACE} desk tile")
 	return True
+
+
+def rebuild_desktop_icon() -> None:
+	"""Insert the tile from `desktop_icon_fields()`, touching no file."""
+	doc = frappe.new_doc("Desktop Icon")
+	doc.update(desktop_icon_fields())
+	doc.flags.ignore_permissions = True
+	# `link_to` is a DynamicLink into Workspace Sidebar, and `import_file` sets
+	# this same flag before inserting the shipped file. Without it the two paths
+	# disagree exactly where it hurts: on a site whose sidebar is also missing,
+	# the file would still produce a tile and this would refuse to. The sidebar is
+	# normally there — `ensure_workspace_sidebar` is the after_migrate hook right
+	# before this one — but it swallows its own failures, so that site is real.
+	doc.flags.ignore_links = True
+
+	# `DesktopIcon.on_update` exports a standard icon back into the app tree on a
+	# developer-mode site, and its guard is `frappe.flags.in_import`. Setting the
+	# flag is not a trick: it is the same flag `frappe.modules.import_file` sets
+	# around its own insert, so this rebuild lands with exactly the semantics the
+	# shipped-file path has — and the app tree stays untouched in either mode.
+	was_importing = frappe.flags.in_import
+	frappe.flags.in_import = True
+	try:
+		doc.insert(ignore_permissions=True, set_name=WORKSPACE)
+	finally:
+		frappe.flags.in_import = was_importing
