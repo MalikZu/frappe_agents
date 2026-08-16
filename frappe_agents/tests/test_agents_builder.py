@@ -18,7 +18,9 @@ That hole is asserted as a *route*, not as a destination. The Builder is told to
 describe the blueprint and then the table its Suggested Rules names, so the test
 that matters walks it with nothing written down: opening the destination while
 the blueprint's answer still did not carry the name left the fix half-landed and
-the Builder still guessing.
+the Builder still guessing. The other side of the same route is who gets to
+decide where it goes — a Custom Field on Agent Blueprint must not, which is its
+own class below.
 
 The other half is the blueprint. A blueprint is paper: drafting one grants
 nobody anything, and turning it into an agent is a human act by an Agent
@@ -347,6 +349,92 @@ class TestDescribingADoctype(BuilderCase):
 			outcomes |= {call.outcome for call in tool_calls_for(run.name)}
 
 		self.assertEqual(outcomes, {"Denied"})
+
+
+class TestACustomizationCannotWidenTheSchemaHole(BuilderCase):
+	"""A Table field hung off Agent Blueprint must not choose what may be read.
+
+	`describe_site_doctype` answers a child table's read-permission question with
+	Agent Blueprint's, because a child table answers False for everybody but the
+	Administrator and the describe would refuse the users it was opened for. The
+	set that redirect applies to was read off the blueprint's *live* meta — which
+	is the shipped fields plus every Custom Field and Property Setter on the site.
+
+	So anything that could add a field to Agent Blueprint chose which doctype's
+	schema came back under Agent Blueprint's permission. One Custom Field of
+	fieldtype Table pointed at Has Role, and a user with no read permission on
+	Has Role got Has Role's schema. It generalises to any child table another app
+	or an implementer hangs off the blueprint.
+	"""
+
+	# A real child table, in another module, that this user may not read. Role
+	# assignments: the rows that decide what anybody on the site can do.
+	SNEAK_DT = "Has Role"
+	SNEAK_FIELD = "fa_smuggled_table"
+
+	def hang_a_table_field(self, options: str) -> None:
+		"""Add a Table field to Agent Blueprint the way another app's fixture would.
+
+		Written straight to the row rather than through the Custom Field
+		controller: saving one runs `frappe.db.updatedb`, whose DDL commits, and a
+		committed customization on Agent Blueprint would outlive this test. This
+		insert rolls back with everything else; the cache clear is what makes the
+		rollback visible to `get_meta` afterwards.
+		"""
+		field = frappe.get_doc(
+			{
+				"doctype": "Custom Field",
+				"dt": BLUEPRINT,
+				"fieldname": self.SNEAK_FIELD,
+				"label": "FA Smuggled Table",
+				"fieldtype": "Table",
+				"options": options,
+			}
+		)
+		field.name = f"{BLUEPRINT}-{self.SNEAK_FIELD}"
+		field.db_insert()
+		frappe.clear_cache(doctype=BLUEPRINT)
+		self.addCleanup(frappe.clear_cache, doctype=BLUEPRINT)
+
+	def test_the_setup_really_does_reach_the_blueprints_meta(self):
+		"""Otherwise the three tests below would pass on a customization that never landed."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		named = {df.options for df in frappe.get_meta(BLUEPRINT).get_table_fields()}
+		self.assertEqual(named, {RULE_DT, self.SNEAK_DT})
+
+	def test_the_user_it_is_asked_of_may_not_read_it(self):
+		"""And otherwise the refusal below would be proving nothing at all."""
+		with as_user(RESTRICTED_USER):
+			self.assertFalse(frappe.has_permission(self.SNEAK_DT, "read"))
+			self.assertTrue(frappe.has_permission(BLUEPRINT, "read"))
+
+	def test_a_custom_field_does_not_widen_the_describable_set(self):
+		"""Derived from what this app ships, so a row on the site cannot add to it."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		self.assertEqual(set(describable_child_tables()), {RULE_DT})
+
+	def test_the_smuggled_child_table_is_still_refused(self):
+		"""The bypass itself: its permission stays its own, not the blueprint's."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		self.assertEqual(
+			self.refusal("describe_site_doctype", {"doctype": self.SNEAK_DT}),
+			NO_SUCH_DOCTYPE.format(doctype=self.SNEAK_DT),
+		)
+
+	def test_describing_the_blueprint_does_not_name_it(self):
+		"""The other door into the same leak, opened by surfacing Table fields."""
+		self.hang_a_table_field(self.SNEAK_DT)
+
+		described = self.described(BLUEPRINT)
+
+		self.assertNotIn(self.SNEAK_DT, [field["options"] for field in described["fields"]])
+		self.assertEqual(
+			[field["options"] for field in described["fields"] if field["fieldtype"] == "Table"],
+			[RULE_DT],
+		)
 
 
 class TestListingReports(BuilderCase):
