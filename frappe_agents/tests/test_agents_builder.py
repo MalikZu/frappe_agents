@@ -280,8 +280,24 @@ class TestDescribingADoctype(BuilderCase):
 			NO_SUCH_DOCTYPE.format(doctype=ORDER_ITEM_DT),
 		)
 
-	def test_it_answers_in_the_sites_own_spelling(self):
-		"""What came back names the doctype frappe resolved, not the string asked."""
+	def test_an_excluded_doctype_is_refused_in_every_casing(self):
+		"""`User` refused and `user` described was the refusal oracle, on the tool.
+
+		The exclusion list was case-sensitive while every lookup under it —
+		`get_meta`, and the database's own collation on `tabDocType` — is not. So
+		the site's most sensitive doctype was one shift key away from being
+		described in full, and the difference between the two answers told the
+		caller they had found something.
+		"""
+		for spelling in ("User", "user", "uSeR"):
+			with self.subTest(doctype=spelling):
+				self.assertEqual(
+					self.refusal("describe_site_doctype", {"doctype": spelling}),
+					NO_SUCH_DOCTYPE.format(doctype=spelling),
+				)
+
+	def test_a_doctype_it_may_describe_answers_in_the_sites_own_spelling(self):
+		"""The other half of case-blindness: the good path still answers, once."""
 		described = self.described(TICKET_DT.lower())
 
 		self.assertEqual(described["doctype"], TICKET_DT)
