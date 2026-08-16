@@ -29,9 +29,26 @@ place — the Builder's `describe_site_doctype` — and it is never a grant. Not
 it admits may be named by a rule row, listed as a target, or reached by a tool
 that returns a document. Keeping the two predicates apart is what leaves every
 gate that asks `is_excluded` unchanged by construction rather than by review.
+
+Two things every name in here is put through first, because a gate that can be
+walked around is not a gate:
+
+* **Casing.** `tabDocType.name` collates case-insensitively, so `user` and `User`
+  are one doctype to the database and to `frappe.get_meta`. A frozenset that only
+  knew `User` made `is_excluded("user")` False, and everything downstream —
+  validation, the compiled grant, the schema tool — believed it. Every name is
+  canonicalised through frappe's own spelling before it is compared.
+* **Customization.** The widening is derived from what this app *ships* on the
+  blueprint, not from its live meta. Live meta carries Custom Fields and Property
+  Setters, so anything able to add a field to Agent Blueprint could otherwise
+  have named the doctype whose schema the Builder may read.
 """
 
+from typing import Any
+
 import frappe
+from frappe.model import table_fields
+from frappe.utils import cint
 
 APP_MODULE = "Frappe Agents"
 
@@ -61,33 +78,65 @@ CORE_SECURITY_DOCTYPES = frozenset(
 	}
 )
 
+# The same names, folded. The lookup has to be case-insensitive because every
+# other lookup on a doctype name already is: `frappe.get_meta("user")` returns
+# User and `tabDocType` matches it too. A case-sensitive membership test made
+# `is_excluded("user")` False, which was a live grant on User for anyone who
+# wrote the target in lower case, and a describe that answered for `user` while
+# refusing `User` — the refusal oracle these tools promise does not exist.
+CORE_SECURITY_FOLDED = frozenset(name.casefold() for name in CORE_SECURITY_DOCTYPES)
+
 
 def is_excluded(doctype: str | None) -> bool:
 	"""Whether this doctype is off limits to every agent, always.
 
 	Fails closed: no doctype at all is excluded, because a caller that lost the
-	target should not be handed a grant.
+	target should not be handed a grant. Asked of the site's own spelling of the
+	name, so the answer cannot be changed by changing the casing.
 	"""
 	doctype = (doctype or "").strip()
 	if not doctype:
 		return True
-	if doctype == BLUEPRINT:
+
+	# One meta lookup answers both halves. The Agents Builder asks this question
+	# once per doctype on the site, so the two questions share the read.
+	meta = doctype_meta(doctype)
+	name = meta.name if meta is not None else doctype
+	if name == BLUEPRINT:
 		return False
-	if doctype in CORE_SECURITY_DOCTYPES:
+	if name.casefold() in CORE_SECURITY_FOLDED:
 		return True
-	return module_of(doctype) == APP_MODULE
+	return (meta.module if meta is not None else None) == APP_MODULE
+
+
+def canonical_doctype(doctype: str | None) -> str | None:
+	"""The site's own spelling of this name, or None when there is no such doctype.
+
+	Every lookup that reaches the database already treats `user` and `User` as one
+	doctype, so anything deciding *policy* about a name has to agree with the
+	database rather than with the string it was handed. Asking frappe what the
+	doctype is really called is how it agrees.
+	"""
+	meta = doctype_meta(doctype)
+	return meta.name if meta is not None else None
 
 
 def module_of(doctype: str) -> str | None:
-	"""The module a doctype belongs to, or None when there is no such doctype.
+	"""The module a doctype belongs to, or None when there is no such doctype."""
+	meta = doctype_meta(doctype)
+	return meta.module if meta is not None else None
+
+
+def doctype_meta(doctype: str | None) -> Any:
+	"""This doctype's meta, or None when the site has no such doctype.
 
 	Read off the meta rather than the DocType document. Both are cached, but the
 	document is the whole definition — fields, permissions and all — and the
-	Agents Builder asks this question once per doctype on the site. On a stock
-	site that is the difference between two seconds and none.
+	Agents Builder asks about every doctype on the site. On a stock site that is
+	the difference between two seconds and none.
 	"""
 	try:
-		return frappe.get_meta(doctype).module
+		return frappe.get_meta(doctype)
 	except Exception:
 		return None
 
@@ -97,18 +146,56 @@ def describable_child_tables() -> frozenset[str]:
 
 	A blueprint cannot be written without naming the fields of the table its
 	suggested rules live in, so that table is the one shape the Builder has to be
-	able to read. Taking the set off the blueprint's own meta means a second child
-	table added to it next release is covered the day it lands — the same
-	discipline that makes the exclusion itself computed rather than listed.
+	able to read. Deriving the set means a second child table added to the
+	blueprint next release is covered the day it lands — the same discipline that
+	makes the exclusion itself computed rather than listed.
 
-	Scoped to the blueprint on purpose. "Any child table this app ships" would
-	also hand over the shape of an agent's own tool selection and role gating,
-	which is precisely what an agent may not see.
+	Derived from the field definitions this app **ships**, not from the live meta.
+	Meta is the shipped fields plus every Custom Field and Property Setter on the
+	site, so reading it here meant anything that could hang a Table field off Agent
+	Blueprint — another app, an implementer, a row in `tabCustom Field` — got to
+	choose a doctype whose schema the Builder would read and whose read permission
+	`describe_site_doctype` would then ask of Agent Blueprint instead. A
+	customization must not be able to widen an exclusion.
+
+	Each name is then held to being one of this app's own child tables, so a
+	DocField row that came from anywhere else buys nothing either. Scoped to the
+	blueprint on purpose: "any child table this app ships" would also hand over
+	the shape of an agent's own tool selection and role gating, which is precisely
+	what an agent may not see.
 	"""
 	try:
-		return frozenset(df.options for df in frappe.get_meta(BLUEPRINT).get_table_fields() if df.options)
+		named = frappe.get_all(
+			"DocField",
+			filters={
+				"parent": BLUEPRINT,
+				"parenttype": "DocType",
+				"fieldtype": ("in", table_fields),
+			},
+			pluck="options",
+		)
 	except Exception:
 		return frozenset()
+
+	return frozenset(name for name in named if name and is_own_child_table(name))
+
+
+def is_own_child_table(doctype: str) -> bool:
+	"""Whether this is a child table belonging to this app. The widening's floor.
+
+	Both halves matter. `istable` is what makes a doctype ungrantable and
+	unreadable by any tool that returns a document, which is the reason describing
+	one gives nothing away. The module is what makes it already excluded, so
+	admitting it widens the schema door and nothing else.
+	"""
+	meta = doctype_meta(doctype)
+	return meta is not None and bool(cint(meta.istable)) and meta.module == APP_MODULE
+
+
+def is_blueprint_child_table(doctype: str | None) -> bool:
+	"""Whether this names one of the blueprint's own child tables, in any casing."""
+	name = canonical_doctype(doctype)
+	return bool(name) and name in describable_child_tables()
 
 
 def is_describable(doctype: str | None) -> bool:
@@ -125,7 +212,7 @@ def is_describable(doctype: str | None) -> bool:
 		return False
 	if not is_excluded(doctype):
 		return True
-	return doctype in describable_child_tables()
+	return is_blueprint_child_table(doctype)
 
 
 def report_is_excluded(report: str | None) -> bool:
