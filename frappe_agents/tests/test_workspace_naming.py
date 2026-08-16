@@ -14,10 +14,16 @@ constants so the contract breaks in CI, not on a site.
 
 import json
 import os
+from unittest.mock import patch
 
 import frappe
 
-from frappe_agents.install import SIDEBAR, WORKSPACE, build_workspace_sidebar
+from frappe_agents.install import (
+	SIDEBAR,
+	WORKSPACE,
+	build_workspace_sidebar,
+	ensure_desktop_icon,
+)
 from frappe_agents.patches.v0_6_0.rename_workspace_to_agents import execute as rename_patch
 from frappe_agents.tests.fixtures import AgentTestCase
 
@@ -91,3 +97,54 @@ class TestWorkspaceNamingContract(AgentTestCase):
 		rename_patch()
 		self.assertTrue(frappe.db.exists("Workspace", WORKSPACE))
 		self.assertFalse(frappe.db.exists("Workspace", "Frappe Agents"))
+
+
+class TestTheDeskTileHealsItself(AgentTestCase):
+	"""The tile's row has gone missing four times, and nothing put it back.
+
+	Model sync imports the shipped JSON early in a migrate, but migrate then
+	deletes a standard Desktop Icon whose file it cannot find — and in developer
+	mode deleting the row takes the JSON out of the app tree with it. The
+	after_migrate self-heal is the floor under that.
+	"""
+
+	def test_it_leaves_the_tile_alone_when_it_is_there(self):
+		self.assertTrue(frappe.db.exists("Desktop Icon", WORKSPACE))
+
+		self.assertFalse(ensure_desktop_icon())
+
+	def test_it_puts_the_tile_back_when_the_row_is_gone(self):
+		# Deleted through the database on purpose. `Desktop Icon.on_trash` deletes
+		# the shipped JSON out of the app tree in developer mode, which is one of
+		# the ways this tile has gone missing before — a test must not be another.
+		frappe.db.delete("Desktop Icon", {"name": WORKSPACE})
+		self.assertFalse(frappe.db.exists("Desktop Icon", WORKSPACE))
+
+		self.assertTrue(ensure_desktop_icon())
+
+		icon = frappe.db.get_value(
+			"Desktop Icon", WORKSPACE, ["label", "link_to", "link_type", "app"], as_dict=True
+		)
+		self.assertEqual(icon.label, WORKSPACE)
+		self.assertEqual(icon.link_to, WORKSPACE)
+		self.assertEqual(icon.link_type, "Workspace Sidebar")
+		self.assertEqual(icon.app, "frappe_agents")
+
+	def test_restoring_it_twice_leaves_one_tile(self):
+		frappe.db.delete("Desktop Icon", {"name": WORKSPACE})
+
+		ensure_desktop_icon()
+		ensure_desktop_icon()
+
+		self.assertEqual(len(frappe.get_all("Desktop Icon", filters={"name": WORKSPACE})), 1)
+
+	def test_it_stops_rather_than_inventing_a_tile_with_no_shipped_json(self):
+		"""Nothing to import is a thing to say, not a thing to guess at."""
+		with patch("frappe_agents.install.WORKSPACE", "FA Tile With No File"):
+			self.assertFalse(ensure_desktop_icon())
+
+	def test_every_migrate_puts_the_tile_back(self):
+		self.assertIn(
+			"frappe_agents.install.ensure_desktop_icon",
+			frappe.get_hooks("after_migrate", app_name="frappe_agents"),
+		)
