@@ -1,6 +1,8 @@
 # Copyright (c) 2026, Malik AlZubaidi and contributors
 # For license information, please see LICENSE
 
+import os
+
 import frappe
 
 from frappe_agents.access.builder import seed_agents_builder
@@ -175,3 +177,49 @@ def ensure_workspace_sidebar() -> str | None:
 	if built:
 		print(f"frappe_agents: built the {built} workspace sidebar")
 	return built
+
+
+def ensure_desktop_icon() -> bool:
+	"""Put the desk tile back when its row has gone missing.
+
+	The tile is shipped as `desktop_icon/<scrub(WORKSPACE)>.json` and model sync
+	imports it early in every migrate, so a row missing at the end of one means
+	something removed it in between: migrate deletes a standard Desktop Icon whose
+	file it cannot find, and in developer mode deleting the row deletes the file
+	from the app tree as well. The tile has gone four times.
+
+	Re-imported from the shipped file rather than rebuilt from constants, because
+	the file is what the app ships and what the next migrate will compare against.
+	When the file itself is gone there is nothing to import and nothing this can
+	honestly invent, so it says so and leaves the site alone.
+	"""
+	if frappe.db.exists("Desktop Icon", WORKSPACE):
+		return False
+
+	# The name is load-bearing: migrate deletes any icon whose file is not
+	# desktop_icon/<scrub(name)>.json, which is what `tests/test_workspace_naming.py`
+	# pins. Deriving the path the same way keeps the two from drifting apart.
+	path = os.path.join(
+		frappe.get_app_path("frappe_agents"), "desktop_icon", f"{frappe.scrub(WORKSPACE)}.json"
+	)
+	if not os.path.exists(path):
+		print(f"frappe_agents: the {WORKSPACE} desk tile is missing and so is {path}")
+		return False
+
+	# Same trade as the sidebar above, and it matters more here: after_migrate
+	# hooks run for every app on the site, so an exception raised here fails
+	# somebody else's migrate too.
+	save_point = "frappe_agents_desktop_icon"
+	frappe.db.savepoint(save_point)
+	try:
+		from frappe.modules.import_file import import_file_by_path
+
+		import_file_by_path(path, force=True, ignore_version=True)
+	except Exception as exc:
+		frappe.db.rollback(save_point=save_point)
+		print(f"frappe_agents: could not restore the {WORKSPACE} desk tile — {exc}")
+		return False
+
+	frappe.db.release_savepoint(save_point)
+	print(f"frappe_agents: restored the {WORKSPACE} desk tile")
+	return True

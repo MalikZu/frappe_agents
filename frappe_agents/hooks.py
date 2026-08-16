@@ -32,14 +32,16 @@ extend_bootinfo = ["frappe_agents.boot.boot_form_agents"]
 after_install = "frappe_agents.install.after_install"
 
 # Keep the Agent Tool registry in step with the code that ships the handlers,
-# then put back the workspace sidebar, which only ever got built at install
-# time. A patch fixes today's estate once; the hook is the floor under every
-# migrate after it. It guards itself and prints rather than raising — an
-# after_migrate hook that throws fails the migrate for every app on the site,
-# not just this one.
+# then put back the two desk rows nothing else recreates: the workspace sidebar,
+# which only ever got built at install time, and the tile that points at it,
+# which has gone missing four times. A patch fixes today's estate once; these
+# are the floor under every migrate after it. Each one guards itself and prints
+# rather than raising — an after_migrate hook that throws fails the migrate for
+# every app on the site, not just this one.
 after_migrate = [
 	"frappe_agents.tools.registry.sync_tools",
 	"frappe_agents.install.ensure_workspace_sidebar",
+	"frappe_agents.install.ensure_desktop_icon",
 ]
 
 # Modules that expose agent tools. Each one defines a TOOLS list.
