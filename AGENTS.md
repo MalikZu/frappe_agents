@@ -29,7 +29,13 @@ The permission model is the product.
 - Frappe's official skills help here. Install locally:
   `npx skills add frappe/skills --skill frappe-app-dev --skill quality-code-review -a claude-code -y`
   They have no upstream license — never commit them.
-- Docs are for users: short sentences, plain words, no filler.
+- Docs are for users: short sentences, plain words, no filler. Procedures follow
+  ASD-STE100 principles — one instruction per sentence, active voice, one term
+  per concept, no synonyms. Explanatory pages keep their reasoning and their
+  metaphors; that is what makes them land.
+- **A change a user can see ships its doc in the same PR.** If there is no page
+  for the thing you changed, that is the finding — write it or file it. A
+  screenshot in `docs/images/` that the change invalidates is part of that.
 - Keep this file small. Details go in `docs/` and get linked, not inlined.
 
 ## Releases
