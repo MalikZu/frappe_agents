@@ -14,6 +14,12 @@ suggested-rules table is described, because a blueprint cannot be written
 without its fieldnames — and is still not listed, not grantable and not
 readable, because describing a shape is not reaching a record.
 
+That hole is asserted as a *route*, not as a destination. The Builder is told to
+describe the blueprint and then the table its Suggested Rules names, so the test
+that matters walks it with nothing written down: opening the destination while
+the blueprint's answer still did not carry the name left the fix half-landed and
+the Builder still guessing.
+
 The other half is the blueprint. A blueprint is paper: drafting one grants
 nobody anything, and turning it into an agent is a human act by an Agent
 Manager. What that act produces is asserted here too — a *disabled* agent, a
@@ -100,6 +106,9 @@ class BuilderCase(AgentTestCase):
 		result, _ = call_tool(user, tool, payload, agent=agent.name)
 		self.assertFalse(result["ok"], result["result"])
 		return result["error"]
+
+	def described(self, doctype: str, user: str = RESTRICTED_USER) -> dict:
+		return self.ask("describe_site_doctype", {"doctype": doctype}, user=user)
 
 
 class TestBuilderToolExposure(BuilderCase):
@@ -196,9 +205,6 @@ class TestListingTheSite(BuilderCase):
 
 
 class TestDescribingADoctype(BuilderCase):
-	def described(self, doctype: str, user: str = RESTRICTED_USER) -> dict:
-		return self.ask("describe_site_doctype", {"doctype": doctype}, user=user)
-
 	def test_it_describes_the_fields_a_blueprint_would_name(self):
 		described = self.described(TICKET_DT)
 
@@ -215,13 +221,69 @@ class TestDescribingADoctype(BuilderCase):
 	def test_it_describes_the_table_its_own_suggested_rules_live_in(self):
 		"""Without this the Builder cannot write a blueprint at all.
 
-		A blueprint's suggested rules are rows of this table, and describing the
-		blueprint gives back only the table's name. The Builder used to have to
-		invent the fieldnames, and `create_draft` refused every guess.
+		A blueprint's suggested rules are rows of this table. The Builder used to
+		have to invent the fieldnames, and `create_draft` refused every guess.
+
+		This asserts the destination only. It says nothing about whether the
+		Builder can get here from the blueprint — the name is written down at the
+		top of this file — so the walk is asserted separately below.
 		"""
 		described = self.described(RULE_DT)
 
 		self.assertLessEqual(RULE_FIELDS, {field["fieldname"] for field in described["fields"]})
+
+	def test_the_builder_walks_from_the_blueprint_to_its_rules_table(self):
+		"""The path the instructions describe, with no name hard-coded on it.
+
+		The Builder is told to describe Agent Blueprint and then "the doctype its
+		Suggested Rules table names". It could not: `Table` is one of frappe's
+		`no_value_fields`, and those were dropped before anything else looked at a
+		field, so the blueprint described as seven fields with the table — and the
+		only place that name appears — missing. Opening the destination while the
+		route to it was still a dead end left the Builder inventing fieldnames,
+		which is the failure this release set out to fix.
+
+		So the child's name is taken out of the first result and never written
+		here. Checking it against RULE_DT afterwards is what says the path led
+		somewhere right rather than merely somewhere.
+		"""
+		blueprint = self.described(BLUEPRINT)
+
+		tables = [field for field in blueprint["fields"] if field["fieldtype"] == "Table"]
+		self.assertEqual(len(tables), 1, blueprint["fields"])
+		# The label the instructions send it looking for, and the name it needs.
+		self.assertEqual(tables[0]["label"], "Suggested Rules")
+		named = tables[0]["options"]
+
+		described = self.described(named)
+
+		self.assertEqual(described["doctype"], named)
+		self.assertLessEqual(RULE_FIELDS, {field["fieldname"] for field in described["fields"]})
+		self.assertEqual(named, RULE_DT)
+
+	def test_a_child_table_it_could_not_describe_is_not_named_either(self):
+		"""Naming one is exactly as wide as describing one, and not a character wider.
+
+		A Table field is the only place a child doctype's name surfaces — the list
+		leaves child tables out — so surfacing them is what makes the walk above
+		possible. Surfacing one the caller cannot then describe would make this
+		tool an oracle: a name it refuses to confirm exists, printed inside the
+		answer to another question.
+		"""
+		described = self.described(ORDER_DT)
+
+		self.assertNotIn(ORDER_ITEM_DT, [field["options"] for field in described["fields"]])
+		self.assertEqual(
+			self.refusal("describe_site_doctype", {"doctype": ORDER_ITEM_DT}),
+			NO_SUCH_DOCTYPE.format(doctype=ORDER_ITEM_DT),
+		)
+
+	def test_it_answers_in_the_sites_own_spelling(self):
+		"""What came back names the doctype frappe resolved, not the string asked."""
+		described = self.described(TICKET_DT.lower())
+
+		self.assertEqual(described["doctype"], TICKET_DT)
+		self.assertEqual({field["fieldname"] for field in described["fields"]}, {"subject", "project"})
 
 	def test_the_hole_is_derived_from_the_blueprint_and_not_named(self):
 		"""A second child table added to the blueprint is covered without an edit."""
