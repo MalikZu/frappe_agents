@@ -88,6 +88,18 @@ SIDEBAR = (
 )
 
 
+def sidebars_supported() -> bool:
+	"""Whether this site's framework has the Workspace Sidebar doctype at all.
+
+	frappe_agents patch (version-15): sidebars arrived in v16. On v15 the doctype
+	does not exist, so every read of it would hit a missing table. Anything that
+	touches a sidebar — install, patches, the migrate self-heal — asks here
+	first. The workspace itself is unaffected; it simply has no sidebar row, and
+	the desk falls back to its own module sidebar.
+	"""
+	return bool(frappe.db.exists("DocType", "Workspace Sidebar"))
+
+
 def build_workspace_sidebar():
 	"""The app's sidebar, in the desk's own section pattern.
 
@@ -100,6 +112,8 @@ def build_workspace_sidebar():
 	is missing sends its own list view to the auto-generated module sidebar.
 	`tests/test_sidebar_coverage.py` fails when a new doctype arrives without one.
 	"""
+	if not sidebars_supported():
+		return
 	if frappe.db.exists("Workspace Sidebar", WORKSPACE):
 		return
 	doc = frappe.new_doc("Workspace Sidebar")

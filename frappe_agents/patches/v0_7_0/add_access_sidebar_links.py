@@ -23,7 +23,7 @@ only one name would silently skip half the estate.
 import frappe
 
 from frappe_agents.access.exclusions import APP_MODULE
-from frappe_agents.install import BUILD_SECTION, SIDEBAR_NAME
+from frappe_agents.install import BUILD_SECTION, SIDEBAR_NAME, sidebars_supported
 
 SIDEBAR_DOCTYPE = "Workspace Sidebar"
 
@@ -38,6 +38,9 @@ NEW_LINKS = (
 
 
 def execute() -> None:
+	# frappe_agents patch (version-15): no sidebar doctype, nothing to link.
+	if not sidebars_supported():
+		return
 	for name in app_sidebars():
 		_add_links(name)
 
