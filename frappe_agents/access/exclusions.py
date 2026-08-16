@@ -29,9 +29,17 @@ place — the Builder's `describe_site_doctype` — and it is never a grant. Not
 it admits may be named by a rule row, listed as a target, or reached by a tool
 that returns a document. Keeping the two predicates apart is what leaves every
 gate that asks `is_excluded` unchanged by construction rather than by review.
+
+That widening is derived from what this app *ships* on the blueprint, never from
+its live meta. Live meta is the shipped fields plus every Custom Field and
+Property Setter on the site, so reading it here would let anything able to add a
+field to Agent Blueprint choose which doctype's schema the Builder may read. A
+customization must not be able to widen an exclusion.
 """
 
 import frappe
+from frappe.model import table_fields
+from frappe.utils import cint
 
 APP_MODULE = "Frappe Agents"
 
@@ -97,18 +105,53 @@ def describable_child_tables() -> frozenset[str]:
 
 	A blueprint cannot be written without naming the fields of the table its
 	suggested rules live in, so that table is the one shape the Builder has to be
-	able to read. Taking the set off the blueprint's own meta means a second child
-	table added to it next release is covered the day it lands — the same
-	discipline that makes the exclusion itself computed rather than listed.
+	able to read. Deriving the set means a second child table added to the
+	blueprint next release is covered the day it lands — the same discipline that
+	makes the exclusion itself computed rather than listed.
 
-	Scoped to the blueprint on purpose. "Any child table this app ships" would
-	also hand over the shape of an agent's own tool selection and role gating,
-	which is precisely what an agent may not see.
+	Derived from the field definitions this app **ships**, not from the live meta.
+	Meta is the shipped fields plus every Custom Field and Property Setter on the
+	site, so reading it here meant anything that could hang a Table field off Agent
+	Blueprint — another app, an implementer, a row in `tabCustom Field` — got to
+	choose a doctype whose schema the Builder would read and whose read permission
+	`describe_site_doctype` would then ask of Agent Blueprint instead. A
+	customization must not be able to widen an exclusion.
+
+	Each name is then held to being one of this app's own child tables, so a
+	DocField row that came from anywhere else buys nothing either. Scoped to the
+	blueprint on purpose: "any child table this app ships" would also hand over
+	the shape of an agent's own tool selection and role gating, which is precisely
+	what an agent may not see.
 	"""
 	try:
-		return frozenset(df.options for df in frappe.get_meta(BLUEPRINT).get_table_fields() if df.options)
+		named = frappe.get_all(
+			"DocField",
+			filters={
+				"parent": BLUEPRINT,
+				"parenttype": "DocType",
+				"fieldtype": ("in", table_fields),
+			},
+			pluck="options",
+		)
 	except Exception:
 		return frozenset()
+
+	return frozenset(name for name in named if name and is_own_child_table(name))
+
+
+def is_own_child_table(doctype: str) -> bool:
+	"""Whether this is a child table belonging to this app. The widening's floor.
+
+	Both halves matter. `istable` is what makes a doctype ungrantable and
+	unreadable by any tool that returns a document, which is the reason describing
+	one gives nothing away. The module is what makes it already excluded, so
+	admitting it widens the schema door and nothing else.
+	"""
+	try:
+		meta = frappe.get_meta(doctype)
+	except Exception:
+		return False
+	return bool(cint(meta.istable)) and meta.module == APP_MODULE
 
 
 def is_describable(doctype: str | None) -> bool:
