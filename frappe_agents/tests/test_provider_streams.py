@@ -16,6 +16,7 @@ promise that a key never reaches an error message.
 """
 
 import json
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -32,6 +33,7 @@ from frappe_agents.runner.providers import (
 	RETRY_ATTEMPTS,
 	RETRY_BASE_DELAY,
 	RETRY_MAX_DELAY,
+	RUNTIME_POLL_INTERVAL,
 	SSE_LINE_LIMIT,
 	STREAM_CONNECT_TIMEOUT,
 	STREAM_IDLE_TIMEOUT,
@@ -40,6 +42,7 @@ from frappe_agents.runner.providers import (
 	ProviderStream,
 	_post,
 	_retry_delay,
+	_runtime_probe,
 	call_model,
 	call_model_stream,
 	parse_anthropic_stream,
@@ -47,8 +50,23 @@ from frappe_agents.runner.providers import (
 	parse_responses_stream,
 )
 from frappe_agents.tests.fixtures import PROFILE, PROVIDER, AgentTestCase
+from frappe_agents.tools.base import KILL_SWITCH_KEY
+
+
+def _frappe_reachable() -> bool:
+	"""Can this thread ask frappe anything at all? Off the main one, no."""
+	try:
+		frappe.cache.make_key("fa-test-reachable")
+	except Exception:
+		return False
+	return True
+
 
 MESSAGES = [{"role": "user", "content": "How many tickets are open?"}]
+
+# The key the fixture provider is created with. Named here because half these
+# tests are about the places it must never reach.
+API_KEY = "fa-test-key"
 
 # One tool, in the shape the runner hands them to the provider. The body only
 # ever asks whether there are any, so one is the whole question.
@@ -1028,6 +1046,43 @@ class TestResponsesStream(AgentTestCase):
 			list(parse_responses_stream([body]))
 		self.assertIn("server_error", str(caught.exception))
 
+	def test_a_nested_detail_dict_does_not_throw_away_the_outer_message(self):
+		"""The unwrap is a widening, not a replacement.
+
+		Gateways and proxies bolt a detail dict onto an error whose message is
+		the only part worth quoting — `param`, `metadata`, `request_id`. Stepping
+		into it unconditionally reported "no reason given" for a frame that said
+		exactly why the call was refused.
+		"""
+		body = sse(
+			named_frame(
+				"error",
+				{
+					"type": "error",
+					"message": "Your credit balance is too low",
+					"error": {"param": "budget"},
+				},
+			)
+		)
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("Your credit balance is too low", str(caught.exception))
+		self.assertNotIn("no reason given", str(caught.exception))
+
+	def test_a_nested_message_beats_an_outer_code(self):
+		"""Neither level owns the answer. The better field does."""
+		body = sse(
+			named_frame(
+				"error",
+				{"type": "error", "code": "server_error", "error": {"message": "Upstream said no."}},
+			)
+		)
+
+		with self.assertRaises(ProviderError) as caught:
+			list(parse_responses_stream([body]))
+		self.assertIn("Upstream said no.", str(caught.exception))
+
 	def test_a_failed_response_error_is_not_unwrapped_twice(self):
 		"""The other caller hands over an already-unwrapped object. It stays whole."""
 		body = sse(responses_done(status="failed", error={"code": "server_error"}))
@@ -1043,12 +1098,24 @@ class TestResponsesStream(AgentTestCase):
 			list(parse_responses_stream([body]))
 		self.assertIn("no reason given", str(caught.exception))
 
-	def test_an_enormous_error_message_is_cut_to_the_cap(self):
+	def test_an_enormous_error_message_is_handed_over_whole_and_cut_later(self):
+		"""This used to pin the cap here, and pinning it here is what leaked keys.
+
+		A parser has no key and cannot redact, so a message it cut to the cap
+		arrived at `_redacted_stream` already severed — and `_redact` only matches
+		a credential that is still whole. The cut therefore belongs after the
+		redaction, and both now happen on the way out. See
+		`test_a_key_past_the_cap_is_redacted_before_the_cut_not_after`, which is
+		where the cap is now proven; the bound that still applies here is the SSE
+		line limit, not this one.
+		"""
 		body = sse(responses_frame("error", code="server_error", message="x" * (4 * ERROR_BODY_LIMIT)))
 
 		with self.assertRaises(ProviderError) as caught:
 			list(parse_responses_stream([body]))
-		self.assertLessEqual(len(str(caught.exception)), ERROR_BODY_LIMIT + 200)
+		# The whole of it, not a capped copy: anything short of the message the
+		# endpoint sent means a cut happened before the redaction could.
+		self.assertGreater(len(str(caught.exception)), 3 * ERROR_BODY_LIMIT)
 
 	def test_blocks_left_open_by_a_dropped_connection_are_closed(self):
 		"""The socket dies mid-answer. Every block that opened still closes."""
@@ -1439,6 +1506,63 @@ class TestStreamTransport(AgentTestCase):
 				self.assertIn("***", message)
 				self.assertTrue(response.closed)
 
+	def test_a_key_past_the_cap_is_redacted_before_the_cut_not_after(self):
+		"""Where the credential sits in the body decided whether it survived.
+
+		`_redact` is an exact-substring replace, so a message truncated first
+		hands it a key that has already lost its tail and no longer matches. An
+		endpoint that quotes the credential it just rejected — after enough
+		context to push it past the cap — put the front of that key straight into
+		the run's failure message. Redaction now happens on the whole message and
+		the cap is applied to what comes out of it.
+
+		The filler is sized so the key straddles the cut: short enough that the
+		old order kept part of it, long enough that it is past the cap.
+		"""
+		filler = "x" * (ERROR_BODY_LIMIT - 10)
+		quoted = f"{filler}{API_KEY}"
+		wires = (
+			("OpenAI Compatible", data_frame({"error": {"message": quoted}})),
+			("Anthropic", named_frame("error", {"type": "error", "error": {"message": quoted}})),
+			("OpenAI Responses", responses_frame("error", code="invalid_api_key", message=quoted)),
+		)
+		for provider_type, frame in wires:
+			with self.subTest(provider_type=provider_type):
+				self.use_provider(provider_type)
+				with patch(
+					"frappe_agents.runner.providers.requests.post",
+					return_value=FakeStream([sse(frame)]),
+				):
+					with self.assertRaises(ProviderError) as caught:
+						list(call_model_stream(PROFILE, MESSAGES))
+
+				message = str(caught.exception)
+				# Not just the whole key: any run of it long enough to be worth
+				# trying is the leak. The old order left ten characters here.
+				self.assertNotIn(API_KEY[:5], message)
+				self.assertLessEqual(len(message), ERROR_BODY_LIMIT)
+
+	def test_a_zero_retry_after_still_asks_whether_the_run_was_stopped(self):
+		"""A stopped run is stopped whatever the provider asked us to wait.
+
+		`_retry_after` clamps to zero, and `Retry-After: 0`, a negative value and
+		an HTTP date one second in the past all land there — one second of clock
+		skew is enough. Skipping the wait used to skip the question with it, so a
+		run the user had already stopped spent its whole retry budget making
+		further billable requests.
+		"""
+		stream = call_model_stream(PROFILE, MESSAGES)
+
+		def refuse(*args, **kwargs):
+			stream.close_response()
+			return FakeStream([], status_code=429, text="slow down", headers={"Retry-After": "0"})
+
+		with patch("frappe_agents.runner.providers.requests.post", side_effect=refuse) as post:
+			with self.assertRaises(ProviderError):
+				list(stream)
+
+		self.assertEqual(post.call_count, 1)
+
 	def test_an_enormous_error_body_is_capped_on_the_socket_not_afterwards(self):
 		"""The endpoint decides how big its refusal is; we decide how much we read.
 
@@ -1710,6 +1834,96 @@ class TestStreamRetry(AgentTestCase):
 		started = time.monotonic()
 		self.assertTrue(stream.backoff(0.05))
 		self.assertGreaterEqual(time.monotonic() - started, 0.05)
+
+	def test_a_wait_ends_when_something_off_this_thread_stops_the_run(self):
+		"""The hole the event alone left: a cancel that arrives mid-wait.
+
+		Only `close_response` sets the event, and in this app the only thread
+		that reaches it is the one already parked here — so by construction
+		nothing could interrupt a wait once it had begun, and the event covered
+		exactly the case where the stream had been let go of *before* it started.
+		The probe is what covers the rest. It is checked on this thread, which is
+		the point: whatever answers it does not have to be in this process.
+		"""
+		switched_off = threading.Event()
+		stream = ProviderStream(stopped=switched_off.is_set)
+
+		served = []
+
+		def wait() -> None:
+			served.append(stream.backoff(RETRY_MAX_DELAY))
+
+		waiter = threading.Thread(target=wait)
+		started = time.monotonic()
+		waiter.start()
+		time.sleep(RUNTIME_POLL_INTERVAL)
+		switched_off.set()
+		waiter.join(timeout=5)
+
+		self.assertFalse(waiter.is_alive())
+		self.assertEqual(served, [False])
+		self.assertLess(time.monotonic() - started, RETRY_MAX_DELAY / 4)
+
+	def test_a_probe_that_cannot_answer_leaves_the_wait_exactly_as_it_was(self):
+		"""No answer is not the same as yes. A broken probe must not stop a run."""
+
+		def broken() -> bool:
+			raise RuntimeError("redis is down")
+
+		stream = ProviderStream(stopped=broken)
+		self.assertFalse(stream.stopped())
+		self.assertTrue(stream.backoff(0.05))
+
+	def test_the_kill_switch_is_readable_from_a_thread_that_has_no_frappe(self):
+		"""Why the probe is built the way it is, proven rather than asserted.
+
+		A stream is pulled on a thread `asyncio.to_thread` owns, and frappe is
+		bound to the thread that connected: `frappe.cache`, `frappe.db` and
+		`frappe.conf` all raise there. So the probe is rendered down to a redis
+		client and a finished key here, where frappe still answers, and only the
+		read happens over there.
+
+		A scratch key, deliberately: this suite shares a site, and flipping the
+		real switch would stop everybody else's run too.
+		"""
+		key = "fa-test-runtime-probe"
+		frappe.cache.set_value(key, 1)
+		self.addCleanup(frappe.cache.delete_value, key)
+
+		probe = _runtime_probe(key)
+		self.assertIsNotNone(probe)
+
+		def answer() -> bool:
+			answers = []
+			thread = threading.Thread(target=lambda: answers.append(probe()))
+			thread.start()
+			thread.join(timeout=5)
+			return answers[0]
+
+		# frappe itself is unreachable from that thread. If it were not, this
+		# test would prove nothing about the probe.
+		reached = []
+		unreachable = threading.Thread(target=lambda: reached.append(_frappe_reachable()))
+		unreachable.start()
+		unreachable.join(timeout=5)
+		self.assertEqual(reached, [False])
+
+		self.assertFalse(answer())
+		frappe.cache.set_value(key, 0)
+		self.assertTrue(answer())
+
+	def test_a_stream_the_app_builds_is_watching_the_real_switch(self):
+		"""The mechanism above is wired to the key the runtime is published under."""
+		stream = call_model_stream(PROFILE, MESSAGES)
+		self.addCleanup(stream.close)
+
+		probe = _runtime_probe()
+		self.assertIsNotNone(probe)
+		self.assertFalse(stream.stopped())
+		# The same key `runtime_enabled` reads, so what stops a run between turns
+		# is what ends a wait during one. Read rather than flipped: this suite
+		# shares a site and the real switch is everybody's.
+		self.assertEqual(probe.key, frappe.cache.make_key(KILL_SWITCH_KEY))
 
 
 class TestPostRetry(AgentTestCase):
