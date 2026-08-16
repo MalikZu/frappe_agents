@@ -62,7 +62,26 @@ errors there:
 | Do not write | Write instead |
 |---|---|
 | `type X = int \| str` (PEP 695) | `X: TypeAlias = int \| str` |
+| `type X = ...` **that references itself** | `TypeAliasType("X", ...)` — see below |
 | `except A, B:` (PEP 758) | `except (A, B):` |
+
+**The recursive case is a trap, and it bites silently.** `frappe_agents/harness/
+types.py` defines `JSONValue` in terms of itself. Rewriting that one as a plain
+`TypeAlias` still *compiles* — and then pydantic expands it eagerly and recurses
+until the interpreter dies, at import time. Use the lazy named alias instead:
+
+```python
+from typing_extensions import TypeAliasType
+
+JSONValue = TypeAliasType("JSONValue", Union[JSONPrimitive, list["JSONValue"], dict[str, "JSONValue"]])
+```
+
+`typing_extensions` is a direct frappe dependency on both v15 and v16, so this
+adds nothing to the bench. Use `Union[...]` rather than `|` there: the recursive
+arm has to stay resolvable by name when pydantic builds the schema.
+
+Compiling is not enough to catch this. If you touch the harness types, import
+them under 3.11 with pydantic present and build a `TypeAdapter` before you push.
 
 `ruff` on that branch is set to `target-version = "py311"` and will catch these,
 but the compile above catches them faster.

@@ -83,6 +83,25 @@ The job is safe to run by hand and safe to run twice. Expiry is the clock, not a
 decision — nobody is recorded as having decided, and the agent may propose the
 same thing again.
 
+## On Frappe v15
+
+This is the `version-15` line of the app. It is the same app, with two
+differences the framework forces.
+
+**No desk tile.** v15 has no Workspace Sidebar, so the app does not create one.
+The workspace is at `/app/agents` — bookmark it, or add your own shortcut.
+
+**Masked fields are not redacted automatically.** v16 lets you mask a field, and
+the app feeds that list into two protections: what is replaced with `[redacted]`
+in an audit row, and the comparison the extraction gate makes against a master
+record. v15 has no such list, so **that source is empty**.
+
+Nothing breaks, but a protection you would get on v16 is not there. Compensate
+by naming those fields yourself in **Agent Settings → Sensitive Fields**, which
+works identically on both versions and is what the extraction gate reads first.
+
+Everything else on this page applies unchanged.
+
 ## Upgrading
 
 Pin a release. `main` moves whenever something lands.
