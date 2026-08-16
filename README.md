@@ -47,8 +47,7 @@ broad rights. This app is built the other way around:
 
 ## Requirements
 
-- Frappe v16
-- Python 3.14+
+- Frappe **v16** with Python **3.14**, or Frappe **v15** with Python **3.11+**
 
 ## Install
 
@@ -136,6 +135,8 @@ before every request. Redirects are never followed.
 Issues and discussion are the most useful contribution — see
 [CONTRIBUTING.md](CONTRIBUTING.md). For anything security-related, do not open a
 public issue: [SECURITY.md](SECURITY.md).
+
+[Terms](TERMS.md) · [Privacy](PRIVACY.md) · [Licence](LICENSE)
 
 ## License
 
