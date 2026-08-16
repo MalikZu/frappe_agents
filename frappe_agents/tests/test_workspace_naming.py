@@ -32,6 +32,10 @@ from frappe_agents.tests.fixtures import AgentTestCase
 
 APP_PATH = frappe.get_app_path("frappe_agents")
 
+# What the shipped desktop-icon JSON carries that the rebuild deliberately does
+# not: sync bookkeeping, the name `set_name` supplies, and an empty child table.
+NOT_REBUILT = {"doctype", "modified", "name", "roles"}
+
 
 def _load(relative_path: str) -> dict:
 	with open(os.path.join(APP_PATH, relative_path)) as f:
@@ -288,9 +292,18 @@ class TestTheDeskTileHealsItself(AgentTestCase):
 	def test_the_rebuild_constants_still_match_the_shipped_file(self):
 		"""Two copies of the tile, so CI is what notices when they disagree."""
 		shipped = _load(f"desktop_icon/{frappe.scrub(WORKSPACE)}.json")
+		fields = desktop_icon_fields()
 
-		for field, value in desktop_icon_fields().items():
+		for field, value in fields.items():
 			self.assertEqual(shipped.get(field), value, f"{field} drifted from the shipped JSON")
+
+		# and the other direction, or a field added to the JSON is simply dropped
+		# from every rebuilt tile without anything saying so.
+		self.assertEqual(
+			set(shipped) - NOT_REBUILT - set(fields),
+			set(),
+			"the shipped JSON grew a field the rebuild does not set",
+		)
 
 	def test_every_migrate_puts_the_tile_back(self):
 		self.assertIn(
