@@ -115,6 +115,23 @@ HISTORY_LIMIT = 20
 # person pressing Stop, and replaying its tool results would put back into the
 # model's context exactly the work that was stopped.
 REPLAYABLE_STATUSES = ("Completed", "Failed")
+# How many failed turns one new turn may rebuild, newest first.
+#
+# A replayed turn is not two short strings. It is everything the model was told
+# before it stopped — every tool result, at full width — and the log it comes out
+# of runs to `EVENT_LOG_BYTES`. Twenty of those is a prompt no provider will take
+# and megabytes off the database to build it, and twenty of those is not an
+# exotic shape: a provider outage fails every turn in the conversation, one after
+# another, and leaves exactly that.
+#
+# The newest failed turn is the one being retried. The one before it is the same
+# person asking twice while the provider was down. Older than that is the outage,
+# not the conversation: those turns still come back as the questions they asked,
+# without the work they did, and the run records that it was cut.
+#
+# This is a ceiling and not a preference. It holds whatever a profile says about
+# its window — including the usual case, which is that it says nothing.
+REPLAY_LIMIT = 2
 # What is worth taking out of a stored log: the model's own turns and the results
 # it was handed. The tool_execution events carry each result a second time, and
 # the run's own failure is a note to the reader, not to the model.
@@ -122,6 +139,10 @@ REPLAYED_ROLES = ("assistant", "toolResult")
 # Where a rebuilt turn is kept once it has been read, so the fitter and the
 # builder ask for it once between them and not twice.
 REPLAY_KEY = "_replayed"
+# And where a turn that was denied its log is marked, so the run can say it was
+# sent less than the whole conversation — a turn kept without the work it did was
+# cut just as surely as one that went entirely.
+REPLAY_DROPPED = "_replay_dropped"
 # A stored event's message, back as the model it was written from. The log is
 # written by the same models with the same aliases, so this is a round trip and
 # not a parser.
@@ -143,6 +164,22 @@ TOOL_RESULT_LIMIT = 20_000
 # before they go back for the next call.
 CONTEXT_CHARS_PER_TOKEN = 3
 CONTEXT_PROMPT_SHARE = 0.5
+# What a profile that names no window is read as having.
+#
+# `context_limit` is a plain Int with no default and is not required, so empty is
+# the ordinary state of any profile an administrator made by hand — self-hosted,
+# OpenRouter, any model the seeded catalog never heard of. The fitter used to
+# answer "no limit" to that and send every turn it found. With a failed turn in
+# the history that is not twenty questions and answers, it is twenty full event
+# logs, and the retry — the one turn the replay exists for — is the request that
+# gets refused for length.
+#
+# So an unset field means a small window rather than no window. A conversation
+# that fits is untouched, one that does not is trimmed and says so on the run,
+# and an administrator who fills the field in gets the real number. Small enough
+# that the models nobody bothered to describe are still safe, large enough that
+# an ordinary conversation never notices it.
+DEFAULT_CONTEXT_LIMIT = 32_000
 
 KILL_SWITCH_MESSAGE = "The agent runtime is switched off."
 # A turn that ended in one of these produced no answer — the loop wrote the
@@ -870,11 +907,13 @@ def _fitted_history(profile: str, run: Any, system: str) -> tuple[list[dict], in
 	answer or an answer to nothing. What is never dropped is the message this run
 	was started with — a run that sends no question is not a shorter run, it is a
 	broken one.
+
+	There is always a budget. A profile that names no window is read as having a
+	small one rather than none, because "none" is the state most profiles are in
+	and an unbounded transcript is not a thing to hand a model.
 	"""
 	rows = _history(run)
 	budget = _prompt_budget(profile)
-	if budget is None:
-		return rows, 0
 
 	# What cannot be dropped is spent first: the prompt and this turn's question.
 	room = budget - len(system or "") - len(run.input_message or "")
@@ -889,7 +928,11 @@ def _fitted_history(profile: str, run: Any, system: str) -> tuple[list[dict], in
 		kept.append(prior)
 
 	kept.reverse()
-	return kept, len(rows) - len(kept)
+	# A turn kept without the work it did was cut too. It is one line of question
+	# where the model was shown a whole turn's tool results, and a person reading
+	# the run has the same right to know that as they do about a turn that went.
+	shortened = sum(1 for prior in kept if prior.get(REPLAY_DROPPED))
+	return kept, len(rows) - len(kept) + shortened
 
 
 def _turn_cost(prior: dict) -> int:
@@ -920,11 +963,13 @@ def _message_cost(message: AgentMessage) -> int:
 	return cost
 
 
-def _prompt_budget(profile: str) -> int | None:
+def _prompt_budget(profile: str) -> int:
 	"""How many characters of prompt this profile's window has room for.
 
-	`None` when the profile names no limit, which is the state every profile was
-	in before this: the history cap alone decides what is sent.
+	A profile that names no limit is not a profile without one. It is the state
+	almost every hand-made profile is in, and it is read as
+	`DEFAULT_CONTEXT_LIMIT` — so the fitter always has a ceiling to work to, and
+	the ceiling never depends on an administrator having filled a field in.
 	"""
 	limit = 0
 	if profile:
@@ -933,7 +978,7 @@ def _prompt_budget(profile: str) -> int | None:
 		except Exception:
 			limit = 0
 	if limit <= 0:
-		return None
+		limit = DEFAULT_CONTEXT_LIMIT
 	return int(limit * CONTEXT_PROMPT_SHARE) * CONTEXT_CHARS_PER_TOKEN
 
 
@@ -984,19 +1029,32 @@ def _is_replayed(prior: dict) -> bool:
 
 
 def _read_logs(rows: list[dict]) -> None:
-	"""Put the event log on the rows that need one, and on no others.
+	"""Put the event log on the newest `REPLAY_LIMIT` failed turns, and on no others.
 
 	A log is up to half a megabyte and there can be twenty rows in a history, so
 	it is never selected by the query that finds the turns — that one reads small
-	columns and stays as cheap as it has always been. A conversation has one
-	failed turn waiting to be retried, not twenty, so this second read is almost
-	always for a single row and often for none.
+	columns and stays as cheap as it has always been.
+
+	The second read is bounded in the same breath as the replay is. Usually a
+	conversation has one failed turn waiting to be retried, but that is what
+	people do and not what the data guarantees: a provider outage fails every
+	turn there is, and then this read would marshal ten megabytes out of MariaDB
+	for a fitter that throws nearly all of it away a moment later. Fetching only
+	what may be replayed bounds both — what is not read cannot be sent, and is
+	not paid for either.
+
+	The turns left over keep their question and are marked, so the run can say it
+	was sent less than the whole conversation.
 
 	It goes through `get_list` like the first one. The log holds tool results as
 	the model saw them, unredacted, and the ownership check on Agent Run is what
 	stands between that and somebody else's conversation.
 	"""
-	names = [row["name"] for row in rows if _is_replayed(row)]
+	replayable = [row for row in rows if _is_replayed(row)]
+	for row in replayable[:-REPLAY_LIMIT]:
+		row[REPLAY_DROPPED] = True
+
+	names = [row["name"] for row in replayable[-REPLAY_LIMIT:]]
 	if not names:
 		return
 	try:
@@ -1020,6 +1078,9 @@ def _replayed(prior: dict) -> list[AgentMessage]:
 	The fitter has to know what the turn costs before the builder can decide to
 	send it, and parsing half a megabyte of JSON twice to answer the same
 	question is the kind of waste that only shows up on a busy site.
+
+	A turn older than `REPLAY_LIMIT` was never given its log, so it rebuilds to
+	nothing here and costs the question it asked and no more.
 	"""
 	if REPLAY_KEY not in prior:
 		prior[REPLAY_KEY] = _replay(prior.get("event_log"))
