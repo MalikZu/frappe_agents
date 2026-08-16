@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="frappe_agents/public/icons/desktop_icons/solid/frappe_agents.svg" height="72" alt="Agents App for Frappe"/>
+  <img src="https://raw.githubusercontent.com/MalikZu/frappe_agents/main/frappe_agents/public/icons/desktop_icons/solid/frappe_agents.svg" height="72" alt="Agents App for Frappe"/>
   <h1>Agents App for Frappe</h1>
   <p><b>AI agents for Frappe sites. Agents draft. Humans submit. Every call is on the record.</b></p>
   <p>
@@ -39,9 +39,9 @@ broad rights. This app is built the other way around:
   duties and an edited-before-approval quality metric.
 - **Document extraction**: an attached PDF or image becomes a draft for human
   review, with bank and payment details held back until confirmed by hand.
-- **Any model provider** over two wire formats (OpenAI-compatible and
-  Anthropic) — OpenRouter, Ollama and friends included. The provider is a
-  config field, not a dependency.
+- **Any model provider** over three wire formats (OpenAI-compatible, OpenAI
+  Responses and Anthropic) — OpenRouter, Ollama and friends included. The
+  provider is a config field, not a dependency.
 - **Zero pip dependencies.** The agent loop is a vendored, tested harness;
   nothing new enters your bench's shared environment.
 
@@ -79,12 +79,38 @@ before every request. Redirects are never followed.
 
 ## Docs
 
+**Start here**
+
+- [Getting started](docs/getting-started.md) — install, the four roles, and the
+  path from an empty site to an agent that answers.
+- [How the agent is held to account](docs/governance.md) — identity binding, the
+  draft/submit wall, the audit trail, the kill switch, and where each guarantee
+  stops.
+
+**Setting it up**
+
 - [What an agent may reach](docs/access.md) — access rules, profiles, the two
   shipped profiles, and the Agents Builder.
+- [Configuring an agent](docs/agents.md) — the Agent form field by field:
+  autonomy, skills, alternates, and the two cost stops.
+- [Providers and models](docs/models.md) — the three wire formats, the
+  self-hosted trust boundary, and the shipped catalog.
+
+**Using it**
+
 - [Agent Chat](docs/chat.md) — conversations, the composer chips, and the
   document a conversation is about.
 - [Files in chat](docs/files-in-chat.md) — naming a file an agent may read,
   uploading one, and where uploads live.
+- [Approvals](docs/approvals.md) — proposals, who may decide one, and what the
+  Review Quality report is actually telling you.
+- [Document extraction](docs/extraction.md) — an attachment becomes a draft, and
+  the sensitive-field gate that holds payment details back.
+
+**Running it**
+
+- [Running the app](docs/admin.md) — settings, the audit trail, scheduled work,
+  and upgrading.
 - [The agent harness](docs/harness.md) — the vendored run loop.
 
 ## License
