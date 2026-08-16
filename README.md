@@ -47,8 +47,7 @@ broad rights. This app is built the other way around:
 
 ## Requirements
 
-- Frappe v16
-- Python 3.14+
+- Frappe **v16** with Python **3.14**, or Frappe **v15** with Python **3.11+**
 
 ## Install
 
