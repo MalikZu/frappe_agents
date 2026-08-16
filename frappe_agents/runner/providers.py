@@ -78,10 +78,11 @@ socket under the read and it ends there and then rather than at the idle timeout
 import base64
 import ipaddress
 import json
+import pickle
 import random
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -126,6 +127,11 @@ RETRY_ATTEMPTS = 3
 # open for an hour, and the run would rather be told.
 RETRY_BASE_DELAY = 1.0
 RETRY_MAX_DELAY = 20.0
+# How often a stream parked in a retry backoff asks whether the runtime is still
+# on. It is one redis GET, and the whole worst case — three attempts each held at
+# the ceiling — is a few hundred of them on a path that only runs when a provider
+# has already refused us.
+RUNTIME_POLL_INTERVAL = 0.25
 
 # What one SSE line may weigh before the stream is dropped. A frame that never
 # ends is not a slow answer, it is a body that would grow until the worker runs
@@ -844,6 +850,59 @@ def _is_tool_result(message: dict) -> bool:
 # --- streaming ---------------------------------------------------------------
 
 
+def _runtime_probe(key: str | None = None) -> "Callable[[], bool] | None":
+	"""A read of the kill switch that a worker thread is allowed to make.
+
+	A stream is pulled on a thread `asyncio.to_thread` owns, and frappe is bound
+	to the thread that connected: `frappe.cache`, `frappe.db` and `frappe.conf`
+	all raise there, so nothing on that thread can ask this app anything. That is
+	why a turn parked in a retry backoff cannot see a cancellation, and it is the
+	hole this closes.
+
+	What survives the thread boundary is the redis client itself, which is a
+	connection pool and safe to share, and a key rendered here where `frappe.conf`
+	still answers. A raw GET on that key is then a question the worker thread can
+	ask, and the answer is the switch as the process that saved Agent Settings
+	last published it — the same value `runtime_enabled` reads, and the one that
+	moves when somebody stops the runtime mid-run.
+
+	Only the published half is read. The stored half is a database round trip and
+	there is no connection here to make it on; reading one of the two can only
+	fail to notice a switch that went off, never invent one that did not.
+
+	None when there is no frappe to ask, which is every caller outside a site.
+	"""
+	try:
+		from frappe_agents.tools.base import KILL_SWITCH_KEY
+
+		cache = frappe.cache
+		full_key = cache.make_key(key or KILL_SWITCH_KEY)
+	except Exception:
+		return None
+
+	def stopped() -> bool:
+		try:
+			raw = cache.get(full_key)
+		except Exception:
+			# Redis unreachable is not the switch going off.
+			return False
+		if raw is None:
+			# Never published on this site. `runtime_enabled` treats that as on.
+			return False
+		try:
+			value = pickle.loads(raw)  # nosemgrep: python.lang.security.deserialization.pickle
+		except Exception:
+			return False
+		# Anything that is not one of the two integers this key is written with is
+		# not an answer, and an unreadable switch does not stop a run.
+		return value in (0, False)
+
+	# The rendered key, so a caller can see which switch this probe is watching
+	# without having to trip it — the real one cannot be flipped just to look.
+	stopped.key = full_key
+	return stopped
+
+
 class ProviderStream:
 	"""The normalized chunk stream, with the socket behind it still reachable.
 
@@ -859,14 +918,18 @@ class ProviderStream:
 
 	Between two attempts at opening that socket there is no socket to take away,
 	so the same thread would be parked in a sleep nobody could reach. `backoff`
-	is the wait it does instead, and letting go of the stream ends it.
+	is the wait it does instead, and it ends on either of the two things that can
+	still reach it — the stream being let go of, and the kill switch going off.
 	"""
 
-	def __init__(self) -> None:
+	def __init__(self, stopped: "Callable[[], bool] | None" = None) -> None:
 		self._chunks: Iterator[dict] | None = None
 		self._response: Any = None
 		self._released = False
 		self._wake = threading.Event()
+		# Read from whichever thread is parked in `backoff`, so it must be
+		# answerable there. `_runtime_probe` builds the only one that is.
+		self._stopped = stopped
 
 	def pulling(self, chunks: Iterator[dict]) -> "ProviderStream":
 		self._chunks = chunks
@@ -905,18 +968,50 @@ class ProviderStream:
 		self._drop_response()
 
 	def backoff(self, delay: float) -> bool:
-		"""Wait out a retry delay, unless this stream is let go of first.
+		"""Wait out a retry delay, unless the run stops wanting it first.
 
 		A plain sleep here would be a hole in cancellation rather than a slow
-		response to it. The kill switch is read between turns, on the thread that
-		is parked waiting for this one, so while the worker sleeps nothing is
-		watching the switch at all — and there is no socket to take away either.
-		Waiting on an event instead means whoever drops the stream ends the wait
-		with it, which `stream_adapter` already does on cancel.
+		response to it: the kill switch is read between turns, on the very
+		coroutine that is parked waiting for this thread, so while this thread
+		sleeps nothing in this process is watching the switch at all — and there
+		is no socket to take away either.
+
+		Two things can still end the wait, and neither is this process asking
+		itself. The event is set when the stream is let go of, which covers a run
+		already cancelled by the time the wait begins. `_stopped` covers the rest:
+		the switch is published to redis by whichever process saved Agent
+		Settings, and a raw read of that key is the one question a thread with no
+		frappe context of its own can still ask. It is polled rather than waited
+		on because redis has nothing to wake us with.
+
+		A delay that is zero, negative or not a number is still a question — it
+		asks both and returns at once, rather than assuming the answer is yes.
 
 		True when the delay was served in full and another attempt is wanted.
 		"""
-		return not self._wake.wait(delay)
+		if not delay > 0:  # nan included: it is not a wait anybody asked for.
+			delay = 0.0
+		deadline = time.monotonic() + delay
+		while True:
+			if self._wake.is_set() or self.stopped():
+				return False
+			remaining = deadline - time.monotonic()
+			if remaining <= 0:
+				return True
+			self._wake.wait(remaining if self._stopped is None else min(remaining, RUNTIME_POLL_INTERVAL))
+
+	def stopped(self) -> bool:
+		"""Has the run this stream belongs to been switched off under us?
+
+		No answer is not the same as yes: a probe that cannot be built or cannot
+		be read leaves the wait exactly as long as it was.
+		"""
+		if self._stopped is None:
+			return False
+		try:
+			return bool(self._stopped())
+		except Exception:
+			return False
 
 	def _drop_response(self) -> None:
 		# Whatever the reason for letting go, nobody is waiting to try again.
@@ -946,7 +1041,9 @@ def call_model_stream(
 	profile, provider, api_key = _resolve_profile(profile)
 	tool_schemas = tool_schemas or []
 
-	stream = ProviderStream()
+	# Built here, on the thread that still has a frappe context, because the
+	# thread that will read it does not. See `_runtime_probe`.
+	stream = ProviderStream(stopped=_runtime_probe())
 	if provider.provider_type == PROVIDER_ANTHROPIC:
 		build = _stream_anthropic
 	elif provider.provider_type == PROVIDER_RESPONSES:
@@ -1112,12 +1209,16 @@ def _wait_before_retry(stream: "ProviderStream | None", delay: float) -> bool:
 	The streaming path waits on the stream itself, so a cancelled run stops
 	waiting the moment it is cancelled. The non-streaming path has nothing to
 	wait on and sleeps, which is part of why its budget is the smaller one.
+
+	A delay of zero is not a reason to skip the question. `Retry-After: 0`, a
+	negative one, and an HTTP date a second in the past all clamp to zero, and a
+	run that was stopped is stopped whatever the provider asked us to wait — the
+	old short circuit spent the whole retry budget on a run nobody wanted.
 	"""
-	if delay <= 0:
-		return True
 	if stream is not None:
 		return stream.backoff(delay)
-	_sleep(delay)
+	if delay > 0:
+		_sleep(delay)
 	return True
 
 
@@ -1190,14 +1291,22 @@ def _redacted_stream(chunks: Iterator[dict], api_key: str) -> Iterator[dict]:
 	put it straight into a run's failure message, where it is read by anyone who
 	can open the run and copied into every log that follows it. This is the last
 	point on the way out that still holds the key, so it is where that is undone.
+
+	The cap belongs here too, after the redaction and not before it. `_redact`
+	replaces the key where it appears in full, so a message cut to the cap first
+	hands this function a severed key it can no longer match — a quoted body that
+	ran out mid-credential kept the tail of one, which is the whole failure this
+	promise exists to prevent. `_error_body` has always had these two the right
+	way round; the wrapped shapes the parsers build had not.
+
+	The original is dropped rather than chained. It is the one object that still
+	carries the unredacted text, and a chained exception is printed with its
+	context by every traceback that touches it.
 	"""
 	try:
 		yield from chunks
 	except ProviderError as exc:
-		redacted = _redact(str(exc), api_key)
-		if redacted == str(exc):
-			raise
-		raise ProviderError(redacted)
+		raise ProviderError(_redact(str(exc), api_key)[:ERROR_BODY_LIMIT]) from None
 
 
 def _stream_bytes(response: Any, url: str, api_key: str) -> Iterator[bytes]:
@@ -1452,33 +1561,55 @@ def _responses_status(kind: str) -> str:
 	}.get(kind, "completed")
 
 
+def _error_reason(error: Any) -> str:
+	"""The best thing an error object has to say, wherever in it that is.
+
+	Two shapes arrive here. Some endpoints state the error flat, and some wrap it
+	one level down inside a frame that carries nothing of its own — read flat, a
+	wrapped one tells the person reading the run that the model returned "error",
+	which is the frame's type and not a reason at all.
+
+	Unwrapping is therefore a *widening*, never a replacement. An outer object
+	with a perfectly good message keeps it even when something is nested under
+	it: gateways and proxies routinely bolt a detail dict — `param`, `metadata`,
+	`request_id` — onto an error whose message is the only part worth quoting,
+	and stepping into that dict is how "Your credit balance is too low" became
+	"no reason given". Both levels are read, and the better field wins over the
+	nearer one: a message anywhere beats a code anywhere, which beats a type.
+
+	`type` is the last resort and only when it names the error —
+	"rate_limit_exceeded", "overloaded_error". The word "error" is not a reason.
+	"""
+	if not isinstance(error, dict):
+		return str(error or "")
+
+	levels = [error]
+	nested = error.get("error")
+	if isinstance(nested, dict) and nested:
+		levels.append(nested)
+
+	for field in ("message", "code", "type"):
+		for level in levels:
+			value = level.get(field)
+			if field == "type" and value == "error":
+				continue
+			if value:
+				return str(value)
+	return ""
+
+
 def _raise_responses_error(error: Any) -> None:
 	"""An error delivered as its own event, or inside a failed response object.
 
-	The unwrap is here rather than at the call site because both callers hand
-	over a different shape — one the whole SSE frame, one the error object out of
-	a failed response — and the next caller would get it wrong again. A frame
-	shaped `{"type": "error", "error": {…}}` carries no message and no code of its
-	own, so the chain below would land on the frame's own type and tell the
-	person reading the run that the model returned "error".
+	The unwrap lives in `_error_reason` rather than at the call site because both
+	callers hand over a different shape — one the whole SSE frame, one the error
+	object out of a failed response — and the next caller would get it wrong again.
+
+	Nothing is cut to length here. The key is not in this module's hands by the
+	time a parser runs, so the redaction that has to happen before any truncation
+	happens on the way out, in `_redacted_stream`, and the cap goes with it.
 	"""
-	if isinstance(error, dict):
-		# Only when there is something to unwrap. An empty `{}` or a non-dict must
-		# fall through to the frame, which at least still has a type, rather than
-		# blank the message entirely.
-		nested = error.get("error")
-		if isinstance(nested, dict) and nested:
-			error = nested
-		# `type` is the last resort and it is only worth quoting when it names the
-		# error — "rate_limit_exceeded", "overloaded_error". On a frame that had
-		# nothing to unwrap it is the word "error" itself, which is no reason at all.
-		kind = error.get("type")
-		message = error.get("message") or error.get("code") or (kind if kind != "error" else "") or ""
-	else:
-		message = str(error or "")
-	raise ProviderError(
-		f"The model stream returned an error: {str(message or 'no reason given')[:ERROR_BODY_LIMIT]}"
-	)
+	raise ProviderError(f"The model stream returned an error: {_error_reason(error) or 'no reason given'}")
 
 
 def _responses_reason(incomplete_reason: Any, saw_tool_calls: bool) -> str:
@@ -1863,21 +1994,17 @@ def _stream_json(data: str) -> dict | None:
 def _raise_stream_error(payload: dict) -> None:
 	"""An error delivered inside a perfectly successful 200 body.
 
-	Same chain and same fallback as `_raise_responses_error`: an endpoint that
-	sends `{"error": {"code": "rate_limit_exceeded"}}` with a null message says
-	something, and two helpers that build the same sentence should not disagree
-	about which fields count.
+	Same chain and same fallback as `_raise_responses_error`, and now literally
+	the same code: an endpoint that sends `{"error": {"code": "rate_limit_exceeded"}}`
+	with a null message says something, and two helpers that build the same
+	sentence should not disagree about which fields count.
+
+	Not cut to length here either, for the reason `_raise_responses_error` gives.
 	"""
 	error = payload.get("error")
 	if not error:
 		return
-	if isinstance(error, dict):
-		message = error.get("message") or error.get("code") or error.get("type") or ""
-	else:
-		message = str(error)
-	raise ProviderError(
-		f"The model stream returned an error: {str(message or 'no reason given')[:ERROR_BODY_LIMIT]}"
-	)
+	raise ProviderError(f"The model stream returned an error: {_error_reason(error) or 'no reason given'}")
 
 
 def _delta_text(content: Any) -> str:
