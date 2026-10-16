@@ -444,3 +444,135 @@ not PDF file parts** (this needs confirming per server before it is promised).
 So today a self-hosted trigger can read photographed or scanned **images**, but
 a **scanned PDF** would be refused at the capability check. Closing that gap is
 an open decision, below.
+
+## What must land first
+
+Six fixes were already planned against the extraction and document-reading
+paths. Triggers change how much each one matters, because a trigger runs them
+unattended.
+
+| Fix | Before triggers? | Why |
+|---|---|---|
+| **Re-authorise queued extraction in the worker** (agent enabled, autonomy, Extract grant, profile roles, file provenance, all re-read before the bytes leave the site) | **Must** | A trigger makes the gap between queue and worker routine and unwatched. The worker re-check is the guarantee the whole trigger design leans on. |
+| **Count extraction tokens in the agent's daily budget** (new, found writing this plan) | **Must** | Without it a trigger's spend is invisible to the only money limit the app has. |
+| **Verify the OpenAI Responses PDF contract** | **Must, for OpenAI** | Extraction on a Responses profile currently posts a chat-completions file payload. An unattended trigger on an unverified wire fails every upload. Triggers on an Anthropic profile do not depend on it. |
+| **One function for the tools an agent can call now** | Should | The trigger's enabling check asks the same question ("may this agent extract here?"). It should call the same function, not a fifth copy. |
+| **Multi-page scan detection in `read_document`** | Not for the fill action. **Must** before an agent-loop action. | The bug is in the reader's text-layer lane. The fill sends the file to the model directly and never takes that lane. The trigger tests still include a multi-page image-only PDF, to prove it. |
+| **Honour page selection in the vision lane** | Not for the fill action. **Must** before an agent-loop action. | Same lane. Its page-subset helper is also what a later "pages 1–2 only" trigger option would use. |
+| Builder: keep decisions, separate source from target | No | Unrelated to triggers. |
+| Pin the Communication attachment workflow | No | Becomes relevant when a `Communication received` event is added. |
+
+## Tests
+
+All synthetic: generated blank and image-only PDFs, sentinel text, the fake
+provider from `tests/fixtures.py`. No real identity document, ever.
+
+**The hook**
+- A save on a doctype with no trigger runs no query beyond the cached map.
+- Each suppression flag (`in_import`, `in_patch`, `in_install`, `in_migrate`)
+  stops it when Suppress On Import is on, and none does when it is off.
+- The kill switch, a disabled trigger, a Paused trigger and a disabled agent
+  each record nothing and queue nothing.
+- A false condition, an empty file field, and a file not attached to the record
+  each produce no event.
+- A save as Administrator, and by a user outside Allowed Roles, each produce a
+  Skipped event and no job.
+- A save that raises after the hook ran leaves no event row and no job.
+- A hook error never reaches the user's save.
+
+**Idempotency and loops**
+- The same file saved twice is one event. A replaced file is a second event.
+- Two saves racing on the same file queue one job.
+- The fill's own save fires nothing.
+- Another app's `on_update` that saves the record again fires nothing.
+- A save made inside a run or an extraction job fires nothing.
+
+**Identity**
+- Session User mode runs as the firing user; Service User mode as the service
+  user; never as the owner.
+- A firing user without write permission on the record gets a Denied tool-call
+  row and a Failed event, and the provider is never called.
+
+**Worker re-checks**, each with an assertion that the provider was not called:
+- agent disabled, autonomy lowered to Suggest, Extract or Draft Edit removed;
+- profile disabled, provider disabled, profile role removed from the user;
+- Base URL changed (acknowledgment cleared), `require_self_hosted` with a hosted
+  provider;
+- record verified or scan replaced between the queue and the worker (Dropped).
+
+**Writes**
+- Only `fill_fields` are in the schema and only they are written.
+- A field a person filled is kept; the different model value is a conflict.
+- A sensitive field is withheld, and written only when confirmed in review.
+- The condition turning false between the model call and the write drops the
+  result and writes nothing.
+- The record's own validation refusing the save fails the event and leaves the
+  record unchanged.
+- A Check field in `fill_fields` is refused when the trigger is saved.
+- A non-submittable doctype without a condition is refused when the trigger is
+  saved.
+- The Agent Tool Call row contains no extracted value.
+- A multi-page image-only PDF reaches the model as the file.
+
+**Limits**
+- The hourly and daily caps produce Skipped events.
+- The agent budget counts extraction tokens.
+- A transient provider error is retried at most twice and never after a write.
+- Five provider failures in a row pause the trigger, notify Agent Managers, and
+  the trigger stays paused until a person resumes it.
+
+## The v15 line
+
+**Decision: port, in the same release.** Nothing here needs a v16-only feature.
+The differences are mechanical:
+
+- the trigger map cache: `frappe.client_cache` on v16, `frappe.cache` on v15;
+- no PEP 695 or PEP 758 syntax;
+- no Workspace Sidebar entry for the new doctypes on v15;
+- the audit redaction of masked fields is already absent on v15, and the fill's
+  audit row carries no values anyway, so nothing new is lost there.
+
+Wildcard `doc_events`, `frappe.safe_eval`, RQ deduplication and
+`enqueue_after_commit` behave the same on both. The suite runs on both lines in
+CI already.
+
+## Delivery
+
+1. **The prerequisites**, each its own PR: worker re-authorisation, budget
+   counting extraction tokens, the Responses PDF contract, the callable-tool
+   function.
+2. **Triggers, fill action only.** Agent Trigger, Agent Trigger Event,
+   `target_name` on Document Extraction, the hook, the job, `fill_from_file`,
+   the circuit breaker, and the user docs in the same PR: a new
+   `docs/triggers.md`, plus changes to `governance.md` (a run can now start
+   without a person), `admin.md` (Suppress On Import now does something),
+   `extraction.md` (in-place fill), `tools.md` (the new tool) and
+   `troubleshooting.md` ("why did it not fill").
+3. **Later:** Run on existing records; the agent-loop action, after the two
+   reader fixes; more event types.
+
+## Open decisions
+
+1. **Run As for triggers.** Recommendation: the firing user (Session User). It
+   keeps the rights ceiling personal and needs no standing account. Service User
+   stays available for self-service uploads.
+2. **Write at once, or only after review?** Recommendation: write non-sensitive
+   values at once, because the record's own verification is the review step and
+   the timeline comment marks what the model wrote. The stricter option holds
+   every value on the extraction row until a person accepts it, which is safer
+   and turns "fill" into "propose".
+3. **Do triggered extractions count against the per-user daily extraction
+   cap?** Recommendation: no. They count against the trigger's own limits and
+   the agent's budget. Otherwise a person doing a morning of uploads hits a cap
+   meant for chat.
+4. **What happens over a limit.** Recommendation: Skip and say so. The
+   alternative, queue for later, drains a bulk upload overnight with nobody
+   watching.
+5. **The self-hosted PDF gap.** Options: accept images-only for self-hosted
+   triggers and document it; add an optional rasterisation dependency, which
+   ends "zero pip dependencies"; or add a self-hosted text-extraction service as
+   a new provider kind. Recommendation: accept and document for the first
+   release, and confirm what common self-hosted servers actually accept before
+   choosing.
+6. **Circuit-breaker threshold and channel.** Proposed: 5 consecutive provider
+   failures, Notification Log plus email to Agent Managers.
