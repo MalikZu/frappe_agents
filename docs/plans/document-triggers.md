@@ -186,3 +186,157 @@ The trail for one firing:
    the extracted values, confidence, withheld sensitive values and conflicts.
 
 Agent User sees their own rows, Agent Auditor sees all, as today.
+
+## From the save to the worker
+
+### The hook
+
+`hooks.py` gains `doc_events = {"*": {"after_insert": ..., "on_update": ...}}`.
+A wildcard hook runs on every save on the site, so it must cost almost nothing
+when no trigger applies:
+
+1. Return at once if any suppression flag is set (next section).
+2. Return at once if the doctype has no enabled trigger. The map of doctype to
+   triggers is cached the way Webhook caches its own (`frappe.client_cache` on
+   v16), and cleared when an Agent Trigger is saved or deleted.
+3. Return at once if `doc.flags.frappe_agents_fill` is set, or if
+   `frappe.flags.frappe_agents_run` is set (see *Loop prevention*).
+4. For each matching trigger: read the file field, resolve the File, compute the
+   key, check the ledger, evaluate the condition.
+5. Insert one Agent Trigger Event row and enqueue one job.
+
+The hook **never raises into the user's save.** Every step is wrapped, and an
+unexpected error is logged and written as a Failed event row where possible. A
+person attaching a passport must never see an agent error on their save.
+
+The event row is inserted in the same transaction as the save. If the save rolls
+back, the row goes with it. The job is enqueued with `enqueue_after_commit=True`,
+so a rolled-back save never starts a job.
+
+### The job
+
+Queue `long`, like runs and extractions today. The job id is derived from the
+idempotency key with `deduplicate=True`, so the same match cannot be queued
+twice even if two saves race.
+
+The job:
+
+1. Re-reads the event row. Anything but Queued means a person or an earlier job
+   already decided it. Stop.
+2. Re-checks the kill switch, the trigger (`enabled`, `status`), the agent
+   (enabled, autonomy, grants), the user (the identity assertion), the profile
+   and provider (enabled, Self Hosted when required, allowed roles), the limits
+   and the budget.
+3. Re-reads the record **as the effective user** and re-evaluates the condition
+   and the file. If either changed (the record was verified, the scan was
+   replaced), the event becomes **Dropped** with the reason. No model call.
+4. Creates the Agent Run and calls `fill_from_file` through `execute_tool`.
+5. The tool queues the in-place extraction. From here the existing pipeline
+   runs, with the worker-time reauthorization from the prerequisites.
+
+### Retries
+
+The run engine's rule stays: **one attempt per run**, because a retry repeats
+every side effect already taken. A fill has exactly one side effect, the write,
+and it comes last. So one narrow retry is safe:
+
+- A provider error that is **transient** (timeout, connection reset, HTTP 429
+  without a quota message, HTTP 5xx) and happened **before any write** is
+  retried up to 2 times, with 1 and 5 minute backoff, as a new extraction
+  attempt on the same event.
+- Anything else is final: a refusal, a quota or billing error, a permission
+  denial, a validation error, a failed write.
+
+Every final failure is visible: the event row is Failed with the reason, and the
+record gets a timeline comment, "The agent could not read the attached file:
+<reason>", so the person checking the record knows to type the values by hand.
+
+A person with write permission on the record may press **Run again** on a Failed
+or Dropped event. That creates a new event with a new key suffix, through the
+same checks. It is the only way to re-run the same file.
+
+## Limits
+
+A trigger can spend money with nobody watching. Four limits, cheapest first:
+
+1. **Per trigger:** `max_runs_per_hour` and `max_runs_per_day`. Over the limit,
+   the event is Skipped with "hourly limit reached". Not queued for later: a
+   bulk upload of 500 scans should stop and ask, not quietly drain overnight.
+2. **Per agent:** the existing daily token budget. **This needs a fix first:**
+   today `_check_budget` sums Agent Run tokens only, and extraction tokens are
+   recorded on Document Extraction, so extraction spend never counts toward any
+   budget. The fix sums both, joined through `agent_run`.
+3. **Per user:** Extractions Per User Per Day. With a Service User every
+   triggered extraction counts against one user, so the trigger's own limits are
+   the real ones there. Whether triggered extractions should count against a
+   Session User's personal cap is an open decision.
+4. **Per site:** the pages and file-size caps. A file over them is Skipped
+   before the model is called.
+
+### The circuit breaker
+
+The case this exists for: the provider account runs out of credit. Without a
+breaker, every upload after that fails one by one, each one a Failed row nobody
+reads, and the people uploading assume the values are coming.
+
+After **5 consecutive final failures** of the same trigger whose cause is the
+provider (refusal of the key, quota, billing, endpoint error), the trigger moves
+to **Paused** with the last reason in `paused_reason`. A paused trigger records
+matches as Skipped ("trigger paused"), queues nothing, and sends one
+notification (a Notification Log and an email) to every Agent Manager. An Agent
+Manager resumes it by hand. It never resumes itself.
+
+## Loop prevention
+
+The fill saves the record. Saving the record fires `on_update`. Four layers
+stop that from becoming a loop, and any one of them is enough on its own:
+
+1. **The write is flagged.** The fill sets `doc.flags.frappe_agents_fill = True`
+   before `save()`, and the hook ignores a document carrying it.
+2. **No triggers inside a run.** Runs and extraction jobs set
+   `frappe.flags.frappe_agents_run` for their duration, and the hook does
+   nothing while it is set. In the first release a trigger can never start
+   another trigger, so chains do not exist. The existing `max_depth` stays for
+   runs that start runs.
+3. **The ledger.** One event per (trigger, doctype, name, file content hash),
+   ever. The fill does not change the file, so the save it causes matches an
+   existing key.
+4. **The event type.** "File attached" only fires when the file is new to this
+   trigger. A save that only changed other fields is not an event.
+
+Other apps' hooks may save the record again (for example to make a scan
+private). Layers 3 and 4 cover that, because the file content is the same.
+
+## Suppression during import and migrate
+
+**Agent Settings → Suppress On Import** exists today and nothing reads it. The
+hook reads it. When on (the default), the hook returns at once if any of these
+is set: `frappe.flags.in_import`, `in_patch`, `in_install`, `in_migrate`. That is
+the same list Webhook checks.
+
+When an administrator turns it off, imports fire triggers like any other save,
+**and the per-trigger limits still apply.** Turning suppression off cannot make a
+1,000-row import send 1,000 documents in one go.
+
+Tests are not suppressed. `in_test` is not on the list, so the suite exercises
+the real hook.
+
+Records loaded while suppressed are not lost. A later **Run on existing
+records** action on the trigger (second release) shows how many records match
+and the worst-case token cost, and asks before queueing them, within the same
+limits.
+
+## The kill switch
+
+Unchanged in meaning, applied at every new step:
+
+- **Global Enabled off**: the hook records nothing and queues nothing. A job
+  already queued stops at its first check. An extraction already at the model
+  stops before the write, as it does today. A fill never writes after the switch
+  went off.
+- **Trigger disabled or Paused**: same, for that trigger.
+- **Agent disabled**: same, for every trigger using the agent.
+
+The switch is read through `runtime_enabled()`, the published value, never a
+cached copy of Agent Settings. That is what makes it reach a job that is already
+running.
