@@ -340,3 +340,107 @@ Unchanged in meaning, applied at every new step:
 The switch is read through `runtime_enabled()`, the published value, never a
 cached copy of Agent Settings. That is what makes it reach a job that is already
 running.
+
+## What a fill may write
+
+### Not `update_draft`, an in-place Document Extraction
+
+The fill goes through the extraction pipeline, extended with one new field on
+Document Extraction: **`target_name`**. Without it, extraction creates a new
+draft, as today. With it, extraction fills the named record instead.
+
+Why not `update_draft`: it has no sensitive-field gate, it writes whatever
+fields it is given, and it is built for a model in a tool loop. The extraction
+path already has the gate, a fixed instruction text with no channel from the
+model into it, a schema built from the target's meta, link resolution, and the
+review screen. A new draft would be wrong for this case: the record already
+exists, and a second record holding the same document is exactly the duplicate
+the person is trying to avoid.
+
+### The rules of an in-place fill
+
+1. **Only `fill_fields`.** The schema sent to the model contains those fields
+   and nothing else. Check fields are refused in `fill_fields`, because 0 and
+   "not set" cannot be told apart.
+2. **Only empty fields.** A value a person already typed is never overwritten.
+   When the model read something different, that is a **conflict**: it is stored
+   on the extraction row and named in the timeline comment, and the field keeps
+   the person's value.
+3. **Sensitive fields are withheld**, exactly as today: values for fields named
+   in Agent Settings → Sensitive Fields go onto the extraction row, flagged, and
+   reach the record only when a person confirms them field by field in the
+   review screen. `apply_extraction` gains the in-place case.
+4. **The write window is re-checked right before the write.** The record is
+   re-read as the effective user, the trigger's condition is evaluated again,
+   and the file must still be the same file. If the record moved on (verified,
+   scan replaced, deleted), the result is dropped and the row says so. Nothing
+   is written.
+5. **The write is an ordinary save as the effective user.** No
+   `ignore_permissions`, no `ignore_validate`, no `ignore_mandatory`. The
+   record's own validation runs, so an app that locks a verified record refuses
+   a late fill by itself.
+6. **The record must be editable.** A submitted or cancelled record is refused.
+   Note what this does *not* protect: on a doctype that is not submittable,
+   every record is at docstatus 0 forever, so "it is a draft" means nothing.
+   There, rule 4 (the condition, re-checked) is the real guard. That is why a
+   fill trigger on a non-submittable doctype requires a condition.
+7. **The audit row holds no values.** `fill_from_file` returns field names,
+   counts and the extraction name. The values live on the Document Extraction,
+   which has its own permissions. So the Agent Tool Call row, which an Agent
+   Auditor reads across the whole site, does not become a list of passport
+   numbers.
+
+After the fill, the record gets one timeline comment: which fields were filled,
+which were withheld for confirmation, which conflicted, with a link to the
+extraction. That is how the person verifying the record knows which values
+came from the model.
+
+### Who may read the extraction row
+
+Today Document Extraction is read by its owner and by auditors. With a Service
+User, the owner is the service account, so the person who uploaded the scan
+could not open the review screen. In-place extractions therefore add a
+permission rule: a user who may read the target record may read its
+extraction, and a user who may write the target record may review it.
+
+### The open form
+
+A person usually still has the record open when the fill saves it. The desk
+already tells an open form that the record changed. A clean form reloads; a
+form with unsaved edits warns on save. The fill shortens the window by being
+fast, and the first release adds a realtime "Reading the attached file…" note
+on the form while the event is Queued or Running. A field-level highlight of
+what was filled is a later improvement.
+
+## Privacy: where the scan goes
+
+A fill sends a document, often an identity document, to the model provider
+named on the trigger. The plan makes that a decision someone signs, not a side
+effect of which model happened to be the agent's default:
+
+- **The trigger names the profile.** It is pinned on the trigger, shown with its
+  host, and must be acknowledged before the trigger can be enabled. Changing the
+  profile, its provider, or the provider's Base URL clears the acknowledgment
+  and disables the trigger.
+- **Sub-processors are shown.** When the PDF parser engine is not `native` and
+  the provider is OpenRouter, the file is parsed by a further service (the OCR
+  engine OpenRouter runs). The destination panel says so.
+- **Self-hosted is a first-class option.** `require_self_hosted` refuses any
+  provider not marked Self Hosted, at save and before every call.
+- **The whole file is sent**, within the page cap. A PDF that bundles several
+  documents sends all of them. Sending only selected pages needs the subset
+  helper from the page-selection fix; a trigger could later take a page range.
+- **What the provider keeps is outside this app.** The destination panel links
+  to nothing it cannot vouch for; a site states its provider's retention terms
+  in its own privacy notice.
+
+### The self-hosted gap, stated plainly
+
+The app has no rasterisation, by design: nothing in a Frappe environment turns
+a PDF page into an image, and the app adds no dependency to do it. Extraction
+sends the file as a file. A hosted provider with native PDF input reads it. A
+typical self-hosted server speaking the OpenAI-compatible wire takes **images,
+not PDF file parts** (this needs confirming per server before it is promised).
+So today a self-hosted trigger can read photographed or scanned **images**, but
+a **scanned PDF** would be refused at the capability check. Closing that gap is
+an open decision, below.
