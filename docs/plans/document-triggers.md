@@ -65,9 +65,9 @@ adding it is a new option, not a redesign.
 
 ## The trigger record
 
-A new doctype, **Agent Trigger**. Agent Manager creates and edits it. It is in
-the never-grantable set in `access/exclusions.py`, like every other doctype this
-app ships, so no agent can create or widen a trigger.
+A new doctype, **Agent Trigger**. Agent Manager creates and edits it. Because
+it lives in this app's module, `access/exclusions.py` puts it in the
+never-grantable set automatically, so no agent can create or widen a trigger.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -430,9 +430,8 @@ effect of which model happened to be the agent's default:
 - **The whole file is sent**, within the page cap. A PDF that bundles several
   documents sends all of them. Sending only selected pages needs the subset
   helper from the page-selection fix; a trigger could later take a page range.
-- **What the provider keeps is outside this app.** The destination panel links
-  to nothing it cannot vouch for; a site states its provider's retention terms
-  in its own privacy notice.
+- **What the provider keeps is outside this app.** A site states its provider's
+  retention terms in its own privacy notice.
 
 ### The self-hosted gap, stated plainly
 
