@@ -27,6 +27,8 @@ self-heal is an `after_migrate` hook, that is one more public sidebar per
 migrate rather than one ever.
 """
 
+import json
+import os
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -37,7 +39,10 @@ from frappe_agents.install import (
 	ACTIVITY_SECTION,
 	SIDEBAR,
 	SIDEBAR_APP,
+	SIDEBAR_STORE,
+	WORKSPACE,
 	build_workspace_sidebar,
+	ensure_workspace_sidebar,
 	existing_sidebar,
 	sidebars_supported,
 )
@@ -488,3 +493,78 @@ class TestEveryDoctypeIsInTheSidebar(AgentTestCase):
 				"new doctype, or name it in EXCEPTIONS here and accept the fallback."
 			),
 		)
+
+
+# Where model sync looks for a module's sidebar from v16.50: `<module>/sidebar/<name>/<name>.json`.
+SHIPPED_SIDEBAR = os.path.join(
+	frappe.get_app_path("frappe_agents"),
+	frappe.scrub(APP_MODULE),
+	"sidebar",
+	frappe.scrub(WORKSPACE),
+	f"{frappe.scrub(WORKSPACE)}.json",
+)
+
+
+def shipped_sidebar() -> dict:
+	with open(SHIPPED_SIDEBAR) as f:
+		return json.load(f)
+
+
+class TestTheShippedSidebarFile(AgentTestCase):
+	"""The `Sidebar` file v16.50 imports, against the list the older build uses.
+
+	Two copies of one sidebar, so this is what notices when they drift. It reads
+	files only and runs on every version.
+	"""
+
+	def test_it_carries_the_same_rows_as_the_build(self):
+		rows = [
+			(
+				row["type"],
+				row["label"],
+				row.get("link_type"),
+				row.get("link_to"),
+				row.get("icon"),
+				row["child"],
+			)
+			for row in shipped_sidebar()["items"]
+		]
+
+		self.assertEqual(rows, list(SIDEBAR))
+
+	def test_it_names_the_app_and_the_module(self):
+		doc = shipped_sidebar()
+
+		self.assertEqual(doc["doctype"], SIDEBAR_STORE)
+		self.assertEqual((doc["name"], doc["title"]), (WORKSPACE, WORKSPACE))
+		self.assertEqual(doc["app"], SIDEBAR_APP)
+		self.assertEqual(doc["module"], APP_MODULE)
+		self.assertEqual(doc["standard"], 1)
+
+
+class TestTheSidebarFromV16_50(AgentTestCase):
+	"""Where `Sidebar` is the store, the file is the sidebar and the archive stays untouched."""
+
+	def setUp(self) -> None:
+		if not frappe.db.exists("DocType", SIDEBAR_STORE):
+			self.skipTest("this Frappe version keeps sidebars in Workspace Sidebar")
+		super().setUp()
+
+	def test_the_site_has_the_shipped_sidebar(self):
+		row = frappe.db.get_value(SIDEBAR_STORE, WORKSPACE, ["app", "module"], as_dict=True)
+
+		self.assertEqual((row.app, row.module), (SIDEBAR_APP, APP_MODULE))
+
+	def test_the_workspace_sidebar_code_stands_down(self):
+		self.assertFalse(sidebars_supported())
+		self.assertIsNone(existing_sidebar())
+
+	def test_no_migrate_step_writes_to_the_archive(self):
+		before = frappe.db.count(SIDEBAR_DOCTYPE)
+
+		self.assertIsNone(build_workspace_sidebar())
+		self.assertIsNone(ensure_workspace_sidebar())
+		build_patch()
+		execute()
+
+		self.assertEqual(frappe.db.count(SIDEBAR_DOCTYPE), before)

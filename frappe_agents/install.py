@@ -93,17 +93,30 @@ SIDEBAR = (
 
 SIDEBAR_DOCTYPE = "Workspace Sidebar"
 
+# The sidebar store from frappe v16.50 on. It is shipped as a file
+# (`frappe_agents/sidebar/agents/agents.json`) and model sync imports it, so
+# nothing in this module builds or patches one.
+SIDEBAR_STORE = "Sidebar"
+
 
 def sidebars_supported() -> bool:
-	"""Whether this framework has the Workspace Sidebar doctype at all.
+	"""Whether Workspace Sidebar is the live sidebar store on this framework.
 
 	frappe_agents patch (version-15): sidebars arrived in v16. On v15 the doctype
-	does not exist, so every read of it would hit a missing table. Everything that
-	touches a sidebar — the build, the migrate self-heal, both sidebar patches and
-	their tests — asks here first. The workspace itself is unaffected: it simply
-	has no sidebar row, and the desk falls back to its own module sidebar.
+	does not exist, so every read of it would hit a missing table.
+
+	From v16.50 the doctype is still there, but as a frozen archive: frappe
+	refuses every write outside migrate and reads its rows only to convert them
+	into `Sidebar` documents. A row written here then would be a sidebar nothing
+	renders. So the answer is False there too, and the shipped `Sidebar` file
+	takes over.
+
+	Everything that touches a Workspace Sidebar — the build, the migrate
+	self-heal, the sidebar patches and their tests — asks here first.
 	"""
-	return bool(frappe.db.exists("DocType", SIDEBAR_DOCTYPE))
+	if not frappe.db.exists("DocType", SIDEBAR_DOCTYPE):
+		return False
+	return not frappe.db.exists("DocType", SIDEBAR_STORE)
 
 
 def existing_sidebar() -> str | None:
@@ -268,10 +281,34 @@ def desktop_tile_supported() -> bool:
 	doctype — different columns entirely, and no sidebar to point at. So the desk
 	tile is a v16 surface. On v15 the workspace is reached at `/app/agents` and
 	nothing here should touch the row.
+
+	Asked of Desktop Icon itself, not of `sidebars_supported`: from v16.50 the
+	tile stays (its `link_to` names the `Sidebar` now) while Workspace Sidebar
+	is archived.
 	"""
-	if not sidebars_supported():
+	if not frappe.db.exists("DocType", "Desktop Icon"):
 		return False
-	return bool(frappe.get_meta("Desktop Icon").get_field("link_to"))
+	if not frappe.get_meta("Desktop Icon").get_field("link_to"):
+		return False
+	return desktop_shows_icons()
+
+
+def desktop_shows_icons() -> bool:
+	"""Whether this site's desktop is the icon grid the tile lives on.
+
+	From v16.50 a site picks its desktop in Desktop Settings: the Apps screen
+	(the default on a fresh install, reached through `add_to_apps_screen`) or
+	the older icon grid (kept for sites that upgraded with tiles). On the Apps
+	screen frappe holds no tile rows at all and does not import shipped ones,
+	so putting ours back there would contradict it on every migrate.
+
+	Before v16.50 the grid is the only desktop.
+	"""
+	try:
+		from frappe.desk.doctype.desktop_settings.desktop_settings import is_desktop_icons_page
+	except ImportError:
+		return True
+	return is_desktop_icons_page()
 
 
 def ensure_desktop_icon() -> bool:

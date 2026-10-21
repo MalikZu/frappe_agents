@@ -34,6 +34,8 @@ from frappe_agents.tests.fixtures import AgentTestCase
 
 APP_PATH = frappe.get_app_path("frappe_agents")
 
+DESKTOP_SETTINGS = "Desktop Settings"
+
 # What the shipped desktop-icon JSON carries that the rebuild deliberately does
 # not: sync bookkeeping, the name `set_name` supplies, and an empty child table.
 NOT_REBUILT = {"doctype", "modified", "name", "roles"}
@@ -46,10 +48,6 @@ def _load(relative_path: str) -> dict:
 
 class TestWorkspaceNamingContract(AgentTestCase):
 	def setUp(self):
-		# frappe_agents patch (version-15): Workspace Sidebar is v16-only. These
-		# assertions describe a doctype this framework does not have.
-		if not sidebars_supported():
-			self.skipTest("Workspace Sidebar is not in this Frappe version")
 		super().setUp()
 		self.refuse_to_delete_the_shipped_tile_file()
 
@@ -116,6 +114,10 @@ class TestWorkspaceNamingContract(AgentTestCase):
 		self.assertEqual(entry["route"], f"/desk/{frappe.scrub(WORKSPACE).replace('_', '-')}")
 
 	def test_rename_patch_converges_a_half_renamed_site(self):
+		# frappe_agents patch (version-15), and v16.50 on: the crime scene needs a
+		# writable Workspace Sidebar, which v15 lacks and v16.50 archived.
+		if not sidebars_supported():
+			self.skipTest("Workspace Sidebar is not the live sidebar store here")
 		# Build the v0.5.0 crime scene: old names, new labels.
 		for doctype in ("Workspace", "Workspace Sidebar", "Desktop Icon"):
 			if frappe.db.exists(doctype, WORKSPACE):
@@ -167,9 +169,11 @@ class TestTheDeskTileHealsItself(AgentTestCase):
 
 	def setUp(self) -> None:
 		# frappe_agents patch (version-15): v15's Desktop Icon is the older
-		# module-icon doctype — no link_to, and no sidebar to point at.
+		# module-icon doctype — no link_to, and no sidebar to point at. From v16.50
+		# a site on the Apps screen has no tiles either; the grid subclass below
+		# covers v16.50 sites that kept the tiles.
 		if not desktop_tile_supported():
-			self.skipTest("this Frappe version has no Workspace Sidebar desk tile")
+			self.skipTest("this site's desktop has no tile for the app")
 		super().setUp()
 
 	@contextmanager
@@ -323,3 +327,56 @@ class TestTheDeskTileHealsItself(AgentTestCase):
 			"frappe_agents.install.ensure_desktop_icon",
 			frappe.get_hooks("after_migrate", app_name="frappe_agents"),
 		)
+
+
+def desktop_page_is_a_choice() -> bool:
+	"""Whether this site picks its desktop: the Apps screen or the icon grid (v16.50+)."""
+	if not frappe.db.exists("DocType", DESKTOP_SETTINGS):
+		return False
+	return frappe.get_meta(DESKTOP_SETTINGS).has_field("desktop_page")
+
+
+def use_desktop_page(case: AgentTestCase, page: str) -> None:
+	"""Switch the desktop for one test, and switch it back before the rollback.
+
+	Put back explicitly, not left to the rollback: the single value is cached, and
+	a cache that outlives the rollback would move every later test to this page.
+	"""
+	before = frappe.db.get_single_value(DESKTOP_SETTINGS, "desktop_page")
+	frappe.db.set_single_value(DESKTOP_SETTINGS, "desktop_page", page)
+	case.addCleanup(frappe.db.set_single_value, DESKTOP_SETTINGS, "desktop_page", before)
+
+
+class TestTheDeskTileHealsItselfOnTheIconGrid(TestTheDeskTileHealsItself):
+	"""The same floor from v16.50, on a site that kept the icon grid.
+
+	frappe's `keep_existing_sites_on_desktop_icons` patch keeps an upgrading site
+	that has tiles on the grid. A site upgraded from an older v16 is this one; a
+	fresh install starts on the Apps screen, where the class above skips.
+	"""
+
+	def setUp(self) -> None:
+		if not desktop_page_is_a_choice():
+			self.skipTest("only v16.50 and later let a site choose its desktop")
+		AgentTestCase.setUp(self)
+		use_desktop_page(self, "Desktop Icons")
+		# Switching to the grid is what imports shipped tiles. Here the floor
+		# under every migrate does it, which is also what the tests below prove.
+		ensure_desktop_icon()
+
+
+class TestTheDeskTileStaysOffTheAppsScreen(AgentTestCase):
+	"""On the Apps screen frappe keeps no tile rows, so the floor must not add one."""
+
+	def setUp(self) -> None:
+		if not desktop_page_is_a_choice():
+			self.skipTest("only v16.50 and later let a site choose its desktop")
+		super().setUp()
+		use_desktop_page(self, "Apps")
+
+	def test_the_self_heal_adds_no_tile(self):
+		frappe.db.delete("Desktop Icon", {"name": WORKSPACE})
+
+		self.assertFalse(ensure_desktop_icon())
+
+		self.assertFalse(frappe.db.exists("Desktop Icon", WORKSPACE))
