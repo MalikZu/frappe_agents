@@ -1256,6 +1256,13 @@ def _update(run: Any, values: dict) -> None:
 	run.db_set(values, update_modified=False)
 
 
+def fail_unstarted_run(run_name: str) -> None:
+	"""Fail a run that no worker ever started. The hourly sweep calls this."""
+	run = frappe.get_doc("Agent Run", run_name)
+	run.flags.ignore_permissions = True
+	_fail(run, "No worker started this run. Check that the bench runs a worker for the agent queue.")
+
+
 def _fail(run: Any, message: str, status: str = "Failed") -> None:
 	error = (message or "Unknown error")[:ERROR_LIMIT]
 	try:
