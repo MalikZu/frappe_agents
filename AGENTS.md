@@ -13,7 +13,10 @@ The permission model is the product.
   One scoped exception: timeline, version, and attachment assembly first checks
   read permission on the focal document, then fetches its timeline rows the way
   frappe core's `get_docinfo` does — `get_all` with explicit limits, marked
-  `# focal-doc-gated`. Nowhere else.
+  `# focal-doc-gated`. A second scoped exception: the extraction gate reads one
+  master field's stored value with a `frappe.qb` select, after `has_permission`
+  read on that record, because before v16.50 every ORM read masks it. Marked
+  `# read-gated`. Nowhere else.
 - **Agents draft, humans submit.** No code path may submit, cancel, or delete
   without a human approval record.
 - **Use Frappe's own features first** — doctypes, roles, User Permissions,

@@ -181,6 +181,7 @@ def _stored_value(doctype: str, name: str, fieldname: str) -> Any:
 	see it unmasked — `_flag` drops it otherwise.
 	"""
 	table = frappe.qb.DocType(doctype)
+	# read-gated: the caller checked read permission on this record. See AGENTS.md.
 	rows = frappe.qb.from_(table).select(table[fieldname]).where(table.name == name).run()
 	return rows[0][0] if rows else None
 

@@ -28,7 +28,8 @@ not a trade-off to be argued at review time — it is the thing we will not do.
   without an approval a different person gives.
 - **One door to data.** Tool code uses the permission-checked ORM:
   `frappe.get_list`, or `frappe.get_doc` after `has_permission`. Never
-  `frappe.db.sql`, `frappe.get_all`, or `ignore_permissions=True`.
+  `frappe.db.sql`, `frappe.get_all`, or `ignore_permissions=True`. The two
+  scoped exceptions are listed in `AGENTS.md`.
 - **Every call is on the record.** A tool call writes its audit row on success,
   denial and error alike.
 - **Document text is data.** Text a person authored reaches the model wrapped as

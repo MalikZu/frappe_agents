@@ -93,12 +93,11 @@ own worker:
    }
    ```
 
-2. Run `bench setup supervisor` (production) or `bench setup procfile`
-   (development). Reload supervisor, or restart `bench start`.
-3. Open **Agent Settings**. The orange note about the queue is gone when a
+2. Run `bench setup supervisor` on a production bench, or `bench setup procfile`
+   on a development bench.
+3. Reload supervisor, or restart `bench start`.
+4. Open **Agent Settings**. The orange note about the queue is gone when a
    worker listens on it.
-
-Keep the worker timeout above **Run Timeout**.
 
 Until a worker listens on the queue, agent jobs use the **long** queue, and
 Agent Settings shows an orange note that says so. To use **long** on purpose,
@@ -113,9 +112,10 @@ Two jobs:
 - **Fail unstarted runs**, hourly. A run that no worker started within twice the
   Run Timeout is marked failed, with a reason the chat shows.
 
-Both jobs are safe to run by hand and safe to run twice. Expiry is the clock, not a
-decision — nobody is recorded as having decided, and the agent may propose the
-same thing again.
+Both jobs are safe to run by hand and safe to run twice.
+
+Expiry is the clock, not a decision. Nobody is recorded as having decided, and
+the agent may propose the same thing again.
 
 ## Upgrading
 
