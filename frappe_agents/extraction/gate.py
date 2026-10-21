@@ -16,10 +16,12 @@ So the gate does two things, and does them by construction rather than by warnin
 
 Two details of that comparison are not optional:
 
-* The master value is read with `frappe.get_doc`, never `frappe.db.get_value` or
-  `get_all`. v16 masks fields per user in the query layer — a masked field comes
-  back as `"XXXXXXXX"`, which would make every extraction mismatch forever. Alert
-  fatigue on the one alert that must never be ignored is worse than no alert.
+* The master value is the stored one, never a masked copy. v16 masks fields per
+  user — in `frappe.db.get_value` and `get_all`, and before v16.50 in `get_doc` as
+  well — and a masked field comes back as `"XXXXXXXX"`, which would make every
+  extraction mismatch forever. Alert fatigue on the one alert that must never be
+  ignored is worse than no alert. `_stored_value` reads the one column after the
+  read permission check.
 * A master value the reviewer is not permitted to see unmasked is not written into
   the flags. `sensitive_flags` is a field on a document they load; putting a masked
   value there would leak it through the form, the API and the version history. The
@@ -160,17 +162,28 @@ def _master(target_doctype: str | None, fieldname: str, links: dict) -> tuple | 
 			continue
 		if not master_meta.get_field(fieldname):
 			continue
+		if not frappe.db.exists(df.options, name):
+			continue
 		if not frappe.has_permission(df.options, "read", doc=name):
 			continue
-		try:
-			doc = frappe.get_doc(df.options, name)
-		except frappe.DoesNotExistError:
-			continue
-		# get_doc, never db.get_value: the query layer masks per user and would hand
-		# back "XXXXXXXX" as if the master really said that.
-		return df.options, name, doc.get(fieldname), fieldname not in _masked_fields(master_meta)
+		value = _stored_value(df.options, name, fieldname)
+		return df.options, name, value, fieldname not in _masked_fields(master_meta)
 
 	return None
+
+
+def _stored_value(doctype: str, name: str, fieldname: str) -> Any:
+	"""One column as stored, for a record the caller may already read.
+
+	A plain query-builder select is the one read frappe does not mask: masking hooks
+	into the queries its own engine builds (`get_value`, `get_list`) and, before
+	v16.50, into `get_doc` too. The value never reaches the reader unless they may
+	see it unmasked — `_flag` drops it otherwise.
+	"""
+	table = frappe.qb.DocType(doctype)
+	# read-gated: the caller checked read permission on this record. See AGENTS.md.
+	rows = frappe.qb.from_(table).select(table[fieldname]).where(table.name == name).run()
+	return rows[0][0] if rows else None
 
 
 def _masked_fields(meta: Any) -> set[str]:

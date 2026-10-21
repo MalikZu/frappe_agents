@@ -21,9 +21,18 @@ concurrency:
 
 jobs:
   tests:
-    name: Python unit tests
+    name: Python unit tests (frappe ${{ matrix.frappe }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # develop (v17) is a drift report, not a gate: main supports frappe <17.
+    continue-on-error: ${{ matrix.frappe == 'develop' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest v16 release in support, the branch head, and the next major.
+        # v16.22.0 is the floor because a production site runs it; raise it when
+        # no supported site is that old any more.
+        frappe: [v16.22.0, version-16, develop]
 
     services:
       mariadb:
@@ -69,7 +78,7 @@ jobs:
         run: pip install frappe-bench
 
       - name: Init bench
-        run: bench init --skip-assets --frappe-branch version-16 /home/runner/frappe-bench
+        run: bench init --skip-assets --frappe-branch ${{ matrix.frappe }} /home/runner/frappe-bench
 
       - name: Start redis and point bench at the services
         working-directory: /home/runner/frappe-bench

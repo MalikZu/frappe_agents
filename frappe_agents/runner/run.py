@@ -259,6 +259,11 @@ def execute_run(run_name: str) -> None:
 
 
 def _execute(run: Any) -> None:
+	# Only a Queued run starts. The hourly sweep may have failed this run while its
+	# job still waited behind a busy worker; running it now would undo that answer.
+	if run.status != "Queued":
+		return
+
 	agent = frappe.get_doc("Agent", run.agent)
 
 	# The identity assertion. An agent never runs as Administrator or Guest, and
@@ -1254,6 +1259,13 @@ def _update(run: Any, values: dict) -> None:
 	# writes to it with the ignore_permissions flag set on the document.
 	run.flags.ignore_permissions = True
 	run.db_set(values, update_modified=False)
+
+
+def fail_unstarted_run(run_name: str, message: str) -> None:
+	"""Fail a run that no worker started in time. The hourly sweep calls this."""
+	run = frappe.get_doc("Agent Run", run_name)
+	run.flags.ignore_permissions = True
+	_fail(run, message)
 
 
 def _fail(run: Any, message: str, status: str = "Failed") -> None:

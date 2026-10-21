@@ -28,6 +28,8 @@ Publishing on save is what crosses that gap. See
 |---|---|---|
 | **Global Enabled** | on | The kill switch |
 | **Max Depth** | 3 | How deep runs may nest when one run starts another |
+| **Run Queue** | agents | The background queue for chat turns and extractions. See [Background jobs](#background-jobs) |
+| **Run Timeout (seconds)** | 600 | How long a chat turn may run before it is stopped and marked failed |
 | **Default Daily Token Budget** | empty | Fallback budget for an agent that sets none |
 | **Action Expiry Days** | 7 | How long a proposal waits for a decision |
 | **Suppress On Import** | on | Skip agent triggers during data import and migration |
@@ -74,14 +76,46 @@ them. Grant it the way you would grant any role that sees everything.
 Sensitive values are replaced with `[redacted]` as the row is written. What the
 call *did* stays readable — the tool, the doctype, the field names, the outcome.
 
+## Background jobs
+
+A chat turn runs as a background job, and it keeps its worker busy until the
+model is done — often for minutes. On a bench where one worker serves the long,
+default and short queues, a turn holds up emails, reports and scheduled jobs.
+
+So agent jobs go to their own queue, **agents** by default. Give that queue its
+own worker:
+
+1. Add the queue to `sites/common_site_config.json`:
+
+   ```json
+   "workers": {
+     "agents": {"timeout": 900}
+   }
+   ```
+
+2. Run `bench setup supervisor` on a production bench, or `bench setup procfile`
+   on a development bench.
+3. Reload supervisor, or restart `bench start`.
+4. Open **Agent Settings**. The orange note about the queue is gone when a
+   worker listens on it.
+
+Until a worker listens on the queue, agent jobs use the **long** queue, and
+Agent Settings shows an orange note that says so. To use **long** on purpose,
+set **Run Queue** to `long`.
+
 ## Scheduled work
 
-One daily job: **expire stale actions**. It moves proposals nobody decided to
-Expired after the number of days in Agent Settings.
+Two jobs:
 
-The job is safe to run by hand and safe to run twice. Expiry is the clock, not a
-decision — nobody is recorded as having decided, and the agent may propose the
-same thing again.
+- **Expire stale actions**, daily. It moves proposals nobody decided to Expired
+  after the number of days in Agent Settings.
+- **Fail unstarted runs**, hourly. A run that no worker started within twice the
+  Run Timeout is marked failed, with a reason the chat shows.
+
+Both jobs are safe to run by hand and safe to run twice.
+
+Expiry is the clock, not a decision. Nobody is recorded as having decided, and
+the agent may propose the same thing again.
 
 ## Upgrading
 

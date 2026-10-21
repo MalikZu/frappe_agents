@@ -88,11 +88,12 @@ hold back** — that list is the whole configuration of this feature, and on a
 finance site it is the first thing to set.
 
 Two details of the comparison are not optional, and explain behaviour you might
-otherwise find odd. The master value is read as a document rather than through a
-query, because v16 masks fields per user in the query layer and a masked value
-would make every extraction mismatch forever — alert fatigue on the one alert
-that must never be ignored. And a master value you are not permitted to see
-unmasked is never written into the flags: you get the boolean, not the value.
+otherwise find odd. The master value is compared as stored, never as the masked
+copy you would see, because v16 masks fields per user and a masked value would make
+every extraction mismatch forever — alert fatigue on the one alert that must never
+be ignored. The record is read only after your read permission on it is checked.
+And a master value you are not permitted to see unmasked is never written into the
+flags: you get the boolean, not the value.
 
 ## Reviewing
 
