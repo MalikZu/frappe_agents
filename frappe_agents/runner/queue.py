@@ -53,11 +53,16 @@ def fail_unstarted_runs() -> int:
 	"""
 	from frappe_agents.runner.run import fail_unstarted_run
 
-	cutoff = add_to_date(now_datetime(), seconds=-2 * run_timeout())
+	window = 2 * run_timeout()
+	cutoff = add_to_date(now_datetime(), seconds=-window)
 	# Scheduler code, not tool code: it runs as nobody and decides nothing for a user.
 	stuck = frappe.get_all("Agent Run", filters={"status": "Queued", "creation": ("<", cutoff)}, pluck="name")
+	message = (
+		f"No worker started this run within {window // 60} minutes. The agent queue has no "
+		"worker, or its workers were busy. Send the message again."
+	)
 	for name in stuck:
-		fail_unstarted_run(name)
+		fail_unstarted_run(name, message)
 	return len(stuck)
 
 

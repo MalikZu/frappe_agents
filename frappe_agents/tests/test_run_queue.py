@@ -12,6 +12,7 @@ import frappe
 from frappe.utils import add_to_date, now_datetime
 
 from frappe_agents.api import start_run
+from frappe_agents.patches.v0_7_0.set_run_queue_defaults import execute as set_defaults
 from frappe_agents.runner.queue import (
 	DEFAULT_QUEUE,
 	DEFAULT_RUN_TIMEOUT,
@@ -24,6 +25,7 @@ from frappe_agents.runner.queue import (
 	run_queue,
 	run_timeout,
 )
+from frappe_agents.runner.run import execute_run
 from frappe_agents.tests.fixtures import (
 	AGENT,
 	DRAFT_AGENT,
@@ -203,6 +205,17 @@ class TestRunsNoWorkerStarted(QueueCase):
 		self.assertEqual(status, "Failed")
 		self.assertIn("No worker started this run", error)
 
+	def test_a_run_the_sweep_failed_does_not_start_later(self):
+		"""Its job can still be in the queue, behind a busy worker."""
+		stuck = self.queued_run(minutes_ago=60)
+		fail_unstarted_runs()
+
+		execute_run(stuck)
+
+		status, started = frappe.db.get_value("Agent Run", stuck, ["status", "started_at"])
+		self.assertEqual(status, "Failed")
+		self.assertIsNone(started)
+
 	def test_a_run_still_inside_the_window_is_left_alone(self):
 		waiting = self.queued_run(minutes_ago=5)
 
@@ -221,3 +234,23 @@ class TestRunsNoWorkerStarted(QueueCase):
 		hourly = frappe.get_hooks("scheduler_events", app_name="frappe_agents").get("hourly", [])
 
 		self.assertIn("frappe_agents.runner.queue.fail_unstarted_runs", hourly)
+
+
+class TestTheDefaultsOnAnUpgradedSite(QueueCase):
+	def test_empty_values_get_the_defaults(self):
+		self.use_setting("run_queue", "")
+		self.use_setting("run_timeout", 0)
+
+		set_defaults()
+
+		self.assertEqual(frappe.db.get_single_value(SETTINGS, "run_queue"), DEFAULT_QUEUE)
+		self.assertEqual(frappe.db.get_single_value(SETTINGS, "run_timeout"), DEFAULT_RUN_TIMEOUT)
+
+	def test_a_value_somebody_set_is_kept(self):
+		self.use_setting("run_queue", "long")
+		self.use_setting("run_timeout", 120)
+
+		set_defaults()
+
+		self.assertEqual(frappe.db.get_single_value(SETTINGS, "run_queue"), "long")
+		self.assertEqual(frappe.db.get_single_value(SETTINGS, "run_timeout"), 120)
