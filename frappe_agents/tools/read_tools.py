@@ -29,7 +29,7 @@ from frappe_agents.access.grants import (
 	compiled_grants,
 	current_agent,
 )
-from frappe_agents.context.slices import has_row_permission_hook, may_read, status_word
+from frappe_agents.context.slices import field_value, has_row_permission_hook, may_read, status_word
 from frappe_agents.documents import reader
 from frappe_agents.tools.base import (
 	CAPABILITY_READ,
@@ -98,7 +98,13 @@ def search_documents(payload: dict) -> dict:
 		filtered = len(rows) - len(permitted)
 		rows = permitted
 
+	# Authored text reaches the model wrapped, the same way a document read does.
+	# Only fields with a docfield qualify: the standard columns are not authored.
+	docfields = [df for df in (meta.get_field(fieldname) for fieldname in fields) if df]
 	for row in rows:
+		source = f"{doctype} {row.get('name')}"
+		for df in docfields:
+			row[df.fieldname] = field_value(df, row.get(df.fieldname), source)
 		# Restricted fields come back marked, never silently dropped: the model has
 		# to be able to tell "you cannot see this" from "this is empty".
 		for fieldname in restricted:
