@@ -116,6 +116,9 @@ def summarize_documents(payload: dict) -> dict:
 
 	suppressed = sum(_suppress_small(row, aggregates) for row in rows)
 	_suppress_small(total, aggregates)
+	# The database ordered small groups by the values just withheld. Their place
+	# in the list would still say how large those values were, so they go last.
+	rows.sort(key=lambda row: row["suppressed"])
 	if "docstatus" in group_by:
 		# docstatus is an integer nobody should have to decode.
 		for row in rows:
