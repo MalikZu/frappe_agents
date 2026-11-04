@@ -34,12 +34,24 @@ into the approver's request as an unhandled error.
 """
 
 import datetime
+from contextlib import contextmanager
 from typing import Any
 
 import frappe
 from frappe import _
+from frappe.desk.doctype.notification_log.notification_log import (
+	make_notification_logs,
+)
 from frappe.model.workflow import get_workflow_name
-from frappe.utils import add_to_date, cint, get_datetime, now_datetime, strip_html
+from frappe.utils import (
+	add_to_date,
+	cint,
+	escape_html,
+	get_datetime,
+	now_datetime,
+	strip_html,
+)
+from frappe.utils.user import get_users_with_role
 
 from frappe_agents.tools.base import runtime_enabled
 
@@ -61,6 +73,23 @@ DEFAULT_EXPIRY_DAYS = 7
 FAILURE_LIMIT = 500
 NOTE_LIMIT = 1000
 SAVEPOINT = "agent_action_apply"
+
+# A proposal is a question for a few people, not a broadcast. Past this many
+# eligible approvers the rest are not told; they still see it in the queue.
+MAX_NOTIFIED_APPROVERS = 20
+NOTIFICATION_TYPE = "Alert"
+NOTIFY_SAVEPOINT = "agent_action_notify"
+# What a notification is built from. Never the reason, never the target's fields.
+NOTICE_FIELDS = (
+	"name",
+	"status",
+	"run",
+	"agent",
+	"requested_by",
+	"action_type",
+	"target_doctype",
+	"target_name",
+)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -236,6 +265,7 @@ def record_proposal(
 	)
 	action.flags.ignore_permissions = True
 	action.insert(ignore_permissions=True)
+	_enqueue_approver_notice(action.name)
 	return action
 
 
@@ -297,6 +327,106 @@ def is_stale(action: Any) -> bool:
 	if not created:
 		return False
 	return created < _cutoff(_expiry_days())
+
+
+def notify_approvers(action_name: str) -> None:
+	"""Tell the approvers who could actually decide a new proposal that it is waiting.
+
+	A background job, queued after the proposal commits. It never raises: a
+	notification that fails is an Error Log, and the proposal stands either way.
+	"""
+	with _never_raises("frappe_agents: approver notification failed"):
+		action = frappe.db.get_value("Agent Action", action_name, list(NOTICE_FIELDS), as_dict=True)
+		if not action or action.status != STATUS_PENDING:
+			return
+		if not frappe.db.exists(action.target_doctype, action.target_name):
+			return
+		target = frappe.get_doc(action.target_doctype, action.target_name)
+
+		recipients = eligible_approvers(action, target)
+		if not recipients:
+			return
+		make_notification_logs(
+			frappe._dict(
+				{
+					"type": NOTIFICATION_TYPE,
+					"document_type": "Agent Action",
+					"document_name": action.name,
+					"from_user": action.requested_by,
+					"subject": _approver_subject(action),
+				}
+			),
+			recipients,
+		)
+
+
+def eligible_approvers(action: Any, target: Any) -> list[str]:
+	"""The approvers who may decide `action` and could carry it through.
+
+	The same three walls `approve_action` puts up, asked ahead of time: the
+	separation-of-duties block, read on the target, and the submit or cancel right
+	the apply will need. An approver who fails any of them would only be told
+	about a proposal they cannot open or cannot apply.
+	"""
+	right = "submit" if action.action_type == ACTION_SUBMIT else "cancel"
+	eligible = []
+	for user in sorted(get_users_with_role(APPROVER_ROLE)):
+		if separation_of_duties_block(action, user):
+			continue
+		if not frappe.has_permission(action.target_doctype, "read", doc=target, user=user):
+			continue
+		if not frappe.has_permission(action.target_doctype, right, doc=target, user=user):
+			continue
+		eligible.append(user)
+		if len(eligible) >= MAX_NOTIFIED_APPROVERS:
+			break
+	return eligible
+
+
+def _enqueue_approver_notice(action_name: str) -> None:
+	# After commit, so a proposal that rolls back tells nobody. Inline under test,
+	# where nothing ever commits.
+	try:
+		frappe.enqueue(
+			"frappe_agents.actions.notify_approvers",
+			queue="short",
+			enqueue_after_commit=True,
+			now=bool(frappe.flags.in_test),
+			action_name=action_name,
+		)
+	except Exception:
+		frappe.log_error(title="frappe_agents: approver notification failed")
+
+
+def _approver_subject(action: Any) -> str:
+	# Agent, verb and target identity only. The reason is model-written and the
+	# fields are the target's business: both stay on the Agent Action form, behind
+	# its own permission check, and out of the notification and its email.
+	template = (
+		_("{0} proposes to cancel {1} {2}. It needs an approver.")
+		if action.action_type == ACTION_CANCEL
+		else _("{0} proposes to submit {1} {2}. It needs an approver.")
+	)
+	return template.format(
+		escape_html(action.agent or _("An agent")),
+		escape_html(_(action.target_doctype)),
+		escape_html(action.target_name),
+	)
+
+
+@contextmanager
+def _never_raises(title: str):
+	"""Run a notification step; on any failure, undo its writes and log it.
+
+	The savepoint matters under test, where the notification inserts inline: a
+	half-written batch is rolled back rather than committed with the decision.
+	"""
+	frappe.db.savepoint(NOTIFY_SAVEPOINT)
+	try:
+		yield
+	except Exception:
+		frappe.db.rollback(save_point=NOTIFY_SAVEPOINT)
+		frappe.log_error(title=title)
 
 
 def _check_kill_switch() -> None:
