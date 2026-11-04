@@ -620,7 +620,8 @@ class RunEvents:
 			# cancelled, so this is what stops the next model call. Reading it on
 			# every event instead would also pre-empt tool calls, and a tool that
 			# never reaches `execute_tool` is a tool that never gets audited.
-			_check_kill_switch(self.cancellation)
+			# A person's own Stop is read at the same place, for the same reason.
+			_check_kill_switch(self.cancellation, self.run.name)
 
 		self.seq += 1
 		payload = _payload(event)
