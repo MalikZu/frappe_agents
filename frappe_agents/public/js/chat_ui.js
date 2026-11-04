@@ -630,6 +630,8 @@ frappe_agents.ChatUI = class ChatUI {
 	/** Forget everything drawn for a conversation. Called wherever the log is emptied. */
 	clear_state() {
 		this.pending = {};
+		// The turns already asked to stop, so a second press asks nothing twice.
+		this.stopping = new Set();
 		// Files uploaded for the next message. The upload itself is already on a
 		// record; this list is only what the message about to be sent will name.
 		this.uploads = [];
@@ -735,18 +737,28 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	bind() {
-		this.$send.on("click", () => this.send());
+		// One button: Send, or Stop while a turn is still going. See `render_send`.
+		this.$send.on("click", () => (this.running_turns().length ? this.stop() : this.send()));
 		this.$attach.on("click", () => this.attach());
 		this.$input.on("keydown", (e) => {
 			// An input method is still composing — Arabic, Chinese, Japanese,
 			// Korean. Enter there picks a word or ends the composition; it is not
 			// the person asking to send. 229 is what older browsers report instead.
 			if (e.isComposing || e.keyCode === 229) return;
+			if (e.key === "Escape") {
+				// An open popover takes Escape first; its own handler closes it.
+				if (this.pop_owner || !this.running_turns().length) return;
+				e.preventDefault();
+				this.stop();
+				return;
+			}
 			if (e.key !== "Enter" || e.shiftKey) return;
 			// On a phone, Enter is the new-line key — there is no Shift to hold.
 			// Only the button sends there.
 			if (coarse_pointer()) return;
 			e.preventDefault();
+			// The button is Stop while a turn runs. Enter keeps what was typed.
+			if (this.running_turns().length) return;
 			this.send();
 		});
 
@@ -1185,7 +1197,7 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	refresh_composer() {
-		this.$send.prop("disabled", !this.agent);
+		this.render_send();
 		this.$input.prop("disabled", !this.agent);
 		this.$attach
 			.prop("disabled", !this.agent)
@@ -1777,6 +1789,7 @@ frappe_agents.ChatUI = class ChatUI {
 		if (!this.$log) return;
 		const busy = Boolean(starting) || Object.keys(this.pending).length > 0;
 		this.$log.attr("aria-busy", busy ? "true" : "false");
+		this.render_send();
 	}
 
 	show_empty(text) {
@@ -1904,8 +1917,71 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	set_busy(busy) {
-		this.$send.prop("disabled", busy || !this.agent);
+		this.sending = Boolean(busy);
+		this.render_send();
 		if (!busy) this.$input.focus();
+	}
+
+	/** The turns on screen that have not landed yet. */
+	running_turns() {
+		return Object.keys(this.pending || {});
+	}
+
+	/**
+	 * Send, or Stop while a turn is still going.
+	 *
+	 * One button rather than two: the place a person looks to send is the place
+	 * they look to stop, and a new turn cannot start while one is running anyway.
+	 * A turn already asked to stop keeps the button disabled until it lands.
+	 */
+	render_send() {
+		if (!this.$send) return;
+		const running = this.running_turns();
+		if (running.length) {
+			this.$send
+				.text(__("Stop"))
+				.attr({ title: __("Stop this turn (Esc)"), "aria-label": __("Stop this turn") })
+				.removeClass("btn-primary")
+				.addClass("btn-default agent-chat-stop")
+				.prop("disabled", running.every((run) => this.stopping.has(run)));
+			return;
+		}
+		this.$send
+			.text(__("Send"))
+			.removeAttr("title")
+			.removeAttr("aria-label")
+			.removeClass("btn-default agent-chat-stop")
+			.addClass("btn-primary")
+			.prop("disabled", Boolean(this.sending) || !this.agent);
+	}
+
+	/**
+	 * Stop the turns still running here.
+	 *
+	 * The server only lets a person stop their own turns, and says so if this one
+	 * is not. The waiting line says the press was heard; the run's own
+	 * cancellation, live or read back on a reload, is what takes the line down.
+	 * Stopping a turn changes no document: whatever it drafted stays a draft.
+	 */
+	stop() {
+		this.running_turns()
+			.filter((run) => !this.stopping.has(run))
+			.forEach((run) => {
+				this.stopping.add(run);
+				const $pending = this.pending[run];
+				if ($pending) $pending.text(__("Stopping…"));
+				frappe.call({
+					method: "frappe_agents.api.stop_run",
+					args: { run: run },
+					error: (response) => {
+						this.stopping.delete(run);
+						this.add_failure(server_message(response, __("The turn was not stopped.")));
+						this.render_send();
+					},
+				});
+			});
+		this.announce(__("Stopping…"));
+		this.render_send();
 	}
 
 	on_run_update(data) {
@@ -2043,7 +2119,8 @@ frappe_agents.ChatUI = class ChatUI {
 			this.update_busy();
 			return;
 		}
-		if ($pending && status) {
+		// A turn asked to stop still says so when its Running news arrives late.
+		if ($pending && status && !this.stopping.has(data.run)) {
 			$pending.text(`${__(status)}…`);
 			this.announce(__(status));
 		}
@@ -2538,6 +2615,7 @@ frappe_agents.ChatUI = class ChatUI {
 
 	/** Take down the waiting line for a run that has landed, however it landed. */
 	clear_pending(run) {
+		this.stopping.delete(run);
 		const $pending = this.pending[run];
 		if ($pending) {
 			$pending.remove();
