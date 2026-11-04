@@ -59,6 +59,7 @@ from frappe_agents.tools.base import (
 	execute_tool,
 	log_interrupted_call,
 	runtime_enabled,
+	stop_requested,
 )
 from frappe_agents.tools.registry import get_tool_schemas
 
@@ -259,6 +260,13 @@ def execute_run(run_name: str) -> None:
 
 
 def _execute(run: Any) -> None:
+	# Only a Queued run is started. Anything else was stopped before a worker
+	# reached it, or was already picked up by another one, and neither is a run
+	# this job may call the model for.
+	if run.status != "Queued":
+		frappe.logger("frappe_agents").info(f"run {run.name} is {run.status}, not Queued: not started")
+		return
+
 	agent = frappe.get_doc("Agent", run.agent)
 
 	# The identity assertion. An agent never runs as Administrator or Guest, and
@@ -271,6 +279,10 @@ def _execute(run: Any) -> None:
 
 	if not runtime_enabled():
 		return _fail(run, KILL_SWITCH_MESSAGE, status="Cancelled")
+	# Stopped after this job read the row as Queued, but before it got this far.
+	stopped = stop_requested(run.name)
+	if stopped:
+		return _fail(run, stopped, status="Cancelled")
 
 	settings = frappe.get_cached_doc("Agent Settings")
 	if not cint(agent.enabled):
@@ -292,7 +304,7 @@ def _execute(run: Any) -> None:
 	_update(run, {"status": "Running", "started_at": now_datetime(), "model_profile": profile})
 	publish_event(run, "status", status="Running")
 
-	provider = ModelProfileProvider(profile)
+	provider = ModelProfileProvider(profile, run=run.name)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
 	max_turns = cint(agent.max_steps) or DEFAULT_MAX_STEPS
@@ -608,7 +620,8 @@ class RunEvents:
 			# cancelled, so this is what stops the next model call. Reading it on
 			# every event instead would also pre-empt tool calls, and a tool that
 			# never reaches `execute_tool` is a tool that never gets audited.
-			_check_kill_switch(self.cancellation)
+			# A person's own Stop is read at the same place, for the same reason.
+			_check_kill_switch(self.cancellation, self.run.name)
 
 		self.seq += 1
 		payload = _payload(event)
@@ -681,9 +694,26 @@ def _payload(event: Any) -> dict:
 	return payload
 
 
-def _check_kill_switch(cancellation: RunCancellation) -> None:
+def _check_kill_switch(cancellation: RunCancellation, run_name: str | None = None) -> None:
 	if not runtime_enabled():
 		cancellation.cancel(KILL_SWITCH_MESSAGE)
+		return
+	stopped = stop_requested(run_name)
+	if stopped:
+		cancellation.cancel(stopped)
+
+
+def cancel_queued_run(run_name: str, reason: str) -> str:
+	"""Cancel a run no worker has started yet. Returns the status it ends in.
+
+	A run a worker has already taken is left to that worker: it reads the stop
+	flag before its first model call and at every turn after it.
+	"""
+	run = frappe.get_doc("Agent Run", run_name)
+	if run.status != "Queued":
+		return run.status
+	_fail(run, reason, status="Cancelled")
+	return "Cancelled"
 
 
 def _tools(run: Any, cancellation: RunCancellation, agent: Any, outcomes: dict[str, bool]) -> list[AgentTool]:
