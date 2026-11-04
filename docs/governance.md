@@ -101,9 +101,16 @@ only leave through an approval, a rejection, or expiry.
 
 ### What the audit row holds back
 
-The row is durable and an auditor reads it, so sensitive values are replaced
-with `[redacted]` as it is written. What the call *did* stays legible — the
+A tool call is stored in two places: its **Agent Tool Call** row, and the
+**Event Log** on its **Agent Run**. The log keeps the arguments and the result a
+second time, so the model's turns can be read back in order. Both copies are
+durable and an auditor reads both, so in both, sensitive values are replaced
+with `[redacted]` as they are written. What the call *did* stays legible — the
 tool, the doctype, the field names, the outcome. Only values are removed.
+
+The event log applies the same rules as the row, and goes one step further: a
+value it holds back is also taken out of the model's later text in that run,
+because a model that read a value can repeat it.
 
 A value is treated as sensitive when it is a Password field on the doctype the
 call names, when an administrator marked it sensitive in **Agent Settings**, or
@@ -120,6 +127,20 @@ Two deliberate limits worth knowing:
 - Redaction happens at the write and nowhere else. **The tool's own return value
   goes to the model untouched.** This protects the audit trail, not the model
   call — what an agent may read is decided by permissions and rules, upstream.
+- **The live stream is not redacted.** While a turn runs, its events go to the
+  chat of the user who ran it, and to nobody else. That user already holds every
+  value in them. Only the stored copy is redacted.
+- A failed turn is replayed from its stored log, and a reopened conversation is
+  drawn from it. Both show `[redacted]` where a sensitive value was.
+
+#### Logs stored before redaction
+
+Older releases stored the event log without redaction. The migrate after you
+upgrade redacts every stored log again. It uses the **Sensitive Fields** list in
+Agent Settings as it is at that moment. A field you remove from the list before
+you upgrade is not redacted in old logs. A field you add after you upgrade is
+redacted only in logs that are written after you add it. Set the list before
+you upgrade.
 
 ## One switch turns it all off
 
