@@ -6,7 +6,7 @@ Agent Tool Call row — success, denial or error — before it returns.
 The row is durable and Agent Auditor reads it, so it is written with sensitive
 values held back. What a tool *did* stays fully legible — the tool, the doctype,
 the field names, the outcome — and only the values that must not become audit
-content are replaced with `[redacted]`. See `_sensitive_keys` for what counts.
+content are replaced with `[redacted]`. See `frappe_agents.redaction` for what counts.
 Redaction happens here, at the write, and nowhere else: the tool's own return
 value is handed to the model untouched.
 """
@@ -17,6 +17,15 @@ from typing import Any
 
 import frappe
 from frappe.utils import cint
+
+# REDACTED and masking_supported are re-exported: callers import them from here.
+from frappe_agents.redaction import (
+	REDACTED,
+	masking_supported,
+	redact,
+	scrub,
+	sensitive_keys,
+)
 
 CAPABILITY_READ = "Read"
 CAPABILITY_DRAFT = "Draft"
@@ -40,19 +49,6 @@ ARGS_JSON_LIMIT = 10_000
 RESULT_SUMMARY_LIMIT = 500
 DOCS_TOUCHED_LIMIT = 500
 ERROR_LIMIT = 500
-
-REDACTED = "[redacted]"
-
-# Key names redacted whatever doctype is in play — the answer for arguments that
-# name no doctype at all. Deliberately tiny and exact: a rule wide enough to
-# catch every secret by its name would redact half the audit trail, and a row an
-# auditor cannot read is its own kind of failure.
-FALLBACK_SENSITIVE_KEYS = frozenset({"password", "api_key", "token", "secret"})
-
-# Below this length a redacted value is not worth removing from prose. "12" or
-# "abc" appears inside ordinary words, and replacing every occurrence would
-# corrupt the sentence that tells an auditor what happened.
-SCRUB_MIN_LENGTH = 4
 
 # What each autonomy level may do. Submit is never granted to an agent:
 # agents draft, humans submit.
@@ -364,15 +360,15 @@ def _log_call(
 	the arguments no longer carry.
 	"""
 	try:
-		keys = _sensitive_keys(args)
-		safe_args, secrets = _redact(args, keys)
+		keys = sensitive_keys(args)
+		safe_args, secrets = redact(args, keys)
 
 		summary = None
 		if outcome == OUTCOME_SUCCESS:
 			if result_summary:
 				summary = result_summary
 			else:
-				safe_result, result_secrets = _redact(result, keys)
+				safe_result, result_secrets = redact(result, keys)
 				secrets |= result_secrets
 				summary = _summarise(safe_result)
 
@@ -383,10 +379,10 @@ def _log_call(
 				"tool": tool_name or "unknown",
 				"args_json": _truncate(_as_json(safe_args), ARGS_JSON_LIMIT),
 				"outcome": outcome,
-				"result_summary": _truncate(_scrub(summary, secrets), RESULT_SUMMARY_LIMIT),
+				"result_summary": _truncate(scrub(summary, secrets), RESULT_SUMMARY_LIMIT),
 				"docs_touched": _truncate(docs_touched, DOCS_TOUCHED_LIMIT),
 				"duration_ms": duration_ms,
-				"error": _truncate(_scrub(error, secrets), ERROR_LIMIT),
+				"error": _truncate(scrub(error, secrets), ERROR_LIMIT),
 			}
 		)
 		call.flags.ignore_permissions = True
@@ -395,129 +391,6 @@ def _log_call(
 		frappe.logger("frappe_agents").error(
 			f"could not log tool call {tool_name} for run {run_name}", exc_info=True
 		)
-
-
-def _sensitive_keys(payload: Any) -> set[str]:
-	"""Argument keys whose values must not become audit content, lowercased.
-
-	Three sources, in the order they are trusted:
-
-	1. **Password fields** on the doctype the call names. A fieldtype the
-	   framework itself refuses to hand back in a query is not something to
-	   copy into an audit row.
-	2. **Masked and administrator-marked fields** on that same doctype — the
-	   extraction gate's own configuration, read through `sensitive_fieldnames`
-	   so there is one registry of what an administrator called sensitive and
-	   not two that can disagree.
-	3. **A fallback by name** for arguments tied to no doctype at all.
-
-	Child tables count: a payment detail hidden in a line item is the same
-	value with more steps, and the keys are matched at any depth.
-	"""
-	keys = set(FALLBACK_SENSITIVE_KEYS)
-	doctype = payload.get("doctype") if isinstance(payload, dict) else None
-	if not isinstance(doctype, str) or not doctype.strip():
-		return keys
-
-	try:
-		keys |= _doctype_sensitive_keys(doctype.strip())
-	except frappe.DoesNotExistError:
-		# The call named a doctype that does not exist — the tool is about to say
-		# so. The fallback keys still apply.
-		pass
-	except Exception:
-		frappe.logger("frappe_agents").warning(
-			f"could not resolve sensitive fields on {doctype}", exc_info=True
-		)
-	return keys
-
-
-def _doctype_sensitive_keys(doctype: str) -> set[str]:
-	from frappe.model import table_fields
-
-	from frappe_agents.extraction.gate import sensitive_fieldnames
-
-	meta = frappe.get_meta(doctype)
-	metas = [meta]
-	metas += [
-		frappe.get_meta(df.options) for df in meta.fields if df.fieldtype in table_fields and df.options
-	]
-
-	keys: set[str] = set()
-	for one in metas:
-		keys |= {df.fieldname for df in one.fields if df.fieldtype == "Password"}
-		keys |= _masked_fieldnames(one)
-		keys |= sensitive_fieldnames(one.name)
-	return {key.lower() for key in keys if key}
-
-
-def masking_supported() -> bool:
-	"""Whether this framework masks fields per user.
-
-	frappe_agents patch (version-15): `Meta.get_masked_fields` arrived in v16.
-	Where it is missing, a field an administrator masked is not automatically
-	held out of an audit row, and the extraction gate has one fewer source for
-	what to withhold. Nothing crashes — the protection is simply not there, and
-	`docs/admin.md` says so. Agent Settings' own sensitive-field list works on
-	both and is what to lean on.
-	"""
-	from frappe.model.meta import Meta
-
-	return hasattr(Meta, "get_masked_fields")
-
-
-def _masked_fieldnames(meta: Any) -> set[str]:
-	try:
-		return {df.fieldname for df in meta.get_masked_fields()}
-	except AttributeError:
-		return set()
-
-
-def _redact(value: Any, keys: set[str]) -> tuple[Any, set[str]]:
-	"""A copy with sensitive values replaced, and the raw values that were removed.
-
-	Recursive over dicts and lists, so a draft's child rows and a filter object
-	are covered by the same pass. Key names survive: what the call touched is the
-	part an auditor needs.
-	"""
-	secrets: set[str] = set()
-	return _walk(value, keys, secrets), secrets
-
-
-def _walk(value: Any, keys: set[str], secrets: set[str]) -> Any:
-	if isinstance(value, dict):
-		clean = {}
-		for key, item in value.items():
-			if isinstance(key, str) and key.lower() in keys:
-				_collect(item, secrets)
-				clean[key] = REDACTED
-				continue
-			clean[key] = _walk(item, keys, secrets)
-		return clean
-	if isinstance(value, (list, tuple)):
-		return [_walk(item, keys, secrets) for item in value]
-	return value
-
-
-def _collect(value: Any, secrets: set[str]) -> None:
-	"""Every string under a redacted key, so prose can be scrubbed of it later."""
-	if isinstance(value, str):
-		secrets.add(value)
-	elif isinstance(value, dict):
-		for item in value.values():
-			_collect(item, secrets)
-	elif isinstance(value, (list, tuple)):
-		for item in value:
-			_collect(item, secrets)
-
-
-def _scrub(text: str | None, secrets: set[str]) -> str | None:
-	if not text or not secrets:
-		return text
-	for secret in secrets:
-		if len(secret) >= SCRUB_MIN_LENGTH and secret in text:
-			text = text.replace(secret, REDACTED)
-	return text
 
 
 def _summarise(result: Any) -> str:
