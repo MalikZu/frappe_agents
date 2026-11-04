@@ -54,6 +54,9 @@ MAX_FOUND_DOCTYPES = 50
 # A report column with no fieldtype, or typed Data, can still carry a paragraph a
 # person wrote. Past this length a string cell is treated as authored text.
 UNTYPED_WRAP_CHARS = 120
+# What a malformed report column raises while it is parsed. Named, so neither
+# branch's formatter rewrites the tuple.
+REPORT_COLUMN_ERRORS = (AttributeError, KeyError, TypeError, ValueError)
 RESTRICTED = "<restricted>"
 
 STANDARD_FIELDS = (
@@ -237,9 +240,7 @@ def _wrap_report_rows(report_name: str, columns: list, rows: list) -> list:
 	go on (no column, no fieldtype, or Data) and the string is long. Numbers,
 	dates and short labels are left alone.
 	"""
-	from frappe.desk.query_report import get_column_as_dict
-
-	parsed = [get_column_as_dict(column) for column in columns or []]
+	parsed = [_report_column(column) for column in columns or []]
 	by_fieldname = {column.get("fieldname"): column for column in parsed if column.get("fieldname")}
 
 	def cell(column: dict, value: Any) -> Any:
@@ -249,7 +250,7 @@ def _wrap_report_rows(report_name: str, columns: list, rows: list) -> list:
 		if not is_untrusted_fieldtype(fieldtype):
 			if fieldtype not in (None, "", "Data") or len(value) <= UNTYPED_WRAP_CHARS:
 				return value
-		label = column.get("fieldname") or column.get("label")
+		label = column.get("fieldname") or column.get("label") or ""
 		text = value if len(value) <= MAX_TEXT_CHARS else value[: MAX_TEXT_CHARS - 3] + "..."
 		return wrap(text, f"Report {report_name} {label}")
 
@@ -265,6 +266,20 @@ def _wrap_report_rows(report_name: str, columns: list, rows: list) -> list:
 			]
 		wrapped.append(row)
 	return wrapped
+
+
+def _report_column(column: Any) -> dict:
+	"""One report column as a dict, the way the report view reads it.
+
+	A column the framework cannot parse still has a position, so it comes back
+	empty rather than failing the report: its cells fall under the length rule.
+	"""
+	from frappe.desk.query_report import get_column_as_dict
+
+	try:
+		return get_column_as_dict(column)
+	except REPORT_COLUMN_ERRORS:
+		return {}
 
 
 def read_document(payload: dict) -> dict:
