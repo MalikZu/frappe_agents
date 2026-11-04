@@ -91,8 +91,11 @@ class ModelProfileProvider:
 	the runner can read once the loop has ended.
 	"""
 
-	def __init__(self, profile: Any) -> None:
+	def __init__(self, profile: Any, run: str | None = None) -> None:
 		self.profile = profile
+		# The run this provider calls the model for, so a retry backoff can hear
+		# that person press Stop. None outside a run.
+		self.run = run
 		self.tokens_in = 0
 		self.tokens_out = 0
 
@@ -111,7 +114,9 @@ class ModelProfileProvider:
 
 		# Resolved here, on this thread: a disabled provider or a missing key is
 		# a frappe read, and it fails now rather than on a worker thread.
-		chunks = call_model_stream(self.profile, wire_messages(system, messages), tool_schemas(tools))
+		chunks = call_model_stream(
+			self.profile, wire_messages(system, messages), tool_schemas(tools), run=self.run
+		)
 
 		answer = _Assembly(model)
 		counted_in = 0

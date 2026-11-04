@@ -334,7 +334,7 @@ def _execute(run: Any) -> None:
 	publish_event(run, "status", status="Running")
 	_note_proposal_updates(run)
 
-	provider = ModelProfileProvider(profile)
+	provider = ModelProfileProvider(profile, run=run.name)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
 	if run.get("trigger"):
