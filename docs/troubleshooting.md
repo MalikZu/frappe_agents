@@ -118,8 +118,18 @@ or the agent's owner. Separation of duties needs someone else.
 **It asks you to read the document again.** It changed after the agent proposed
 it. That check is deliberate — approving means approving the version you saw.
 
-**A workflow doctype is refused.** Use the workflow's own transitions. A
-server-side submit would jump every approval step in it.
+**A workflow doctype is refused.** `propose_submit` and `propose_cancel` refuse
+it, because a server-side submit would jump every approval step in the workflow.
+The agent uses `propose_transition` with one of the workflow's actions instead.
+See [Workflow actions](approvals.md#workflow-actions).
+
+**A workflow action is refused.** The workflow does not offer that action to the
+user the agent runs as, from the document's current state. The refusal lists
+the actions that are open.
+
+**An approved workflow action failed.** The workflow decided as you: you do not
+hold the transition's role, its condition no longer holds, or it forbids
+approving a document you own. The reason is on the row.
 
 **Nothing can be approved.** The kill switch is off. Rejecting still works.
 

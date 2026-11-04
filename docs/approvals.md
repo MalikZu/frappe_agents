@@ -1,8 +1,8 @@
 # Approvals
 
 An agent can build a document. It cannot commit one. When an agent decides
-something should be submitted or cancelled, it writes a proposal and stops, and
-a person decides.
+something should be submitted or cancelled, or that a workflow should move on,
+it writes a proposal and stops, and a person decides.
 
 ```mermaid
 flowchart TD
@@ -12,7 +12,7 @@ flowchart TD
     C -- "nobody, for 7 days" --> X["Expired"]
     C -- approves --> D{"Read permission · timestamp lock<br/>workflow · document state · kill switch"}
     D -- "a check fails" --> F["Failed<br/>reason on the row"]
-    D -- "all pass" --> G["Submit or cancel runs<br/>as the approver"]
+    D -- "all pass" --> G["Submit, cancel or workflow action<br/>runs as the approver"]
     G -- "the document refuses it" --> F
     G -- succeeds --> S["Applied"]
 ```
@@ -20,7 +20,8 @@ flowchart TD
 ## What a proposal is
 
 A proposal is an **Agent Action** row: a request, not an act. It names the
-document, whether it wants a submit or a cancel, and the agent's reason. It also
+document, what it wants — a submit, a cancel, or a workflow action — and the
+agent's reason. It also
 stores the document's timestamp at the moment it was proposed — that snapshot
 does more work than it looks like, below.
 
@@ -45,8 +46,8 @@ are blocked, the screen says which of the three you are.
 
 ## What you are agreeing to
 
-Open the document and read it. The proposal is a request to submit or cancel
-*that record as it now stands*, and approving is you saying you read it.
+Open the document and read it. The proposal is a request to act on *that record
+as it now stands*, and approving is you saying you read it.
 
 The app enforces that literally. Approving sends back the timestamp of the
 version you looked at, and a document that changed underneath you refuses the
@@ -72,16 +73,47 @@ with the reason on the row, and nothing is half-applied.
 
 A few things are refused outright:
 
-- **A document governed by an active Workflow.** Frappe does not stop a
-  server-side submit on a workflow doctype — it would teleport the document past
-  every approval step in the workflow. So proposals refuse those doctypes, and
-  the refusal is checked again immediately before applying, in case the workflow
-  was switched on in between. Use the workflow's own transitions.
+- **A submit or cancel on a document governed by an active Workflow.** Frappe
+  does not stop a server-side submit on a workflow doctype — it would teleport
+  the document past every approval step in the workflow. So submit and cancel
+  proposals refuse those doctypes, and the refusal is checked again immediately
+  before applying, in case the workflow was switched on in between. The agent
+  proposes a workflow action instead, below.
 - **A document no longer in the right state** — a submit proposal for something
   already submitted, a cancel for something that is not.
 - **A document that no longer exists.**
 - **Anything, while the kill switch is off.** A site that has stopped trusting
   the runtime should not be applying its output by hand either.
+
+## Workflow actions
+
+Leave Applications, Expense Claims, Purchase Orders and many custom doctypes
+move through a **Workflow**: Draft, then Pending Approval, then Approved. On
+those documents the agent proposes one of the workflow's own actions, such as
+**Approve** or **Send for Review**, with the `propose_transition` tool.
+
+The agent can only propose an action the workflow offers *the user it runs as*,
+from the document's current state, with the transition's condition met. It is
+the same list that user sees under the **Actions** button. If the agent names
+another action, it is refused and told which ones are open.
+
+The approver applies the action. Frappe's own workflow engine runs it in the
+approver's session, so the workflow checks the approver, not the agent:
+
+- the transition must be open to one of **the approver's roles**;
+- the transition's **condition** must still hold;
+- if the transition does not allow self-approval, the approver must not be the
+  document's owner;
+- the approver needs the document permission the next state needs — submit, if
+  the action submits it.
+
+Every check above this section still runs first: separation of duties, read
+permission, the timestamp lock and the kill switch. If the document moved to
+another state since the agent proposed, the lock refuses the approval. Read it
+again, and approve again only if the action still makes sense — the workflow
+fails it if that step is no longer open from the new state.
+
+The agent never applies a workflow action itself. No tool can.
 
 ## Rejecting
 
@@ -105,7 +137,7 @@ free to propose the same thing again.
 | Status | Means |
 |---|---|
 | **Pending** | Waiting for a person |
-| **Applied** | Approved, and the submit or cancel went through |
+| **Applied** | Approved, and the submit, cancel or workflow action went through |
 | **Failed** | Approved, but the document refused it — reason on the row |
 | **Rejected** | A person said no, with a note |
 | **Expired** | Nobody decided in time |
