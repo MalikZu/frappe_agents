@@ -35,6 +35,11 @@ SETTINGS = "Agent Settings"
 KILL_SWITCH_FIELD = "global_enabled"
 # Where the switch is published so that a job already running can see it move.
 KILL_SWITCH_KEY = "agent_runtime_enabled"
+# Where one person's Stop for one run is published, for the same reason: the job
+# running it holds one transaction and cannot see a later commit. The value is the
+# reason the run records. It expires, because a run outlives no flag that long.
+RUN_STOP_KEY = "frappe_agents:cancel:{0}"
+RUN_STOP_SECONDS = 60 * 60
 
 ARGS_JSON_LIMIT = 10_000
 RESULT_SUMMARY_LIMIT = 500
@@ -69,6 +74,10 @@ class ToolDenied(Exception):
 
 class KillSwitchActive(ToolDenied):
 	"""Global kill switch is off. Aborts the run — never handed back to the model."""
+
+
+class RunStopped(KillSwitchActive):
+	"""The person this run acts for pressed Stop. Aborts the run the same way."""
 
 
 def require_grant(target: str, verb: str, target_type: str = "DocType") -> None:
@@ -276,7 +285,38 @@ def _published_switch() -> bool | None:
 	return None if value is None else bool(cint(value))
 
 
-def _read_published() -> Any:
+def request_stop(run_name: str, reason: str) -> None:
+	"""Publish one person's Stop for one run. `stop_run` calls this.
+
+	Raises when the cache cannot be written: a Stop that silently went nowhere is
+	a button that lies to the person who pressed it.
+	"""
+	frappe.cache.set_value(RUN_STOP_KEY.format(run_name), reason, expires_in_sec=RUN_STOP_SECONDS)
+
+
+def stop_requested(run_name: str | None) -> str | None:
+	"""The reason a Stop was published for this run with, or None.
+
+	Read past every process-local memo, exactly like the kill switch, for the
+	same reason: the job asking is the one that cannot see later commits.
+	"""
+	if not run_name:
+		return None
+	try:
+		value = _read_published(RUN_STOP_KEY.format(run_name))
+	except Exception:
+		frappe.logger("frappe_agents").warning("could not read a run's stop flag", exc_info=True)
+		return None
+	return str(value) if value else None
+
+
+def _check_run_stop(run_name: str) -> None:
+	reason = stop_requested(run_name)
+	if reason:
+		raise RunStopped(reason)
+
+
+def _read_published(key: str = KILL_SWITCH_KEY) -> Any:
 	"""Read the published switch past every process-local memo.
 
 	The whole point of publishing is that a job already running sees the switch
@@ -290,9 +330,9 @@ def _read_published() -> Any:
 	"""
 	getter = frappe.cache.get_value
 	if _accepts(getter, "use_local_cache"):
-		return getter(KILL_SWITCH_KEY, use_local_cache=False)
-	frappe.local.cache.pop(frappe.cache.make_key(KILL_SWITCH_KEY), None)
-	return getter(KILL_SWITCH_KEY, expires=True)
+		return getter(key, use_local_cache=False)
+	frappe.local.cache.pop(frappe.cache.make_key(key), None)
+	return getter(key, expires=True)
 
 
 # Named rather than written inline: `ruff format` on a py314 target rewrites an

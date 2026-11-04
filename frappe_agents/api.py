@@ -32,7 +32,7 @@ from frappe_agents.extraction.pipeline import (
 )
 from frappe_agents.extraction.schema import build_extraction_schema
 from frappe_agents.model_profiles import check_profile, profile_choices
-from frappe_agents.tools.base import AUTONOMY_CAPABILITIES, runtime_enabled
+from frappe_agents.tools.base import AUTONOMY_CAPABILITIES, request_stop, runtime_enabled
 from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
 from frappe_agents.tools.registry import agent_tool_order
 
@@ -42,6 +42,9 @@ DESCRIPTION_CHARS = 200
 
 DEFAULT_PENDING_LIMIT = 50
 MAX_PENDING_LIMIT = 200
+
+# The turns a person can still stop. A finished one has nothing left to stop.
+STOPPABLE_STATUSES = ("Queued", "Running")
 
 AGENT_USER = "Agent User"
 MANAGER_ROLE = "Agent Manager"
@@ -352,6 +355,41 @@ def start_run(
 	)
 
 	return {"run": run.name, "conversation": conversation_doc.name}
+
+
+@frappe.whitelist(methods=["POST"])
+def stop_run(run: str) -> dict:
+	"""Stop one of your own turns. Returns the run and the status it is now in.
+
+	Only the person a run acts for may stop it — not its agent's owner, not an
+	Agent Manager. The site-wide switch is how a manager stops runs; this is how
+	a person stops their own. A run that is not yours is refused the same way as
+	one that does not exist, so the answer says nothing about other people's runs.
+
+	A Queued run has not started, so it is cancelled here and now, and the job
+	that picks it up finds nothing to do. A Running run is told through the cache,
+	because the job running it holds one transaction and cannot see this commit:
+	it stops at its next turn, and a tool it already asked for is refused and
+	audited rather than run.
+
+	Stopping a turn is not cancelling a document. Nothing the run drafted changes.
+	"""
+	values = frappe.db.get_value("Agent Run", run, ["name", "effective_user", "status"], as_dict=True)
+	if not values or values.effective_user != frappe.session.user:
+		frappe.throw(_("You can only stop your own turns."), frappe.PermissionError)
+	if values.status not in STOPPABLE_STATUSES:
+		frappe.throw(_("This turn has already finished."))
+
+	reason = _("Stopped by you.")
+	# Published first, so a job that picked the run up a moment ago still sees it.
+	request_stop(values.name, reason)
+
+	status = values.status
+	if status == "Queued":
+		from frappe_agents.runner.run import cancel_queued_run
+
+		status = cancel_queued_run(values.name, reason)
+	return {"run": values.name, "status": status}
 
 
 @frappe.whitelist()
