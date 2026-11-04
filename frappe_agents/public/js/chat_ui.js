@@ -526,6 +526,15 @@ function server_message(response, fallback) {
 	return lines.filter(Boolean).join(" ") || fallback;
 }
 
+/**
+ * Whether the main pointer is a finger. A phone has no Shift to hold for a new
+ * line, so there Enter is the new-line key and only the button sends. Asked at
+ * each key press, because a tablet can gain a keyboard and lose it again.
+ */
+function coarse_pointer() {
+	return Boolean(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+}
+
 /** The paperclip on the attach button. */
 function clip_icon() {
 	return $(
@@ -729,10 +738,16 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$send.on("click", () => this.send());
 		this.$attach.on("click", () => this.attach());
 		this.$input.on("keydown", (e) => {
-			if (e.key === "Enter" && !e.shiftKey) {
-				e.preventDefault();
-				this.send();
-			}
+			// An input method is still composing — Arabic, Chinese, Japanese,
+			// Korean. Enter there picks a word or ends the composition; it is not
+			// the person asking to send. 229 is what older browsers report instead.
+			if (e.isComposing || e.keyCode === 229) return;
+			if (e.key !== "Enter" || e.shiftKey) return;
+			// On a phone, Enter is the new-line key — there is no Shift to hold.
+			// Only the button sends there.
+			if (coarse_pointer()) return;
+			e.preventDefault();
+			this.send();
 		});
 
 		// A chip popover closes on anything outside it — a chip with a menu of its
