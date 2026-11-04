@@ -283,6 +283,11 @@ function render_target(frm) {
 		.text(`${__(frm.doc.target_doctype)}: ${frm.doc.target_name}`)
 		.appendTo($head);
 	$("<span class='text-muted'></span>").text(docstatus_label(doc.docstatus)).appendTo($head);
+	if (doc.workflow_state) {
+		$("<span class='text-muted'></span>")
+			.text(__("Workflow state: {0}", [__(doc.workflow_state)]))
+			.appendTo($head);
+	}
 	if (doc.modified) {
 		$("<span class='text-muted'></span>")
 			.text(__("Last edited {0} by {1}", [frappe.datetime.str_to_user(doc.modified), doc.modified_by || ""]))
@@ -301,7 +306,16 @@ function render_target(frm) {
 			.appendTo($body);
 	}
 
-	if (frm.doc.action_type === "Cancel") {
+	if (frm.doc.action_type === "Workflow Transition") {
+		$("<div class='agent-action-note'></div>")
+			.text(
+				__(
+					"Approving applies the workflow action {0} under your own roles. The Workflow decides the next state, and may submit or cancel the document.",
+					[frm.doc.workflow_action]
+				)
+			)
+			.appendTo($body);
+	} else if (frm.doc.action_type === "Cancel") {
 		$("<div class='agent-action-note'></div>")
 			.text(__("Approving cancels this submitted document. Its current values are below."))
 			.appendTo($body);
@@ -378,8 +392,13 @@ function may_decide(frm) {
 	return true;
 }
 
+function action_verb(doc) {
+	if (doc.action_type === "Workflow Transition") return __(doc.workflow_action || "");
+	return doc.action_type === "Cancel" ? __("Cancel") : __("Submit");
+}
+
 function decision_summary(frm) {
-	const verb = frm.doc.action_type === "Cancel" ? __("Cancel") : __("Submit");
+	const verb = action_verb(frm.doc);
 	return __("{0} {1} {2} as {3}.", [
 		verb,
 		__(frm.doc.target_doctype),
