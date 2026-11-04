@@ -18,6 +18,12 @@ from here: an approval record links back to the run that asked for it.
 
 ## The composer
 
+On a desktop keyboard, Enter sends the message and Shift+Enter starts a new
+line. Enter never sends while an input method is still composing a word — the
+Arabic, Chinese, Japanese and Korean keyboards — so a half-written word is not
+sent. On a phone or tablet, Enter starts a new line, and only the **Send**
+button sends.
+
 The paperclip attaches a file. It is uploaded privately and kept on the
 conversation — or on the document, when the chat was opened from a form — and
 the message you send names it, so the agent knows what it was handed. See
@@ -64,6 +70,30 @@ open and running while it thinks, then folded into one line — **Thought for 4s
 — the moment it stops. Click the line to read it. The thinking is not the
 answer, and it is never what the conversation is stored with.
 
+## Stopping a turn
+
+The **Send** button turns into **Stop** while the agent is working on your
+message. Use it when the agent is going the wrong way. While it shows **Stop**,
+Enter does not send; what you type stays in the box for the next turn.
+
+1. Click **Stop**, or press Escape in the message box.
+
+The waiting line says **Stopping…**, and the turn ends with **Stopped by you.**
+
+A turn that has not started yet stops at once. A turn that is running stops
+before its next call to the model; an answer it is already writing is still
+finished. A tool the agent already asked for is refused
+and written to the audit trail, not run. What the agent did before you stopped
+it stays in the log and in the audit trail.
+
+Stopping a turn is not cancelling a document. A draft the agent made before you
+stopped it stays a draft. You can only stop your own turns. To stop every run on
+the site, an Agent Manager uses the switch in Agent Settings (see
+[the kill switch](admin.md#the-kill-switch)).
+
+A stopped turn is left out of what the agent reads on the next turn, so the
+work you stopped does not come back.
+
 ## When something does not go through
 
 A message that could not be sent says so in the log, in the server's own words,
@@ -71,6 +101,15 @@ with **Try again** beside it. What you typed and the files you attached go back
 into the composer, so nothing is retyped, and one failure offers one retry —
 you cannot end up with the same message running twice. A file that could not be
 attached and a model the server would not switch to are said the same way.
+
+A turn that started and then failed — the provider was busy, or did not answer —
+shows the reason in red, with **Retry** beside it.
+
+1. Click **Retry**.
+
+Retry sends the same message again, with the same files, as a new turn. It works
+once: the button turns off when you click it, and when you send anything newer.
+Only the newest turn offers Retry. A turn you stopped does not offer it.
 
 ## Coming back to a conversation
 
