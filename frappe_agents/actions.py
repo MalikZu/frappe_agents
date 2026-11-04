@@ -40,6 +40,7 @@ from typing import Any
 import frappe
 from frappe import _
 from frappe.desk.doctype.notification_log.notification_log import (
+	enqueue_create_notification,
 	make_notification_logs,
 )
 from frappe.model.workflow import get_workflow_name
@@ -48,6 +49,7 @@ from frappe.utils import (
 	cint,
 	escape_html,
 	get_datetime,
+	get_fullname,
 	now_datetime,
 	strip_html,
 )
@@ -179,6 +181,7 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 			"failure": None,
 		},
 	)
+	_notify_requester(doc_action, STATUS_APPLIED)
 
 	return {
 		"action": doc_action.name,
@@ -215,6 +218,7 @@ def reject_action(action: str, note: str) -> dict:
 			"decision_note": note,
 		},
 	)
+	_notify_requester(doc_action, STATUS_REJECTED, note)
 
 	return {"action": doc_action.name, "status": STATUS_REJECTED}
 
@@ -398,6 +402,49 @@ def _enqueue_approver_notice(action_name: str) -> None:
 		frappe.log_error(title="frappe_agents: approver notification failed")
 
 
+def _notify_requester(action: Any, status: str, note: str | None = None) -> None:
+	"""Tell whoever asked for a proposal how it ended. Never raises.
+
+	The requester and the run's effective user, when that is someone else. The
+	decider is left out: they know. Called after the status write, so a failure
+	here is logged and the decision stands.
+	"""
+	with _never_raises("frappe_agents: requester notification failed"):
+		decider = None if status == STATUS_EXPIRED else frappe.session.user
+		recipients = _requester_recipients(action, decider)
+		if not recipients:
+			return
+
+		notice = {
+			"type": NOTIFICATION_TYPE,
+			"document_type": "Agent Action",
+			"document_name": action.name,
+			"subject": _requester_subject(action, status, decider),
+		}
+		if decider:
+			notice["from_user"] = decider
+		if note:
+			notice["email_content"] = escape_html(note)
+		enqueue_create_notification(recipients, notice)
+
+		for user in recipients:
+			frappe.publish_realtime(
+				"agent_action_decided",
+				{"action": action.name, "status": status, "run": action.run},
+				user=user,
+				after_commit=True,
+			)
+
+
+def _requester_recipients(action: Any, decider: str | None) -> list[str]:
+	run_user = frappe.db.get_value("Agent Run", action.run, "effective_user") if action.run else None
+	recipients = []
+	for user in (action.requested_by, run_user):
+		if user and user != decider and user not in recipients:
+			recipients.append(user)
+	return recipients
+
+
 def _approver_subject(action: Any) -> str:
 	# Agent, verb and target identity only. The reason is model-written and the
 	# fields are the target's business: both stay on the Agent Action form, behind
@@ -409,6 +456,37 @@ def _approver_subject(action: Any) -> str:
 	)
 	return template.format(
 		escape_html(action.agent or _("An agent")),
+		escape_html(_(action.target_doctype)),
+		escape_html(action.target_name),
+	)
+
+
+def _requester_subject(action: Any, status: str, decider: str | None) -> str:
+	cancel = action.action_type == ACTION_CANCEL
+	templates = {
+		STATUS_APPLIED: (
+			_("{0} approved the proposal to cancel {1} {2}.")
+			if cancel
+			else _("{0} approved the proposal to submit {1} {2}.")
+		),
+		STATUS_REJECTED: (
+			_("{0} rejected the proposal to cancel {1} {2}.")
+			if cancel
+			else _("{0} rejected the proposal to submit {1} {2}.")
+		),
+		STATUS_FAILED: (
+			_("The proposal to cancel {1} {2} failed when {0} approved it.")
+			if cancel
+			else _("The proposal to submit {1} {2} failed when {0} approved it.")
+		),
+		STATUS_EXPIRED: (
+			_("The proposal to cancel {1} {2} expired with no decision.")
+			if cancel
+			else _("The proposal to submit {1} {2} expired with no decision.")
+		),
+	}
+	return templates[status].format(
+		escape_html(get_fullname(decider) if decider else ""),
 		escape_html(_(action.target_doctype)),
 		escape_html(action.target_name),
 	)
@@ -541,6 +619,7 @@ def _record_failure(action: Any, note: str | None, edited: int, failure: str) ->
 			"failure": failure[:FAILURE_LIMIT],
 		},
 	)
+	_notify_requester(action, STATUS_FAILED)
 	return {
 		"action": action.name,
 		"status": STATUS_FAILED,
