@@ -53,6 +53,7 @@ from frappe_agents.tools.registry import get_tool_schemas
 
 READ_FAMILY = {
 	"search_documents",
+	"summarize_documents",
 	"get_doctype_meta",
 	"get_document_context",
 	"get_document_slice",
