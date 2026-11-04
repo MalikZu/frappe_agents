@@ -53,6 +53,7 @@ STATUS_EXPIRED = "Expired"
 
 ACTION_SUBMIT = "Submit"
 ACTION_CANCEL = "Cancel"
+ACTION_TRANSITION = "Workflow Transition"
 
 DRAFT = 0
 SUBMITTED = 1
@@ -190,17 +191,23 @@ def reject_action(action: str, note: str) -> dict:
 	return {"action": doc_action.name, "status": STATUS_REJECTED}
 
 
-def pending_action_for(target_doctype: str, target_name: str, action_type: str) -> str | None:
-	"""The Pending proposal already covering this target and action, if there is one."""
-	return frappe.db.exists(
-		"Agent Action",
-		{
-			"target_doctype": target_doctype,
-			"target_name": target_name,
-			"action_type": action_type,
-			"status": STATUS_PENDING,
-		},
-	)
+def pending_action_for(
+	target_doctype: str, target_name: str, action_type: str, workflow_action: str | None = None
+) -> str | None:
+	"""The Pending proposal already covering this target and action, if there is one.
+
+	For a workflow transition the action is the workflow's own verb: a pending
+	Approve does not block a Reject on the same document.
+	"""
+	filters = {
+		"target_doctype": target_doctype,
+		"target_name": target_name,
+		"action_type": action_type,
+		"status": STATUS_PENDING,
+	}
+	if workflow_action:
+		filters["workflow_action"] = workflow_action
+	return frappe.db.exists("Agent Action", filters)
 
 
 def record_proposal(
@@ -210,6 +217,7 @@ def record_proposal(
 	target_name: str,
 	reason: str,
 	proposal_modified: Any,
+	workflow_action: str | None = None,
 ) -> Any:
 	"""Insert one Pending Agent Action for a proposal the tools have already checked.
 
@@ -225,6 +233,7 @@ def record_proposal(
 			"agent": run.agent,
 			"requested_by": frappe.session.user,
 			"action_type": action_type,
+			"workflow_action": workflow_action,
 			"target_doctype": target_doctype,
 			"target_name": target_name,
 			"reason": reason,
