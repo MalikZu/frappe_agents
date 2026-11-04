@@ -1,6 +1,6 @@
 # Built-in tools
 
-Sixteen tools ship with the app. You do not grant them one by one. You write
+Seventeen tools ship with the app. You do not grant them one by one. You write
 access rules, and the rules decide which tools an agent is offered — see
 [What an agent may reach](access.md).
 
@@ -15,7 +15,7 @@ it may call at all.
 | Class | Ships | Means |
 |---|---|---|
 | **Read** | 10 tools | Looks at data. Changes nothing. |
-| **Draft** | 6 tools | Writes a draft, or writes a proposal. Commits nothing. |
+| **Draft** | 7 tools | Writes a draft, or writes a proposal. Commits nothing. |
 | **Write** | none | Reserved for tools another app registers. |
 | **Submit** | none, ever | No tool may hold it. Agents do not submit. |
 
@@ -62,13 +62,15 @@ handed a document dump it did not need.
 | `update_draft` | Changes a document that is still a draft. Refuses submitted and cancelled documents. |
 | `propose_submit` | Records a pending Agent Action asking a person to submit a draft. Submits nothing. |
 | `propose_cancel` | Records a pending Agent Action asking a person to cancel a submitted document. Cancels nothing. |
+| `propose_transition` | Records a pending Agent Action asking a person to apply one Workflow action, such as Approve. Applies nothing. |
 | `extract_document` | Turns an attached PDF or image into a draft for review. See [Document extraction](extraction.md). |
 
 `update_draft` defaults to drafts the agent itself created. A rule may widen it
 to any draft.
 
-The two `propose_*` tools are the only route to a submitted document, and they
-produce a row, not a change.
+The three `propose_*` tools are the only route to a submitted document, and they
+produce a row, not a change. On a doctype with an active Workflow, only
+`propose_transition` works — see [Workflow actions](approvals.md#workflow-actions).
 
 ## Reading a tool call
 
