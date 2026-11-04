@@ -300,6 +300,7 @@ const STYLES = `
 	}
 	.agent-chat-failure-text { min-width: 0; word-break: break-word; }
 	.agent-chat-retry { flex: none; margin-inline-start: auto; }
+	.agent-chat-run-retry { flex: none; align-self: flex-end; margin-inline-start: 8px; }
 	/* The only thing on an empty log, so it gets room around it and a measure of
 	   its own — several of these lines are a sentence, not a label. */
 	.agent-chat-empty {
@@ -632,6 +633,10 @@ frappe_agents.ChatUI = class ChatUI {
 		this.pending = {};
 		// The turns already asked to stop, so a second press asks nothing twice.
 		this.stopping = new Set();
+		// What each failed turn would be retried with: the message it was started
+		// with. Only the newest turn is kept, because only it offers Retry. A Map,
+		// for the same reason `failures` below is a Set.
+		this.inputs = new Map();
 		// Files uploaded for the next message. The upload itself is already on a
 		// record; this list is only what the message about to be sent will name.
 		this.uploads = [];
@@ -1471,7 +1476,9 @@ frappe_agents.ChatUI = class ChatUI {
 		if (!runs.length) {
 			this.show_empty(this.placeholder);
 		} else {
-			runs.forEach((run) => this.render_past_run(run));
+			// Only the newest turn may offer Retry: an older failure was already
+			// answered by whatever was asked after it.
+			runs.forEach((run, index) => this.render_past_run(run, index === runs.length - 1));
 			// The server returns the end of a long conversation, not all of it, and
 			// the way to the rest is a control rather than a sentence: being told
 			// that older turns exist and left with no way to read them is worse
@@ -1612,7 +1619,8 @@ frappe_agents.ChatUI = class ChatUI {
 		$target.attr("tabindex", "-1").focus();
 	}
 
-	render_past_run(run) {
+	render_past_run(run, newest) {
+		if (newest && run.input_message) this.inputs.set(run.name, run.input_message);
 		if (run.input_message) {
 			this.$log.append(this.make_bubble(run.input_message, "is-user"));
 		}
@@ -1704,7 +1712,7 @@ frappe_agents.ChatUI = class ChatUI {
 			}
 			if (event.type === "run_failed") {
 				failed = true;
-				this.render_failure(run, event.error);
+				this.render_failure(run, event.error, event.status);
 				return;
 			}
 			if (event.type !== "tool_execution_end") return;
@@ -1820,11 +1828,27 @@ frappe_agents.ChatUI = class ChatUI {
 		// files they attached — instead of making them do it again.
 		const composed = { typed: this.$input.val() || "", uploads: this.uploads.slice() };
 
-		this.clear_empty();
-		const $bubble = this.add_bubble(message, "is-user");
 		this.$input.val("");
 		this.uploads = [];
 		this.render_files();
+		this.start_turn(message, composed);
+	}
+
+	/**
+	 * Start one turn with this message: from the composer, or from Retry.
+	 *
+	 * `composed` is what the composer held, or null when nothing was typed —
+	 * Retry sends words the server already has, so there is no composer to put back.
+	 */
+	start_turn(message, composed) {
+		if (!this.agent) {
+			frappe.show_alert({ message: __("Select an agent first"), indicator: "orange" });
+			return;
+		}
+		this.clear_empty();
+		// A new turn answers every failure above it, so their Retry is spent.
+		this.$log.find(".agent-chat-run-retry").prop("disabled", true);
+		const $bubble = this.add_bubble(message, "is-user");
 		this.set_busy(true);
 
 		const $pending = this.add_status(__("Queued…"));
@@ -1845,9 +1869,11 @@ frappe_agents.ChatUI = class ChatUI {
 		const failed = (response) => {
 			$pending.remove();
 			$bubble.remove();
-			this.restore_composer(composed);
+			if (composed) this.restore_composer(composed);
 			this.update_busy();
-			this.add_failure(server_message(response, __("The message was not sent.")), () => this.send());
+			this.add_failure(server_message(response, __("The message was not sent.")), () =>
+				composed ? this.send() : this.start_turn(message, null)
+			);
 		};
 
 		frappe.call({
@@ -1862,6 +1888,9 @@ frappe_agents.ChatUI = class ChatUI {
 				this.conversation = r.message.conversation;
 				$pending.attr("data-run", r.message.run);
 				this.pending[r.message.run] = $pending;
+				// Before the orphans below: a failure already waiting for this run
+				// needs to know what Retry would send.
+				this.inputs.set(r.message.run, message);
 				// A run can be refused before this answer gets back — the identity
 				// checks happen before the model is ever called, and a provider can
 				// answer 400 in under a second. Everything published for it in the
@@ -2147,7 +2176,7 @@ frappe_agents.ChatUI = class ChatUI {
 			// read back afterwards go through one path. The error frame behind this
 			// one is the same news and is dropped; a browser serving an older
 			// bundle never learns this kind and draws that frame instead.
-			this.render_failure(data.run, event.error);
+			this.render_failure(data.run, event.error, event.status);
 		}
 	}
 
@@ -2576,7 +2605,7 @@ frappe_agents.ChatUI = class ChatUI {
 	}
 
 	render_error(data) {
-		this.render_failure(data.run, data.error || data.text);
+		this.render_failure(data.run, data.error || data.text, data.status);
 	}
 
 	/**
@@ -2590,8 +2619,12 @@ frappe_agents.ChatUI = class ChatUI {
 	 * The reason is model-adjacent text — a provider says what it likes in an
 	 * HTTP body — so it goes in as text, never as markdown, exactly like a tool
 	 * line's error.
+	 *
+	 * A failed turn offers Retry when this surface knows what it asked. A
+	 * cancelled one does not: it was stopped on purpose, by its person or the
+	 * site's switch, and asking it again is a new decision, not a retry.
 	 */
-	render_failure(run, error) {
+	render_failure(run, error, status) {
 		// Deduplicated per run and only per run. A frame that cannot say which
 		// run it belongs to is drawn rather than counted: one failure shown
 		// twice is a blemish, and a failure shown to nobody is the bug this
@@ -2608,9 +2641,31 @@ frappe_agents.ChatUI = class ChatUI {
 		// provider's own words — so this is what tells them apart, for a person
 		// scrolling back and for anyone checking that both of them drew.
 		if (run) $row.attr("data-failed-run", run);
+		const input = run ? this.inputs.get(run) : null;
+		if (input && status !== "Cancelled") this.add_retry($row, input);
 		this.insert_before_pending(run, $row);
 		this.clear_pending(run);
 		this.announce(__("The run failed."));
+	}
+
+	/**
+	 * One button beside a failed turn that asks the same thing again, as a new turn.
+	 *
+	 * It sends the words the failed turn was started with, the files it named
+	 * included, so nothing is typed twice. It works once: pressed, it disables
+	 * itself, and a newer turn disables it too.
+	 */
+	add_retry($row, input) {
+		$("<button type='button' class='btn btn-xs btn-default agent-chat-run-retry'></button>")
+			.text(__("Retry"))
+			.attr("aria-label", __("Retry this message"))
+			.on("click", (e) => {
+				const $button = $(e.currentTarget);
+				if ($button.prop("disabled") || this.sending || this.running_turns().length) return;
+				$button.prop("disabled", true);
+				this.start_turn(input, null);
+			})
+			.appendTo($row);
 	}
 
 	/** Take down the waiting line for a run that has landed, however it landed. */
