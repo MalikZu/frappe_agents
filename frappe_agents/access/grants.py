@@ -90,6 +90,7 @@ LOCAL_SOURCE = "This agent"
 # offered tool is a promise, and one that always refuses is a broken one.
 DOCTYPE_TOOL_VERBS = {
 	"search_documents": VERB_READ,
+	"summarize_documents": VERB_READ,
 	"get_doctype_meta": VERB_READ,
 	"get_document_context": VERB_READ,
 	"get_document_slice": VERB_READ,
