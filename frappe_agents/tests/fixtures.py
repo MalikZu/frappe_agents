@@ -224,6 +224,7 @@ TOOL_NAMES = READ_TOOL_NAMES + DRAFT_TOOL_NAMES
 # rows before a test can call one, so the registry sweep below watches for them.
 MATRIX_TOOL_NAMES = (
 	"find_doctypes",
+	"summarize_documents",
 	"list_site_doctypes",
 	"list_site_reports",
 	"describe_site_doctype",
