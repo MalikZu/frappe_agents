@@ -304,7 +304,7 @@ def _execute(run: Any) -> None:
 	_update(run, {"status": "Running", "started_at": now_datetime(), "model_profile": profile})
 	publish_event(run, "status", status="Running")
 
-	provider = ModelProfileProvider(profile)
+	provider = ModelProfileProvider(profile, run=run.name)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
 	max_turns = cint(agent.max_steps) or DEFAULT_MAX_STEPS
