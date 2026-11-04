@@ -181,6 +181,9 @@ def execute_tool(
 
 	try:
 		_check_kill_switch()
+		# A tool asked for in the same answer the person stopped is refused and
+		# audited, exactly like one the kill switch refuses.
+		_check_run_stop(run_name)
 	except KillSwitchActive as exc:
 		_log_call(
 			run_name,
