@@ -6,6 +6,13 @@ the approver's own session under the approver's own permissions. There is no
 `ignore_permissions` on the apply path, deliberately: an approver who may not
 submit the document may not cause it to be submitted either.
 
+A Workflow Transition is applied the same way, through Frappe's own
+`apply_workflow`, in the approver's session. The Workflow then decides: the
+transition must be open to the approver's roles, its condition must hold, and
+self-approval is refused where the transition says so. `apply_workflow` may
+submit or cancel the document, which is why this module is the only place in
+the app that calls it — no tool does.
+
 Three things in here look like belt-and-braces and are not:
 
 * **The workflow refusal is checked twice.** Frappe does not block a server-side
@@ -38,7 +45,7 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.model.workflow import get_workflow_name
+from frappe.model.workflow import apply_workflow, get_workflow_name
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime, strip_html
 
 from frappe_agents.tools.base import runtime_enabled
@@ -96,23 +103,9 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	_check_lock(doc_action, target, expected_modified)
 
-	# Re-checked here, not only at proposal time: a Workflow activated in between
-	# would otherwise be bypassed by this submit, silently and without a trace.
-	workflow = get_workflow_name(doc_action.target_doctype)
-	if workflow:
-		return _record_failure(
-			doc_action,
-			note,
-			0,
-			_(
-				"{0} is now governed by an active Workflow ({1}). Agent proposals cannot "
-				"submit or cancel workflow-governed documents; use the workflow's own transitions."
-			).format(doc_action.target_doctype, workflow),
-		)
-
-	state_problem = _state_problem(doc_action, target)
-	if state_problem:
-		return _record_failure(doc_action, note, 0, state_problem)
+	problem = _apply_problem(doc_action, target)
+	if problem:
+		return _record_failure(doc_action, note, 0, problem)
 
 	# Before the apply, never after: submit() overwrites `modified` with the
 	# approver's own timestamp, and the comparison stops meaning anything.
@@ -129,10 +122,17 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	frappe.db.savepoint(SAVEPOINT)
 	try:
-		if doc_action.action_type == ACTION_SUBMIT:
+		if doc_action.action_type == ACTION_TRANSITION:
+			# As the session user, who is the approver. apply_workflow lists the
+			# transitions for the approver's roles, checks the condition and
+			# self-approval, and saves, submits or cancels with their permissions.
+			apply_workflow(target, doc_action.workflow_action)
+		elif doc_action.action_type == ACTION_SUBMIT:
 			target.submit()
-		else:
+		elif doc_action.action_type == ACTION_CANCEL:
 			target.cancel()
+		else:
+			frappe.throw(_("Unknown action type {0}.").format(doc_action.action_type))
 	except Exception as exc:
 		# Undo whatever the half-finished transition wrote — a cancel that trips on a
 		# back-link has already written docstatus 2 by the time it throws.
@@ -157,7 +157,11 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 		"status": STATUS_APPLIED,
 		"target_doctype": doc_action.target_doctype,
 		"target_name": doc_action.target_name,
-		"docstatus": cint(target.docstatus),
+		# Read back rather than taken from `target`: apply_workflow loads and saves
+		# its own copy of the document.
+		"docstatus": cint(
+			frappe.db.get_value(doc_action.target_doctype, doc_action.target_name, "docstatus")
+		),
 		"edited_before_approval": edited,
 	}
 
@@ -393,6 +397,32 @@ def _check_lock(action: Any, target: Any, expected_modified: Any) -> None:
 			).format(action.target_doctype, action.target_name),
 			frappe.TimestampMismatchError,
 		)
+
+
+def _apply_problem(action: Any, target: Any) -> str | None:
+	"""Why this proposal cannot be applied to the document as it is now, if it cannot."""
+	workflow = get_workflow_name(action.target_doctype)
+
+	if action.action_type == ACTION_TRANSITION:
+		if not workflow:
+			return _(
+				"{0} is no longer governed by an active Workflow, so there is no transition to apply."
+			).format(action.target_doctype)
+		if not action.workflow_action:
+			return _("This proposal names no workflow action.")
+		# Which transitions are open, and from which state, is the Workflow's call,
+		# made inside apply_workflow for the approver.
+		return None
+
+	# Re-checked here, not only at proposal time: a Workflow activated in between
+	# would otherwise be bypassed by this submit, silently and without a trace.
+	if workflow:
+		return _(
+			"{0} is now governed by an active Workflow ({1}). Agent proposals cannot "
+			"submit or cancel workflow-governed documents; the agent can propose a workflow action instead."
+		).format(action.target_doctype, workflow)
+
+	return _state_problem(action, target)
 
 
 def _state_problem(action: Any, target: Any) -> str | None:
