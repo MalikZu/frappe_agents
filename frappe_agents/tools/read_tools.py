@@ -68,6 +68,7 @@ def search_documents(payload: dict) -> dict:
 	fields, restricted = _resolve_fields(meta, payload.get("fields"), allowed_levels)
 	filters = _resolve_filters(meta, payload.get("filters"), allowed_levels)
 	limit = _resolve_limit(payload.get("limit"), row_cap(doctype, MAX_LIMIT))
+	start = _resolve_start(payload.get("start"))
 	order_by = _resolve_order_by(meta, payload.get("order_by"), allowed_levels)
 	include_cancelled = _as_bool(payload.get("include_cancelled"))
 
@@ -81,13 +82,18 @@ def search_documents(payload: dict) -> dict:
 	if "docstatus" not in query_fields:
 		query_fields.append("docstatus")
 
+	# One row past the page says whether another page exists. The length of a
+	# page is not a total, and a model that reads it as one states a wrong number.
 	rows = frappe.get_list(
 		doctype,
 		filters=filters,
 		fields=query_fields,
 		order_by=order_by,
-		limit=limit,
+		limit=limit + 1,
+		offset=start,
 	)
+	has_more = len(rows) > limit
+	rows = rows[:limit]
 
 	# frappe.get_list applies query conditions but never the per-row has_permission
 	# hooks, so on a doctype that registers one the list can carry rows this user
@@ -112,7 +118,10 @@ def search_documents(payload: dict) -> dict:
 		"fields": [field for field in fields if field != "docstatus"] + ["status_word"] + list(restricted),
 		"restricted_fields": restricted,
 		"rows": rows,
-		"count": len(rows),
+		"returned": len(rows),
+		"start": start,
+		"has_more": has_more,
+		"next_start": start + limit if has_more else None,
 		"limit": limit,
 		"include_cancelled": include_cancelled,
 		"filtered_by_permission": filtered,
@@ -363,6 +372,10 @@ def _resolve_limit(limit: Any, maximum: int = MAX_LIMIT) -> int:
 	return max(1, min(limit, maximum))
 
 
+def _resolve_start(start: Any) -> int:
+	return max(0, cint(start))
+
+
 def _resolve_order_by(meta: Any, order_by: Any, allowed_levels: list) -> str:
 	if not order_by:
 		return "modified desc"
@@ -431,7 +444,10 @@ TOOLS = [
 			"is allowed to read; fields above the user's permission level come back as "
 			"'<restricted>'. Every row carries status_word (DRAFT, SUBMITTED or CANCELLED). "
 			"Cancelled documents are left out unless you pass include_cancelled: a cancelled "
-			"document was undone, and answering from one states a number that stopped being true."
+			"document was undone, and answering from one states a number that stopped being true. "
+			"Results come in pages: 'returned' is the size of this page, never a total. When "
+			"'has_more' is true, call again with start set to 'next_start'. To answer how many or "
+			"how much, use summarize_documents instead of counting rows."
 		),
 		"args_schema": {
 			"type": "object",
@@ -451,6 +467,10 @@ TOOLS = [
 				"limit": {
 					"type": "integer",
 					"description": f"Rows to return, 1 to {MAX_LIMIT}. Default {DEFAULT_LIMIT}.",
+				},
+				"start": {
+					"type": "integer",
+					"description": "Rows to skip before this page. Default 0. Pass 'next_start' from the last page.",
 				},
 				"order_by": {
 					"type": "string",
