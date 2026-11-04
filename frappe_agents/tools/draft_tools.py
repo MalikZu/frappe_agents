@@ -16,13 +16,20 @@ and a cancelled one is a reversal, so `propose_submit` and `propose_cancel` writ
 no document at all — they insert one Agent Action row saying what the agent wants
 and why, and a human decides it in `frappe_agents.actions`.
 
+`propose_transition` is the same shape for a document a Workflow governs. It names
+one of the workflow's own actions, such as Approve, and records it the same way.
+The tool only checks that the action is open to the user the run acts as. Applying
+it is the approver's job, in `frappe_agents.actions`, under the approver's roles —
+nothing in this file moves a workflow state.
+
 Two refusals in here carry more weight than they look:
 
 * **Workflow-governed doctypes.** Frappe does not block a server-side `doc.submit()`
   on a doctype with an active Workflow — it silently jumps the document to the first
   submitted state, skipping every approval in between. The refusal below is the only
-  thing that stops an agent proposal from becoming that bypass, and `approve_action`
-  repeats it before it applies anything.
+  thing that stops a submit or cancel proposal from becoming that bypass, and
+  `approve_action` repeats it before it applies anything. Such a document gets a
+  `propose_transition` instead, which goes through the Workflow rather than past it.
 * **System fields.** Values from the model may never set identity, ownership,
   timestamps, docstatus, or a child row's parent linkage. They are stripped and the
   stripped names are handed back, so the model learns the rule rather than silently
@@ -37,7 +44,7 @@ from typing import Any
 
 import frappe
 from frappe.model import table_fields
-from frappe.model.workflow import get_workflow_name
+from frappe.model.workflow import WorkflowStateError, get_transitions, get_workflow, get_workflow_name
 from frappe.utils import cint, strip_html
 
 from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_UPDATE_DRAFT
@@ -54,6 +61,7 @@ from frappe_agents.tools.base import (
 
 ACTION_SUBMIT = "Submit"
 ACTION_CANCEL = "Cancel"
+ACTION_TRANSITION = "Workflow Transition"
 STATUS_PENDING = "Pending"
 
 REASON_LIMIT = 2000
@@ -290,7 +298,7 @@ def _propose(payload: dict, action_type: str) -> dict:
 	doctype = _require_str(payload, "doctype")
 	name = _require_str(payload, "name")
 	reason = _require_reason(payload)
-	run = _require_run(action_type)
+	run = _require_run(f"propose_{action_type.lower()}")
 
 	require_grant(doctype, VERB_PROPOSE)
 
@@ -334,6 +342,92 @@ def _propose(payload: dict, action_type: str) -> dict:
 	}
 
 
+def propose_transition(payload: dict) -> dict:
+	"""Ask a human to apply one Workflow action. Writes no document, only the proposal.
+
+	The action must be one the Workflow offers the user the run acts as, from the
+	document's current state, with its condition met. That is the same list the
+	desk shows that user under the Actions button. An agent proposes nothing its
+	user could not have started.
+	"""
+	doctype = _require_str(payload, "doctype")
+	name = _require_str(payload, "name")
+	workflow_action = _require_str(payload, "action")
+	reason = _require_reason(payload)
+	run = _require_run("propose_transition")
+
+	require_grant(doctype, VERB_PROPOSE)
+	_meta(doctype)
+
+	doc = _load(doctype, name)
+	if not frappe.has_permission(doctype, "read", doc=doc):
+		raise ToolDenied(f"You are not allowed to read {doctype} {name}.")
+
+	if not get_workflow_name(doctype):
+		raise ToolDenied(
+			f"{doctype} has no active Workflow, so there is no workflow action to propose. "
+			"Use propose_submit or propose_cancel instead."
+		)
+
+	state = doc.get(get_workflow(doctype).workflow_state_field)
+	available = _available_actions(doc)
+	if workflow_action not in available:
+		offered = ", ".join(available) if available else "none"
+		raise ToolDenied(
+			f"'{workflow_action}' is not an action you can propose on {doctype} {name} in "
+			f"state {state}. Actions open to you now: {offered}."
+		)
+
+	_refuse_duplicate(doctype, name, ACTION_TRANSITION, workflow_action)
+
+	action = record_proposal(
+		run, ACTION_TRANSITION, doctype, name, reason, doc.modified, workflow_action=workflow_action
+	)
+
+	publish_event(
+		run,
+		"action_proposed",
+		action=action.name,
+		action_type=ACTION_TRANSITION,
+		workflow_action=workflow_action,
+		target_doctype=doctype,
+		target_name=name,
+		reason=reason,
+	)
+
+	return {
+		"action": action.name,
+		"action_type": ACTION_TRANSITION,
+		"workflow_action": workflow_action,
+		"status": STATUS_PENDING,
+		"target_doctype": doctype,
+		"target_name": name,
+		"workflow_state": state,
+		"note": (
+			f"Proposed. {doctype} {name} is unchanged and stays in state {state} until an approver decides."
+		),
+		"_docs_touched": f"{doctype}: {name}, Agent Action: {action.name}",
+	}
+
+
+def _available_actions(doc: Any) -> list[str]:
+	"""The workflow actions open to the session user on `doc` now, in Workflow order."""
+	try:
+		transitions = get_transitions(doc, raise_exception=True)
+	except WorkflowStateError:
+		# A document saved before the Workflow was switched on has no state yet,
+		# and the Workflow has no transition out of nothing.
+		raise ToolDenied(
+			f"{doc.doctype} {doc.name} has no workflow state yet, so the Workflow offers no "
+			"action on it. Ask a person to save it once so the Workflow picks it up."
+		)
+	actions: list[str] = []
+	for transition in transitions:
+		if transition.get("action") and transition["action"] not in actions:
+			actions.append(transition["action"])
+	return actions
+
+
 def _check_target_state(doc: Any, action_type: str) -> None:
 	docstatus = cint(doc.docstatus)
 	if action_type == ACTION_SUBMIT and docstatus != DRAFT:
@@ -358,16 +452,17 @@ def _refuse_workflow(doctype: str) -> None:
 	if workflow:
 		raise ToolDenied(
 			f"{doctype} is governed by an active Workflow ({workflow}). Agent proposals "
-			"cannot submit or cancel workflow-governed documents; use the workflow's own "
-			"transitions."
+			"cannot submit or cancel workflow-governed documents. Propose one of the "
+			"workflow's own actions with propose_transition instead."
 		)
 
 
-def _refuse_duplicate(doctype: str, name: str, action_type: str) -> None:
-	existing = pending_action_for(doctype, name, action_type)
+def _refuse_duplicate(doctype: str, name: str, action_type: str, workflow_action: str | None = None) -> None:
+	existing = pending_action_for(doctype, name, action_type, workflow_action)
 	if existing:
+		what = f"'{workflow_action}'" if workflow_action else action_type.lower()
 		raise ToolDenied(
-			f"There is already a pending {action_type.lower()} proposal for {doctype} {name} "
+			f"There is already a pending {what} proposal for {doctype} {name} "
 			f"({existing}). Wait for that decision instead of proposing again."
 		)
 
@@ -477,12 +572,10 @@ def _load(doctype: str, name: str) -> Any:
 		raise ValueError(f"No such document: {doctype} {name}")
 
 
-def _require_run(action_type: str) -> Any:
+def _require_run(tool_name: str) -> Any:
 	run = current_run()
 	if run is None or not run.get("name"):
-		raise ToolDenied(
-			f"propose_{action_type.lower()} records who asked and why, so it only works inside an agent run."
-		)
+		raise ToolDenied(f"{tool_name} records who asked and why, so it only works inside an agent run.")
 	return run
 
 
@@ -648,7 +741,7 @@ TOOLS = [
 			"Propose that a human submit a draft. This does not submit anything: it records "
 			"a pending Agent Action with your reason, and an approver decides. Say in the "
 			"reason what the document commits to and what you checked — that text is what "
-			"the approver reads. Doctypes governed by a Workflow are refused."
+			"the approver reads. Doctypes governed by a Workflow are refused: use propose_transition."
 		),
 		"args_schema": {
 			"type": "object",
@@ -671,7 +764,8 @@ TOOLS = [
 			"Propose that a human cancel a submitted document. This does not cancel "
 			"anything: it records a pending Agent Action with your reason, and an approver "
 			"decides. Cancelling undoes something the business already committed to, so say "
-			"what makes that the right call. Doctypes governed by a Workflow are refused."
+			"what makes that the right call. Doctypes governed by a Workflow are refused: use "
+			"propose_transition."
 		),
 		"args_schema": {
 			"type": "object",
@@ -684,6 +778,35 @@ TOOLS = [
 				},
 			},
 			"required": ["doctype", "name", "reason"],
+		},
+	},
+	{
+		"tool_name": "propose_transition",
+		"handler_path": "frappe_agents.tools.draft_tools.propose_transition",
+		"capability": CAPABILITY_DRAFT,
+		"description": (
+			"Propose that a human apply one Workflow action, such as 'Approve' or 'Send for "
+			"Review', to a document an active Workflow governs. This changes nothing: it "
+			"records a pending Agent Action with your reason, and an approver applies the "
+			"action under their own roles. The action must be one the Workflow offers you "
+			"on the document now; if it is not, the reply lists the ones that are. For a "
+			"doctype with no Workflow, use propose_submit or propose_cancel."
+		),
+		"args_schema": {
+			"type": "object",
+			"properties": {
+				"doctype": {"type": "string", "description": "DocType of the document."},
+				"name": {"type": "string", "description": "Name of the document."},
+				"action": {
+					"type": "string",
+					"description": "The Workflow action, spelled as the Workflow names it, e.g. 'Approve'.",
+				},
+				"reason": {
+					"type": "string",
+					"description": "Why this action should be applied, in your own words. Required.",
+				},
+			},
+			"required": ["doctype", "name", "action", "reason"],
 		},
 	},
 ]
