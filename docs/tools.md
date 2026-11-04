@@ -36,9 +36,9 @@ Every refusal is audited.
 | Tool | Does |
 |---|---|
 | `find_doctypes` | Lists the doctypes this agent may work with and what it may do with each. Usually its first call. |
-| `search_documents` | Lists documents of one doctype. Returns only rows and fields the running user may read. |
+| `search_documents` | Lists documents of one doctype. Returns only rows and fields the running user may read. Free-text fields come back [wrapped as untrusted](governance.md#document-text-is-data-never-instructions). |
 | `get_doctype_meta` | Describes a doctype's fields, so the model can build a correct search or draft. |
-| `run_report` | Runs a saved Frappe report as the running user and returns its columns and rows, capped. |
+| `run_report` | Runs a saved Frappe report as the running user and returns its columns and rows, capped. Free-text cells, and long text in untyped columns, come back wrapped as untrusted. |
 | `read_document` | Reads an attached file and reports what it says. Needs **May Read Files**. |
 | `get_document_context` | The entry point for a question about one document: core fields plus the shape of what is attached to it, as counts. |
 | `get_document_slice` | Reads one part of a document after the context call said it was worth reading. |
