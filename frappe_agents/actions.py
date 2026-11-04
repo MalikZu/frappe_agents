@@ -283,19 +283,23 @@ def expire_stale_actions() -> int:
 	days = _expiry_days()
 	filters = {"status": STATUS_PENDING, "creation": ("<", _cutoff(days))}
 
-	stale = frappe.get_all("Agent Action", filters=filters, pluck="name")
+	# Read before the bulk write: once it lands, nothing tells these rows apart from
+	# the ones an earlier sweep expired, and those must not be announced twice.
+	stale = frappe.get_all("Agent Action", filters=filters, fields=list(NOTICE_FIELDS))
 	if not stale:
 		return 0
 
 	frappe.db.set_value(
 		"Agent Action",
-		filters,
+		{"name": ("in", [row.name for row in stale]), "status": STATUS_PENDING},
 		{
 			"status": STATUS_EXPIRED,
 			"failure": _("Expired after {0} days with no decision.").format(days),
 		},
 		update_modified=False,
 	)
+	for row in stale:
+		_notify_requester(row, STATUS_EXPIRED)
 	return len(stale)
 
 
