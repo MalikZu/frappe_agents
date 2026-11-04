@@ -212,6 +212,7 @@ DRAFT_TOOL_NAMES = (
 	"update_draft",
 	"propose_submit",
 	"propose_cancel",
+	"propose_transition",
 	"extract_document",
 )
 # Every agent fixture is granted every tool: what a Suggest agent may actually
@@ -1043,8 +1044,16 @@ def actions_for(target_name: str, doctype: str = ORDER_DT) -> list[dict]:
 
 
 @contextmanager
-def active_workflow(doctype: str = ORDER_DT):
+def active_workflow(
+	doctype: str = ORDER_DT,
+	roles: tuple[str, ...] = (WORKFLOW_ROLE,),
+	allow_self_approval: int = 1,
+):
 	"""Put a minimal active Workflow on `doctype` for the duration of the block.
+
+	Two states and one action between them. `roles` are the roles the action is
+	open to, one transition row each — the way a Workflow says "either of these".
+	The approved state is submitted, so applying the action submits the document.
 
 	Teardown deletes the Workflow *and* drops the cached answer:
 	`get_workflow_name` caches an empty string as readily as a name, so a Workflow
@@ -1081,14 +1090,19 @@ def active_workflow(doctype: str = ORDER_DT):
 					"state": WORKFLOW_DRAFT_STATE,
 					"action": WORKFLOW_ACTION,
 					"next_state": WORKFLOW_APPROVED_STATE,
-					"allowed": WORKFLOW_ROLE,
+					"allowed": role,
+					"allow_self_approval": allow_self_approval,
 				}
+				for role in roles
 			],
 		}
 	)
 	workflow.flags.ignore_permissions = True
 	workflow.insert(ignore_permissions=True)
 	frappe.cache.hdel("workflow", doctype)
+	# Every test builds the Workflow under the same name with different rows, and
+	# `get_workflow` reads it through the document cache.
+	frappe.clear_document_cache("Workflow", WORKFLOW_NAME)
 	try:
 		yield workflow
 	finally:

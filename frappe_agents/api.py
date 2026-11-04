@@ -632,6 +632,7 @@ def list_pending_actions(limit: int | None = None) -> list[dict]:
 		fields=[
 			"name",
 			"action_type",
+			"workflow_action",
 			"target_doctype",
 			"target_name",
 			"reason",
@@ -671,6 +672,9 @@ def _redacted_row(row: dict) -> dict:
 	row["target_doctype"] = None
 	row["target_name"] = None
 	row["reason"] = None
+	# A workflow's action names are part of the target's process, and can say
+	# what kind of document it is.
+	row["workflow_action"] = None
 	row["target_modified"] = None
 	# The proposal's snapshot is the target's own timestamp, and it is useless
 	# without the target anyway.
