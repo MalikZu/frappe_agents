@@ -169,6 +169,53 @@ class TestUntrustedReadResults(AgentTestCase):
 			len(content), len(wrap("x" * (MAX_TEXT_CHARS - 3) + "...", f"ToDo {name} description"))
 		)
 
+	def search_order(self, fields: list[str]) -> dict:
+		agent = make_matrix_agent([rule(ORDER_DT, can_read=1)], autonomy="Suggest")
+		payload, _ = call_tool(
+			RESTRICTED_USER,
+			"search_documents",
+			{"doctype": ORDER_DT, "fields": fields, "filters": {"name": ORDER_LIVE}},
+			agent=agent.name,
+		)
+		self.assertTrue(payload["ok"], payload["error"])
+		rows = payload["result"]["rows"]
+		self.assertEqual([row["name"] for row in rows], [ORDER_LIVE])
+		return rows[0]
+
+	def test_search_wraps_free_text_and_leaves_values_alone(self):
+		"""Names, links, numbers, status words and a Data field that is not the title stay as they are."""
+		row = self.search_order(["order_title", "project", "amount", "notes"])
+
+		self.assert_wrapped_once(row["notes"])
+		self.assertIn(f'source="{ORDER_DT} {ORDER_LIVE} notes"', row["notes"])
+		self.assertEqual(row["name"], ORDER_LIVE)
+		self.assertEqual(row["order_title"], ORDER_LIVE)
+		self.assertEqual(row["project"], frappe.db.get_value(ORDER_DT, ORDER_LIVE, "project"))
+		self.assertEqual(row["amount"], frappe.db.get_value(ORDER_DT, ORDER_LIVE, "amount"))
+		self.assertIn(row["status_word"], ("DRAFT", "SUBMITTED", "CANCELLED"))
+		for fieldname in ("name", "order_title", "project", "amount", "status_word"):
+			self.assertNotIn(OPEN_TAG, str(row[fieldname]), fieldname)
+
+	def test_search_wraps_a_data_title_field(self):
+		"""A title is usually a Data field, and it is whatever its author typed."""
+		self.set_title_field(ORDER_DT, "order_title")
+
+		row = self.search_order(["order_title", "amount"])
+
+		self.assertEqual(row["order_title"], wrap(ORDER_LIVE, f"{ORDER_DT} {ORDER_LIVE} order_title"))
+		self.assertNotIn(OPEN_TAG, str(row["amount"]))
+
+	def set_title_field(self, doctype: str, fieldname: str) -> None:
+		previous = frappe.db.get_value("DocType", doctype, "title_field")
+		frappe.db.set_value("DocType", doctype, "title_field", fieldname, update_modified=False)
+		frappe.clear_cache(doctype=doctype)
+
+		def restore() -> None:
+			frappe.db.set_value("DocType", doctype, "title_field", previous, update_modified=False)
+			frappe.clear_cache(doctype=doctype)
+
+		self.addCleanup(restore)
+
 	def test_report_cells_in_a_free_text_column_are_wrapped(self):
 		columns = [
 			{"fieldname": "remarks", "label": "Remarks", "fieldtype": "Small Text"},

@@ -120,11 +120,15 @@ def search_documents(payload: dict) -> dict:
 
 	# Authored text reaches the model wrapped, the same way a document read does.
 	# Only fields with a docfield qualify: the standard columns are not authored.
+	# The title field is wrapped whatever its type: it is usually a Data field, and
+	# it is whatever the person who made the document typed.
 	docfields = [df for df in (meta.get_field(fieldname) for fieldname in fields) if df]
 	for row in rows:
 		source = f"{doctype} {row.get('name')}"
 		for df in docfields:
-			row[df.fieldname] = field_value(df, row.get(df.fieldname), source)
+			row[df.fieldname] = field_value(
+				df, row.get(df.fieldname), source, authored=df.fieldname == meta.title_field
+			)
 		# Restricted fields come back marked, never silently dropped: the model has
 		# to be able to tell "you cannot see this" from "this is empty".
 		for fieldname in restricted:
