@@ -93,9 +93,14 @@ An aggregate reads every row it covers, so the tool has limits a list does not:
 | **Doctypes checked document by document** | Refused. Some doctypes, such as ToDo, File, Communication, Contact, Address, Event and Note, register a per-document permission hook. A list query cannot run that hook, so a count could include documents the user may not open. Use `search_documents` there: it checks every row. A hook that an app registers for every doctype makes every doctype one of these. |
 
 Group values follow the same rules as `search_documents` and `run_report`. A
-title field used as a group comes back wrapped as untrusted. Any other typed value,
+title field used as a group comes back wrapped as untrusted, whatever its type
+and however short. Any other typed value,
 such as a Data field or a document name, comes back wrapped unless it is a short
 label.
+
+A field cannot be a group when its name is also a result column: `count`,
+`suppressed`, `status_word`, or an aggregate's name such as `sum_amount`. Read
+that field with `search_documents`.
 
 Small-group suppression is a nudge, not a confidentiality control. Two
 summaries whose filters differ by one document still differ by that document's
