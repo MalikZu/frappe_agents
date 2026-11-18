@@ -53,6 +53,10 @@ Four record types make up the trail.
 | **Agent Action** | One proposal and its decision |
 | **Document Extraction** | One file read, and what was held back |
 
+A rehearsal run is an ordinary Agent Run with the surface **Rehearsal**, so it
+is on the trail like any other. Its scored copy is an **Agent Rehearsal
+Result**, which no role may edit either. See [Rehearsals](rehearsals.md).
+
 Find them under **Agents → Activity**.
 
 ### Nobody can edit or delete it

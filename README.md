@@ -73,8 +73,8 @@ workspace is at `/app/agents`), and fields your administrator masked are not
 automatically redacted from audit rows. See
 [Running the app](docs/admin.md).
 
-Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
-Agent Auditor) and registers the built-in tools. Then, in the Desk: create an
+Installing creates the roles (Agent Manager, Agent User, Agent Approver,
+Agent Auditor, Agent Rehearsal User) and registers the built-in tools. Then, in the Desk: create an
 LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
 
 A new agent reaches nothing until you give it **access rules**: per doctype, may
@@ -94,7 +94,7 @@ before every request. Redirects are never followed.
 
 **Start here**
 
-- [Getting started](docs/getting-started.md) — install, the four roles, and the
+- [Getting started](docs/getting-started.md) — install, the roles, and the
   path from an empty site to an agent that answers.
 - [How the agent is held to account](docs/governance.md) — identity binding, the
   draft/submit wall, the audit trail, the kill switch, and where each guarantee
@@ -108,6 +108,8 @@ before every request. Redirects are never followed.
   autonomy, skills, alternates, and the two cost stops.
 - [Providers and models](docs/models.md) — the three wire formats, the
   self-hosted trust boundary, and the shipped catalog.
+- [Rehearsals](docs/rehearsals.md) — saved test cases an agent must pass before
+  go-live and after a model change, and the prompt-injection pack.
 
 **Using it**
 

@@ -131,3 +131,9 @@ standing between a misconfigured agent and a large bill.
 
 A new agent reaches nothing until you give it access rules. That is deliberate:
 the first thing you write on an agent is what it is for.
+
+## Testing
+
+Test an agent before you enable it for users, and again after you change its
+model. Write rehearsals for it, and load the prompt-injection pack. See
+[Rehearsals](rehearsals.md).

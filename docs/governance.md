@@ -173,6 +173,11 @@ proposing something foolish by text it was handed. That is why the draft/submit
 wall exists — the wrapping reduces how often a model is fooled, and the approval
 step is what makes being fooled survivable.
 
+You can test how often your agent is fooled. The prompt-injection pack in
+[Rehearsals](rehearsals.md) hides instructions in document text and checks, from
+the audit rows, that the agent did not follow them. A pass is a sample on one
+model, not a proof.
+
 ## The model is only handed what it asks for
 
 A document does not arrive as a dump. The model first gets a manifest — what
