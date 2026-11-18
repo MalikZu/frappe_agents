@@ -879,6 +879,12 @@ def rejected_proposal_for(
 		filters["workflow_action"] = workflow_action
 	if from_workflow_state:
 		filters["from_workflow_state"] = from_workflow_state
+	filters = [[key, "=", value] for key, value in filters.items()]
+	if proposed_values is not None:
+		# Narrowed in the query, so other changes to the same record do not use up
+		# the lookback before a matching one is reached. `like` is only a first cut:
+		# `_same_values` checks the exact fields and values.
+		filters += [["update_fields", "like", f"%{fieldname}%"] for fieldname in proposed_values]
 	rows = frappe.get_list(
 		"Agent Action",
 		filters=filters,
