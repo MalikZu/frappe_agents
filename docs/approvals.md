@@ -46,8 +46,9 @@ are blocked, the screen says which of the three you are.
 ## Who is told
 
 A proposal nobody hears about waits until it expires. So the app tells people,
-with frappe's own notifications: the bell at the top of the desk, and an email
-if the person gets notification emails.
+with frappe's own notifications: the bell at the top of the desk. These are
+Alert notifications, and frappe does not send email for those — the bell is the
+only place they appear.
 
 **When a proposal is written,** the approvers who could decide it are told. That
 is every enabled user with the Agent Approver role who also:
@@ -63,21 +64,22 @@ with the role still finds it under **Pending Actions**.
 
 **When a proposal ends,** the person who asked is told: it was applied, rejected,
 failed, or expired. So is the user the run was acting as, if that is someone
-else. A rejection carries the approver's note.
+else. A rejection carries the start of the approver's note; the full note is on
+the proposal.
 
-A notification names the agent, the verb and the document — nothing else. It
-does not quote the agent's reason or any field of the document. Open the
+A notification names the agent, the verb and the document, and the approver's
+note on a rejection — nothing else. It does not quote the agent's reason or any
+field of the document. Open the
 proposal to read those, behind the usual permission checks.
 
 To stop these notifications for yourself:
 
 1. Click the bell at the top of the desk.
 2. Click the settings icon.
-3. Clear **Enable System Notification** to stop the bell and the emails.
-   Or clear **Enable Email Notifications** to keep the bell and stop the emails.
+3. Clear **Enable System Notification**.
 4. Click **Save**.
 
-These switches apply to all your desk notifications, not only to proposals.
+This switch stops all your desk notifications, not only the ones about proposals.
 There is no separate switch for agent proposals.
 
 ## What you are agreeing to
