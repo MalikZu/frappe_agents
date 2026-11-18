@@ -105,14 +105,19 @@ These never fire a trigger:
 |---|---|---|
 | **Max Runs Per Hour** | 30 | Events past it are skipped and counted |
 | **Max Runs Per User Per Hour** | 10 | Same, per person. An event past a person's own cap does not count against the trigger's cap |
+
+The hourly caps count events, not runs. Every event that matches uses a place,
+including an event that waits and is merged into another run.
 | **Daily Token Budget** on the trigger | empty | The trigger stops for the day |
 | **Daily Token Budget** on the agent | Agent Settings | The trigger stops for the day |
 | **Global Enabled** in Agent Settings | on | No trigger fires, and a queued run is cancelled |
 
 **One run per document per trigger.** An event that arrives while a run is
 working on the same document waits. When that run ends, one more run starts and
-reads the newest state. A burst of ten edits costs two runs, not ten. Files are
-the exception: each waiting file gets its own run, one after the other.
+reads the newest state. A burst of ten edits costs two runs, not ten, but it
+still uses ten places under the hourly caps. Files are the exception: each
+waiting file gets its own run, one after the other, as the person who attached
+it.
 
 **An answer made from text that has since changed is not written.** If the
 source field changes while the model works, the answer is dropped and the run
@@ -153,25 +158,32 @@ Then:
 11. For **Agent Answer**, write the **Instruction**. Say what to produce and how
     long it may be.
 12. Type the **Target Field**. It must be Small Text, Text, Long Text, Text
-    Editor, Markdown Editor or Select.
+    Editor or Select.
 13. Keep **Only If Empty** on, unless the trigger may overwrite a value a person
     wrote.
 14. Set the limits.
 15. Click **Enabled**.
 16. Save.
 
-Saving refuses a trigger that cannot work, and says why. It refuses a target
-that is read-only, sensitive, the workflow state or the source field, and a
-source that is a password or a table.
+Saving refuses a trigger that cannot work, and says why. It refuses:
 
-Test it on one document:
+- a target that is read-only, sensitive, masked, the workflow state or the
+  source field;
+- a source that is a password, a table, sensitive or masked;
+- a target at a lower permission level than the source. A person who may read
+  the target but not the source would read what the agent made from it.
+
+Test it on one document. Sign in as a person who may change the trigger and the
+document. Administrator cannot run a trigger.
 
 1. Click **Run on a Document**.
 2. Select a draft.
 3. Click **Run**.
 4. Open **Agents → Activity → Runs**. Find the run with surface **Trigger**.
 
-The run is yours: you must be able to change that document.
+The run is yours: you must be able to change that document, and the document
+must meet the trigger's conditions. A manual run counts against the hourly
+caps. For an attachment trigger, it reads the newest matching file.
 
 ## Reading what happened
 
