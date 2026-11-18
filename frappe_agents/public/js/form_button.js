@@ -1,9 +1,8 @@
 // "Ask Agent" on every eligible form.
 //
-// The wildcard doctype is the only every-form hook in v16, and custom buttons are
-// wiped immediately before each refresh, so the button has to be added here and
-// nowhere else. A throw would abort the rest of the form's refresh chain, hence
-// the try/catch.
+// Custom buttons are wiped immediately before each refresh, so the button has to
+// be added from a refresh handler (registration is at the bottom of this file).
+// A throw would abort the rest of the form's refresh chain, hence the try/catch.
 frappe.provide("frappe_agents");
 
 /** Agents the boot payload says may be opened from this doctype's form. */
@@ -85,19 +84,37 @@ frappe_agents.open_form_panel = function (frm, agents) {
 	return dialog;
 };
 
-frappe.ui.form.on("*", {
-	refresh(frm) {
-		try {
-			if (frm.is_new()) return;
-			if (!frappe.user.has_role("Agent User")) return;
+function add_ask_agent_button(frm) {
+	try {
+		if (frm.is_new()) return;
+		if (!frappe.user.has_role("Agent User")) return;
 
-			const agents = frappe_agents.get_form_agents(frm.doctype);
-			if (!agents.length) return;
+		const agents = frappe_agents.get_form_agents(frm.doctype);
+		if (!agents.length) return;
 
-			frm.add_custom_button(__("Ask Agent"), () => frappe_agents.open_form_panel(frm, agents));
-		} catch (error) {
-			// Never take the form's refresh chain down with us.
-			console.error("frappe_agents: could not add the Ask Agent button", error);
-		}
-	},
+		frm.add_custom_button(__("Ask Agent"), () => frappe_agents.open_form_panel(frm, agents));
+	} catch (error) {
+		// Never take the form's refresh chain down with us.
+		console.error("frappe_agents: could not add the Ask Agent button", error);
+	}
+}
+
+// Version-15 has no wildcard form handlers, and an agent with no doctypes listed
+// shows on every form, so the doctypes cannot all be known up front. Instead,
+// "form-refresh" (fired on both v15 and v16 just before the form's own refresh
+// handlers run) adds this doctype's handler the first time one of its forms
+// opens, and the same refresh then runs it after the doctype's own scripts.
+//
+// The handler goes straight onto the list. frappe.ui.form.on would also replace
+// cur_frm.events.refresh, which doctype scripts call to rerun their own refresh.
+$(document).on("form-refresh", (event, frm) => {
+	try {
+		if (!frm || !frm.doctype) return;
+		if (!frappe_agents.get_form_agents(frm.doctype).length) return;
+
+		const handlers = frappe.ui.form.get_event_handler_list(frm.doctype, "refresh");
+		if (!handlers.includes(add_ask_agent_button)) handlers.push(add_ask_agent_button);
+	} catch (error) {
+		console.error("frappe_agents: could not register the Ask Agent button", error);
+	}
 });
