@@ -18,7 +18,9 @@ on that:
   carried is told again on the next one.
 
 The approver's note and the failure text are written by people or quote the
-document, so both go to the model inside the untrusted wrapper. A document name
+document, so both go to the model inside the untrusted wrapper. Either can quote
+a field held back from the audit trail, so the note is scrubbed of those values
+before it is stored and sent, the way a run's answer is. A document name
 is cleaned before it sits in a line the system writes. The note is not
 translated: the bytes of a turn must not depend on the language of the day.
 """
@@ -31,6 +33,7 @@ from frappe_agents.actions import (
 	ACTION_CANCEL,
 	ACTION_SUBMIT,
 	ACTION_TRANSITION,
+	ACTION_UPDATE,
 	STATUS_APPLIED,
 	STATUS_EXPIRED,
 	STATUS_FAILED,
@@ -39,7 +42,9 @@ from frappe_agents.actions import (
 	state_fields,
 )
 from frappe_agents.context.untrusted import plain, wrap
+from frappe_agents.redaction import doctype_sensitive_keys, redact, scrub
 
+CHAT_SURFACE = "Desk Chat"
 HEAD = "[Proposal updates, from the system and not from the user]"
 TAIL = "[End of proposal updates]"
 # How far back a conversation is searched for a proposal not yet told. A decision
@@ -60,13 +65,20 @@ def note_for(run: Any, delivered_statuses: tuple[str, ...]) -> dict | None:
 	"""
 	if run.get("proposal_updates_for") or not run.get("conversation"):
 		return None
+	# Only a person in chat is told. A triggered run answers a document event and
+	# a rehearsal is a test: neither has a user who made those proposals.
+	if run.get("surface") and run.surface != CHAT_SURFACE:
+		return None
 
 	states = _untold(run, delivered_statuses)
 	if not states:
 		return None
 
+	# Before the note is drawn: a target whose values cannot be read loses its
+	# note and failure text here.
+	secrets = _held_back(states)
 	return {
-		"proposal_updates": render(states),
+		"proposal_updates": scrub(render(states), secrets),
 		"proposal_updates_for": "\n".join(state["action"] for state in states),
 	}
 
@@ -130,6 +142,33 @@ def _read_untold(run: Any, delivered_statuses: tuple[str, ...]) -> list[dict]:
 	return untold
 
 
+def _held_back(states: list[dict]) -> set[str]:
+	"""The sensitive values on the documents these proposals are about.
+
+	A note or a failure can quote them, and the note is stored on the run where an
+	auditor reads it. Each document is one the user can read today: a state whose
+	target they cannot read carries no text to scrub. A document that cannot be
+	read for its values keeps its proposal's line, without the note or the failure.
+	"""
+	secrets: set[str] = set()
+	for state in states:
+		if not state.get("target_visible"):
+			continue
+		doctype, name = state["target_doctype"], state["target_name"]
+		try:
+			keys = doctype_sensitive_keys(doctype)
+			if not keys:
+				continue
+			doc = frappe.get_doc(doctype, name)
+			if not frappe.has_permission(doctype, "read", doc=doc):
+				raise frappe.PermissionError
+			secrets |= redact(doc.as_dict(), keys)[1]
+		except Exception:
+			state["decision_note"] = None
+			state["failure"] = None
+	return secrets
+
+
 def _line(state: dict) -> str:
 	verb = _verb(state)
 	if state.get("target_visible"):
@@ -168,6 +207,11 @@ def _verb(state: dict) -> str:
 		return "submit"
 	if action_type == ACTION_CANCEL:
 		return "cancel"
+	if action_type == ACTION_UPDATE:
+		# Field names are set by an administrator, not typed by a user.
+		if state.get("update_fields"):
+			return f'change the fields "{plain(state["update_fields"])}" on'
+		return "change fields on"
 	# A transition whose target the user can no longer read has its action held
 	# back, and any type this module does not know yet gets the same plain verb.
 	# Neither may be called a submit.

@@ -140,6 +140,7 @@ STATE_FIELDS = (
 	"workflow_action",
 	"workflow_name",
 	"from_workflow_state",
+	"update_fields",
 	"target_doctype",
 	"target_name",
 	"reason",
@@ -802,6 +803,9 @@ def proposal_state(row: Any) -> dict:
 		"workflow_action": row.get("workflow_action"),
 		"workflow_name": row.get("workflow_name"),
 		"from_workflow_state": row.get("from_workflow_state"),
+		# The names of the fields a change would set. Never their values: those sit
+		# at a permlevel no role reads, and only the approval form hands them out.
+		"update_fields": row.get("update_fields"),
 		"target_doctype": row.target_doctype,
 		"target_name": row.target_name,
 		"reason": row.reason,
@@ -832,6 +836,7 @@ def proposal_state(row: Any) -> dict:
 				"workflow_action": None,
 				"workflow_name": None,
 				"from_workflow_state": None,
+				"update_fields": None,
 				"reason": None,
 				"decision_note": None,
 				"failure": None,
@@ -851,6 +856,7 @@ def rejected_proposal_for(
 	modified: Any,
 	workflow_action: str | None = None,
 	from_workflow_state: str | None = None,
+	proposed_values: dict | None = None,
 ) -> Any:
 	"""This user's latest rejected proposal for the same action on this document, if any.
 
@@ -858,7 +864,9 @@ def rejected_proposal_for(
 	is now. Read through `get_list` and filtered to the session user's own
 	proposals: a user who may read everyone's, an approver say, is still held
 	only to the rejections their own agent was told about. A workflow action is
-	the same action only with the same verb out of the same state.
+	the same action only with the same verb out of the same state. A field change
+	is the same action only with the same fields set to the same values: a
+	different change to the same version is a different question.
 	"""
 	filters = {
 		"requested_by": frappe.session.user,
@@ -874,10 +882,12 @@ def rejected_proposal_for(
 	rows = frappe.get_list(
 		"Agent Action",
 		filters=filters,
-		fields=["name", "decision_note", "proposal_modified"],
+		fields=["name", "decision_note", "proposal_modified", "update_fields"],
 		order_by="creation desc",
 		limit_page_length=REJECTION_LOOKBACK,
 	)
+	if proposed_values is not None:
+		rows = [row for row in rows if _same_values(row, proposed_values)]
 	if not rows:
 		return None
 	for row in rows:
@@ -886,6 +896,21 @@ def rejected_proposal_for(
 			return row
 	rows[0].same_version = False
 	return rows[0]
+
+
+def _same_values(row: Any, proposed_values: dict) -> bool:
+	"""Whether a rejected field change set exactly these fields to exactly these values.
+
+	The values sit at a permlevel no role reads, so `get_list` cannot return them.
+	The row is the session user's own proposal, read after its permission check,
+	and the values are compared here and never returned.
+	"""
+	if field_names(row.update_fields) != set(proposed_values):
+		return False
+	action = frappe.get_doc("Agent Action", row.name)
+	if not action.has_permission("read"):
+		return False
+	return (action.proposed_values or "") == dumps(proposed_values)
 
 
 def target_readable(row: Any) -> bool:
