@@ -81,6 +81,7 @@ SAVEPOINT = "agent_action_apply"
 MAX_NOTIFIED_APPROVERS = 20
 NOTIFICATION_TYPE = "Alert"
 NOTIFY_SAVEPOINT = "agent_action_notify"
+SUBJECT_NOTE_LIMIT = 140
 # What a notification is built from. Never the reason, never the target's fields.
 NOTICE_FIELDS = (
 	"name",
@@ -298,9 +299,19 @@ def expire_stale_actions() -> int:
 		},
 		update_modified=False,
 	)
+	# Announce only what this sweep moved. A row decided between the read and the
+	# write kept its status, and its requester hears about the decision instead.
+	expired = set(
+		frappe.get_all(
+			"Agent Action",
+			filters={"name": ("in", [row.name for row in stale]), "status": STATUS_EXPIRED},
+			pluck="name",
+		)
+	)
 	for row in stale:
-		_notify_requester(row, STATUS_EXPIRED)
-	return len(stale)
+		if row.name in expired:
+			_notify_requester(row, STATUS_EXPIRED)
+	return len(expired)
 
 
 def separation_of_duties_block(action: Any, user: str | None = None) -> str | None:
@@ -423,12 +434,10 @@ def _notify_requester(action: Any, status: str, note: str | None = None) -> None
 			"type": NOTIFICATION_TYPE,
 			"document_type": "Agent Action",
 			"document_name": action.name,
-			"subject": _requester_subject(action, status, decider),
+			"subject": _requester_subject(action, status, decider, note),
 		}
 		if decider:
 			notice["from_user"] = decider
-		if note:
-			notice["email_content"] = escape_html(note)
 		enqueue_create_notification(recipients, notice)
 
 		for user in recipients:
@@ -452,7 +461,7 @@ def _requester_recipients(action: Any, decider: str | None) -> list[str]:
 def _approver_subject(action: Any) -> str:
 	# Agent, verb and target identity only. The reason is model-written and the
 	# fields are the target's business: both stay on the Agent Action form, behind
-	# its own permission check, and out of the notification and its email.
+	# its own permission check, and out of the bell.
 	template = (
 		_("{0} proposes to cancel {1} {2}. It needs an approver.")
 		if action.action_type == ACTION_CANCEL
@@ -465,7 +474,10 @@ def _approver_subject(action: Any) -> str:
 	)
 
 
-def _requester_subject(action: Any, status: str, decider: str | None) -> str:
+def _requester_subject(action: Any, status: str, decider: str | None, note: str | None = None) -> str:
+	# The subject is the whole notice: released frappe shows nothing else in the
+	# bell, and an Alert is never emailed. So a rejection's note rides in it, cut
+	# short, and the full note stays on the Agent Action form.
 	cancel = action.action_type == ACTION_CANCEL
 	templates = {
 		STATUS_APPLIED: (
@@ -489,11 +501,19 @@ def _requester_subject(action: Any, status: str, decider: str | None) -> str:
 			else _("The proposal to submit {1} {2} expired with no decision.")
 		),
 	}
-	return templates[status].format(
+	subject = templates[status].format(
 		escape_html(get_fullname(decider) if decider else ""),
 		escape_html(_(action.target_doctype)),
 		escape_html(action.target_name),
 	)
+	if note:
+		subject = _("{0} Note: {1}").format(subject, escape_html(_shorten(note, SUBJECT_NOTE_LIMIT)))
+	return subject
+
+
+def _shorten(text: str, limit: int) -> str:
+	text = " ".join(strip_html(text).split())
+	return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 @contextmanager
