@@ -69,9 +69,8 @@ def withhold(spec: dict, values: dict, links: dict | None = None) -> tuple[dict,
 	"""Split extracted values into what may be written and what must be confirmed.
 
 	Returns `(draft_values, flags)`. `draft_values` is what the pipeline writes —
-	it never contains a sensitive field. `flags` is
-	`{key: {value, master_doctype, master_name, master_value, mismatch, confirmed}}`
-	keyed by fieldname, or by `table[index].fieldname` for a value inside a child
+	it never contains a sensitive field. `flags` is `{key: {value, master_doctype,
+	master_name, master_field, master_value, mismatch, confirmed}}` keyed by fieldname, or by `table[index].fieldname` for a value inside a child
 	row: a payment detail hidden in a line item is the same attack with more steps.
 	"""
 	links = links or {}
@@ -114,16 +113,30 @@ def _flag(spec: dict, fieldname: str, value: Any, links: dict) -> dict:
 	if not master:
 		return flag
 
-	doctype, name, master_value, visible = master
+	doctype, name, master_value, visible, link_field = master
 	flag["master_doctype"] = doctype
 	flag["master_name"] = name
+	# Which Link on the target the comparison went through. A form can change that
+	# link after the reading, and a mismatch flag about the old supplier says
+	# nothing about the new one: Fill from file uses this to notice.
+	flag["master_field"] = link_field
 	# Only the boolean is unconditional. The value follows it only when this user
 	# would have been shown the real thing anyway.
 	flag["master_value"] = _cut(master_value) if visible else None
 	flag["master_visible"] = 1 if visible else 0
 	if master_value:
-		flag["mismatch"] = 0 if _same(value, master_value) else 1
+		flag["mismatch"] = 0 if same_value(value, master_value) else 1
 	return flag
+
+
+def compare_with_master(target_doctype: str, fieldname: str, value: Any, links: dict) -> dict:
+	"""One sensitive value against the master its document links to now.
+
+	The comparison `withhold` makes at reading time, asked again about a value and
+	links a person has since saved. Same rules: read as a document, permission
+	checked, and the master's value only when this user would see it unmasked.
+	"""
+	return _flag({"doctype": target_doctype}, fieldname, value, links)
 
 
 def _blank_flag(value: Any) -> dict:
@@ -131,6 +144,7 @@ def _blank_flag(value: Any) -> dict:
 		"value": _cut(value),
 		"master_doctype": None,
 		"master_name": None,
+		"master_field": None,
 		"master_value": None,
 		"master_visible": 0,
 		"mismatch": 0,
@@ -168,7 +182,13 @@ def _master(target_doctype: str | None, fieldname: str, links: dict) -> tuple | 
 			continue
 		# get_doc, never db.get_value: the query layer masks per user and would hand
 		# back "XXXXXXXX" as if the master really said that.
-		return df.options, name, doc.get(fieldname), fieldname not in _masked_fields(master_meta)
+		return (
+			df.options,
+			name,
+			doc.get(fieldname),
+			fieldname not in _masked_fields(master_meta),
+			df.fieldname,
+		)
 
 	return None
 
@@ -315,6 +335,11 @@ def _readable_match(target_doctype: str, fieldname: str, value: str) -> str | No
 	return name if _readable(target_doctype, name) else None
 
 
+def readable(doctype: str, name: str | None) -> bool:
+	"""Whether this user may read this record. A missing record is not readable."""
+	return _readable(doctype, name)
+
+
 def _readable(doctype: str, name: str | None) -> bool:
 	if not name:
 		return False
@@ -326,7 +351,7 @@ def _readable(doctype: str, name: str | None) -> bool:
 		return False
 
 
-def _same(left: Any, right: Any) -> bool:
+def same_value(left: Any, right: Any) -> bool:
 	return _normalise(left) == _normalise(right)
 
 
