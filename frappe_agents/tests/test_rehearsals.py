@@ -16,6 +16,7 @@ The cast: `SKILL_AUTHOR` is the Agent Manager who writes and starts rehearsals.
 from unittest.mock import patch
 
 import frappe
+from frappe.utils import add_to_date, now_datetime
 
 from frappe_agents.actions import approve_action
 from frappe_agents.api import list_conversations
@@ -25,17 +26,20 @@ from frappe_agents.rehearsals.runner import (
 	RUN_AS_ROLE,
 	comparison,
 	execute_rehearsal,
+	fail_stale_results,
 	queue_rehearsal,
 	start_rehearsal,
 )
 from frappe_agents.tests.fixtures import (
 	ALT_PROFILE,
 	APPROVER_USER,
+	AUDITOR_USER,
 	DRAFT_AGENT,
 	DRAFT_USER,
 	ORDER_DT,
 	PROFILE,
 	RESTRICTED_USER,
+	SKILL_APPROVER,
 	SKILL_AUTHOR,
 	AgentTestCase,
 	FakeProvider,
@@ -211,6 +215,23 @@ class TestRehearsalRuns(AgentTestCase):
 				queue_rehearsal(frappe.get_doc(REHEARSAL, name))
 		finally:
 			set_kill_switch(1)
+
+	def test_the_daily_sweep_fails_only_results_that_went_stale(self):
+		name = make_rehearsal([("Answer contains", "ok")])
+		stale, _ = rehearse(name, model_says("ok"))
+		fresh, _ = rehearse(name, model_says("ok"))
+		frappe.db.set_value(
+			RESULT,
+			stale.name,
+			{"status": "Running", "creation": add_to_date(now_datetime(), hours=-7)},
+			update_modified=False,
+		)
+		frappe.db.set_value(RESULT, fresh.name, "status", "Running", update_modified=False)
+
+		fail_stale_results()
+
+		self.assertEqual(frappe.db.get_value(RESULT, stale.name, "status"), "Failed")
+		self.assertEqual(frappe.db.get_value(RESULT, fresh.name, "status"), "Running")
 
 
 class TestBait(AgentTestCase):
@@ -426,6 +447,20 @@ class TestRehearsalPermissions(AgentTestCase):
 			self.assertFalse(perm.create or perm.write or perm.delete, perm.role)
 		roles = {perm.role for perm in frappe.get_meta(RESULT).permissions if perm.read}
 		self.assertIn("Agent Manager", roles)
+
+	def test_a_manager_reads_only_the_results_they_started(self):
+		"""A result carries the test user's answer, so another manager does not get it."""
+		grant_role(DRAFT_USER, RUN_AS_ROLE)
+		name = make_rehearsal([("Answer contains", "ok")])
+		result, _ = rehearse(name, model_says("ok"))
+
+		with as_user(SKILL_APPROVER):
+			self.assertFalse(frappe.has_permission(RESULT, "read", doc=result.name))
+			self.assertNotIn(result.name, frappe.get_list(RESULT, pluck="name"))
+			row = next((row for row in comparison(DRAFT_AGENT)["rows"] if row["rehearsal"] == name), None)
+			self.assertFalse(row and row["cells"])
+		with as_user(AUDITOR_USER):
+			self.assertTrue(frappe.has_permission(RESULT, "read", doc=result.name))
 
 	def test_the_comparison_shows_each_model_side_by_side(self):
 		grant_role(DRAFT_USER, RUN_AS_ROLE)
