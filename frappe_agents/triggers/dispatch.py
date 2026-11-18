@@ -361,7 +361,11 @@ def run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: s
 	"""RQ job: decide whether one event becomes a run, and queue it. Never raises."""
 	original = frappe.session.user
 	try:
-		_run_trigger(trigger, doctype, docname, fired_by, file)
+		if not _run_trigger(trigger, doctype, docname, fired_by, file):
+			# This event did not become a run. If it was the waiting one a finished
+			# run handed on, the events behind it would wait for a run that never
+			# comes. Hand them on in turn; each is skipped or run on its own merits.
+			_pass_on(trigger, doctype, docname)
 	except Exception:
 		frappe.logger("frappe_agents").error(
 			f"trigger {trigger} could not start on {doctype} {docname}", exc_info=True
@@ -370,42 +374,47 @@ def run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: s
 		frappe.set_user(original)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 
-def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: str | None) -> None:
+def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: str | None) -> bool:
+	"""True when the event became a run and holds the document's lock."""
 	if not frappe.db.exists(TRIGGER, trigger):
-		return
+		return False
 	doc = frappe.get_doc(TRIGGER, trigger)
 	if not cint(doc.enabled):
-		return
+		return False
+	# Gone by the time the job ran: the save that fired it was rolled back, or the
+	# document or the file was deleted since. Nothing to read, nothing to count.
+	if not frappe.db.exists(doctype, docname) or (file and not frappe.db.exists(FILE, file)):
+		return False
 	if not fired_by or fired_by in FORBIDDEN_USERS:
 		count_skip(doc.name, SKIP_NO_USER)
-		return
+		return False
 	if not runtime_enabled():
 		count_skip(doc.name, SKIP_SWITCH)
-		return
+		return False
 
 	agent = frappe.get_cached_doc("Agent", doc.agent)
 	if not cint(agent.enabled) or agent.run_as != SESSION_USER:
 		count_skip(doc.name, SKIP_AGENT)
-		return
+		return False
 	if not user_may_use(agent, fired_by):
 		count_skip(doc.name, SKIP_ROLE)
-		return
+		return False
 	if over_budget(doc, agent):
 		count_skip(doc.name, SKIP_BUDGET)
-		return
+		return False
 
 	# Everything after this reads the document as the person who fired the event.
 	frappe.set_user(fired_by)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 	if not _conditions_hold(doc, doctype, docname):
-		return
+		return False
 
 	if not take_lock(doc.name, doctype, docname):
 		# A run is already working on this document. Leave this event for it; the
 		# run in flight queues one more when it ends.
 		mark_dirty(doc.name, doctype, docname, fired_by, file)
 		if not take_lock(doc.name, doctype, docname):
-			return
+			return False
 		# That run ended between the two asks and found nothing waiting. This
 		# event is the one to run, so take it back, and leave the rest waiting.
 		pending = take_dirty(doc.name, doctype, docname) or {}
@@ -423,6 +432,7 @@ def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: 
 		enqueue_after_commit=True,
 		run_name=run.name,
 	)
+	return True
 
 
 def _conditions_hold(trigger: Any, doctype: str, docname: str) -> bool:
@@ -479,21 +489,36 @@ def release(run: Any) -> None:
 		doctype, docname = run.get("context_doctype"), run.get("context_name")
 		if not trigger or not doctype or not docname:
 			return
-		release_lock(trigger, doctype, docname)
-		missed = take_dirty(trigger, doctype, docname)
-		if not missed:
-			return
-		# One more run: the oldest waiting file, as the person who attached it, or
-		# else the newest field event. Everything else waits for the run after that.
-		files = waiting_files(missed)
-		if files:
-			first = files[0]
-			enqueue_run(trigger, doctype, docname, first["user"], first["file"])
-			_wait_again(trigger, doctype, docname, missed, running=first["file"])
-		elif missed.get("user"):
-			enqueue_run(trigger, doctype, docname, missed["user"], None)
+		_next_waiting(trigger, doctype, docname)
 	except Exception:
 		frappe.logger("frappe_agents").error(f"could not release trigger run {run.name}", exc_info=True)
+
+
+def _next_waiting(trigger: str, doctype: str, docname: str) -> None:
+	"""Let go of the lock and queue the next waiting event, if there is one."""
+	release_lock(trigger, doctype, docname)
+	missed = take_dirty(trigger, doctype, docname)
+	if not missed:
+		return
+	# One more run: the oldest waiting file, as the person who attached it, or
+	# else the newest field event. Everything else waits for the run after that.
+	files = waiting_files(missed)
+	if files:
+		first = files[0]
+		enqueue_run(trigger, doctype, docname, first["user"], first["file"])
+		_wait_again(trigger, doctype, docname, missed, running=first["file"])
+	elif missed.get("user"):
+		enqueue_run(trigger, doctype, docname, missed["user"], None)
+
+
+def _pass_on(trigger: str, doctype: str, docname: str) -> None:
+	"""After a skipped event: queue what was waiting, unless a run is still working.
+
+	A run in flight hands on its own waiting events when it ends. Without one,
+	nobody would: so take the free lock, and hand them on now.
+	"""
+	if take_lock(trigger, doctype, docname):
+		_next_waiting(trigger, doctype, docname)
 
 
 # --- who, how often, how much -----------------------------------------------
