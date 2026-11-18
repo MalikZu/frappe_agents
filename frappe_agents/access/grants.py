@@ -106,6 +106,11 @@ DOCTYPE_TOOL_VERBS = {
 	"extract_document": VERB_EXTRACT,
 }
 
+# Tools that need a second verb on the same target before they are offered.
+# propose_update compares each value with the stored one, so it needs Read too —
+# and refuses without it — and an offered tool that always refuses is a broken one.
+ALSO_NEEDS = {"propose_update": (VERB_READ,)}
+
 PROPOSE_TOOLS = frozenset({"propose_submit", "propose_cancel", "propose_transition", "propose_update"})
 REPORT_TOOLS = frozenset({"run_report"})
 # The Agents Builder's meta tools. They answer with the shape of the site and
@@ -352,7 +357,11 @@ def exposed_tool_names(agent: Any) -> set[str]:
 	grants = compiled_grants(agent)
 	doctypes = grants[TARGET_DOCTYPE].values()
 
-	names = {tool for tool, verb in DOCTYPE_TOOL_VERBS.items() if any(verbs.get(verb) for verbs in doctypes)}
+	names = {
+		tool
+		for tool, verb in DOCTYPE_TOOL_VERBS.items()
+		if any(all(verbs.get(need) for need in (verb, *ALSO_NEEDS.get(tool, ()))) for verbs in doctypes)
+	}
 	if not proposals_allowed(agent):
 		names -= PROPOSE_TOOLS
 	if any(verbs.get(VERB_READ) for verbs in grants[TARGET_REPORT].values()):

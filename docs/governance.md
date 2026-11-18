@@ -127,7 +127,8 @@ What the text scrub takes out, exactly:
 
 - **Text values** of 4 characters or more, wherever they appear. Dates, times
   and durations count as text, in the form they are stored in: a held-back
-  birth date is taken out of `1990-05-17`.
+  birth date is taken out of `1990-05-17`, and a held-back duration of a day
+  and two hours is taken out of `26:00:00`.
 - **Number values** of 4 significant digits or more, in any form that has the
   same value. A held-back amount of 98765 is taken out of `98765`, `98765.00`,
   `98,765.00`, `AED98765`, `98765AED`, `98765/month`, `amount:98765` and
@@ -138,10 +139,22 @@ What it keeps:
 
 - A number that is part of a longer number: a held-back 2025 stays in `12025`
   and `2025.5`.
-- A number that is one part of a date or a reference joined by hyphens or
-  slashes. A date is three number parts with the year first or last:
-  `2025-01-02`, `02/01/2025`. A reference is one or more word parts, then two
-  or more number parts: `ORD-2025-0001`. A held-back 2025 stays in all three.
+- A number that is one part of a date, a date range or a reference, joined by
+  hyphens or slashes. A held-back 2025 stays in all of these:
+  - A date is three number parts with the year first or last: `2025-01-02`,
+    `02/01/2025`. A date with a time stays whole: `2025-01-02T10:00:00`,
+    `2025-01-02T10:00:00Z`, `2025-01-02T10:00:00+04:00`.
+  - A date range is two or more dates joined by a slash: `2025-01-02/2025-02-01`.
+  - A reference is one or more word parts, then number parts that read as a
+    naming series, then at most one single letter: `ORD-2025-0001`,
+    `SINV-25-00012`, `PO2-2025-0001`, `ORD-2025-0001-A`. A word part starts
+    with a letter and can hold digits. The number parts start with a year of 2
+    or 4 digits and hold a counter with a leading zero, 3 digits or more.
+
+  The number must lie wholly inside the date or reference: `2025-01-02T98,765`
+  loses 98,765. Anything else around a number does not keep it. A currency, a unit or a label
+  next to it is no protection: `AED-98765-99000`, `AED-98765-99000-pm`,
+  `98765/month/employee`, `Q1-98765-99000` and `net-pay-98765` all lose it.
 - Shorter values, numbers written in words, and number formats other than the
   ones above, such as `98 765` or `98.765,00`.
 
@@ -226,6 +239,10 @@ Every read tool that returns this text wraps it:
   duration type, or when the cell is a short label: 24 characters or fewer, or
   one word of up to 140 characters, such as a document name. Every other text
   cell is wrapped.
+- `summarize_documents` wraps group values. It wraps the title field, whatever
+  its type and however short. It wraps any other text value, such as a Data
+  field or a document name, by the same label rule as `run_report`. Select,
+  check, date and number groups are left alone.
 
 `search_documents` and `run_report` cut wrapped text to 2,000 characters. That
 is the limit a document's fields slice uses.

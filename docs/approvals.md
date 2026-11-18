@@ -280,7 +280,8 @@ To send every change on such a doctype through a person:
 1. Open the access rule for that doctype.
 2. Clear **Draft Edit**.
 3. Tick **Propose**.
-4. Save the rule.
+4. Keep **Read** ticked. Without it, `propose_update` is not offered.
+5. Save the rule.
 
 ## Rejecting
 
