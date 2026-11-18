@@ -61,7 +61,12 @@ def app_sidebars() -> list[str]:
 	return names
 
 
-def _add_links(name: str) -> None:
+def _add_links(name: str, links: tuple = NEW_LINKS, anchor: str = ANCHOR) -> None:
+	"""Append `links` into the Build section of one sidebar, after `anchor`.
+
+	A later patch that adds a doctype to the Build section calls this with its own
+	links, so every such patch appends the same careful way.
+	"""
 	doc = frappe.get_doc(SIDEBAR_DOCTYPE, name)
 	section = _build_section(doc)
 	if section is None:
@@ -69,11 +74,11 @@ def _add_links(name: str) -> None:
 
 	start, end = section
 	present = {row.get("link_to") for row in doc.items if row.get("type") == "Link"}
-	missing = [link for link in NEW_LINKS if link[1] not in present]
+	missing = [link for link in links if link[1] not in present]
 	if not missing:
 		return
 
-	at = _anchor_position(doc, start, end)
+	at = _anchor_position(doc, start, end, anchor)
 	for offset, (label, link_to) in enumerate(missing):
 		row = doc.append(
 			"items",
@@ -135,10 +140,10 @@ def _build_section(doc) -> tuple[int, int] | None:
 	return start, len(doc.items)
 
 
-def _anchor_position(doc, start: int, end: int) -> int:
+def _anchor_position(doc, start: int, end: int, anchor: str = ANCHOR) -> int:
 	"""Just after the Agent link, or at the end of the section when it is gone."""
 	for position in range(start, end):
 		row = doc.items[position]
-		if row.get("type") == "Link" and row.get("link_to") == ANCHOR:
+		if row.get("type") == "Link" and row.get("link_to") == anchor:
 			return position + 1
 	return end

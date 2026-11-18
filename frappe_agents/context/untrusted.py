@@ -25,6 +25,7 @@ UNTRUSTED_FIELDTYPES = frozenset(
 )
 
 _TAG = re.compile(r"<\s*/?\s*untrusted", re.IGNORECASE)
+_WRAPPED = re.compile(r'^<untrusted source="[^"]*">(?P<body>.*)</untrusted>$', re.DOTALL)
 _SOURCE_UNSAFE = re.compile(r"[<>\"'\r\n\t]")
 SOURCE_CHARS = 140
 
@@ -33,6 +34,17 @@ def wrap(text: str | None, source: str) -> str:
 	"""Wrap authored text as untrusted content, naming where it came from."""
 	body = "" if text is None else neutralise(str(text))
 	return f'<untrusted source="{_source(source)}">{body}</untrusted>'
+
+
+def unwrap(text: str | None) -> str:
+	"""The text inside one wrapper, for the runtime to store as a value.
+
+	Only for text this app wrapped itself, on its way into a field rather than a
+	prompt. The tags inside stay defused: a value read back later is wrapped again,
+	and a defused tag cannot close that wrapper either.
+	"""
+	match = _WRAPPED.match(text or "")
+	return match.group("body") if match else (text or "")
 
 
 def neutralise(text: str) -> str:

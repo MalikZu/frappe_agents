@@ -30,7 +30,7 @@ Publishing on save is what crosses that gap. See
 | **Max Depth** | 3 | How deep runs may nest when one run starts another |
 | **Default Daily Token Budget** | empty | Fallback budget for an agent that sets none |
 | **Action Expiry Days** | 7 | How long a proposal waits for a decision |
-| **Suppress On Import** | on | Skip agent triggers during data import and migration |
+| **Suppress On Import** | on | Skip [agent triggers](triggers.md) during data import. Install, migrate and patch never fire them |
 | **Sensitive Fields** | empty | Fields extraction may never write on its own |
 | **Max Extraction Pages** | 20 | Longer PDFs are refused |
 | **Max Extraction File MB** | 10 | Larger files are refused |

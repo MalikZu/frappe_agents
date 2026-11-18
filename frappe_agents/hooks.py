@@ -58,12 +58,22 @@ agent_tools = [
 # Document events
 # ---------------
 
+# One "*" key, holding every handler: a second "*" or "on_update" key is valid
+# Python and silently drops the first.
+#
+# Agent Triggers: it looks the doctype up in a cached index and returns at once
+# when no trigger watches it. Inserts arrive here too, with `flags.in_insert` set,
+# and so do attachments, as File saves.
+#
 # Fill from file: a form filled from a reading carries the reading's name until it
 # is saved, and the save itself records the reading against the document. Every
 # other save pays one attribute lookup.
 doc_events = {
 	"*": {
-		"on_update": "frappe_agents.extraction.fill.stamp_on_save",
+		"on_update": [
+			"frappe_agents.triggers.dispatch.on_update",
+			"frappe_agents.extraction.fill.stamp_on_save",
+		],
 	},
 }
 

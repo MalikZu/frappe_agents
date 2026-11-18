@@ -80,6 +80,7 @@ SIDEBAR = (
 	("Link", "Review Quality", "Report", "Agent Action Review Quality", None, 1),
 	("Section Break", BUILD_SECTION, None, None, "bot", 0),
 	("Link", "Agents", "DocType", "Agent", None, 1),
+	("Link", "Triggers", "DocType", "Agent Trigger", None, 1),
 	("Link", "Rehearsals", "DocType", "Agent Rehearsal", None, 1),
 	("Link", "Access Profiles", "DocType", "Agent Access Profile", None, 1),
 	("Link", "Blueprints", "DocType", "Agent Blueprint", None, 1),

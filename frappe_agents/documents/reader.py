@@ -238,6 +238,8 @@ def _answer(file_doc: Any, document_format: str, read: dict) -> dict:
 		# The whole point of the wrapper: a document is data a stranger wrote, and
 		# an instruction printed inside one is text to report, never to follow.
 		"content": wrap(text, f"File {name}"),
+		# What looking at a scan cost, so a run that read one can count it.
+		"tokens": cint(read.get("tokens")),
 		"_docs_touched": f"File: {file_doc.name}",
 		"_result_summary": _summary(document_format, read, len(text)),
 	}
