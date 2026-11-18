@@ -217,6 +217,9 @@ def _execute(result: Any, state: dict) -> None:
 	_write(result, {"status": STATUS_RUNNING})
 	conversation, bait, bait_rows = _plant_bait(rehearsal, user)
 	state["bait_rows"] = bait_rows
+	# Listed before the commit below, so a worker killed mid-run still leaves a
+	# pointer to the bait it planted.
+	_keep_bait_rows(result, bait_rows)
 
 	run = frappe.get_doc(
 		{
