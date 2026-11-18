@@ -380,7 +380,7 @@ def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: 
 	# Everything after this reads the document as the person who fired the event.
 	frappe.set_user(fired_by)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
-	if file and not _attachment_conditions_hold(doc, doctype, docname):
+	if not _conditions_hold(doc, doctype, docname):
 		return
 
 	if not take_lock(doc.name, doctype, docname):
@@ -408,12 +408,13 @@ def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: 
 	)
 
 
-def _attachment_conditions_hold(trigger: Any, doctype: str, docname: str) -> bool:
-	"""Conditions for an attachment trigger, read off the document it hangs off.
+def _conditions_hold(trigger: Any, doctype: str, docname: str) -> bool:
+	"""The trigger's conditions, read off the document as the person it runs for.
 
-	A doc trigger checks its conditions in the hook, where the document is already
-	in hand. An attachment arrives on the File, so the document is read here, as
-	the person who attached it, and a document they cannot read fires nothing.
+	The hook checked them already for a save, where the document was in hand. They
+	are asked again here because an attachment arrives on the File, a manual run
+	arrives with no save at all, and a document can change while the job waits. A
+	document the person cannot read fires nothing.
 	"""
 	if not trigger.get("conditions"):
 		return True
@@ -701,6 +702,8 @@ def run_now(trigger: str, docname: str) -> dict:
 		frappe.throw(_("A trigger never runs as {0}. Sign in as the person it should run for.").format(user))
 
 	frappe.has_permission(doc.document_type, "write", doc=docname, throw=True)
+	if not conditions_hold(doc, frappe.get_doc(doc.document_type, docname)):
+		frappe.throw(_("{0} {1} does not meet the trigger's conditions.").format(doc.document_type, docname))
 
 	file = None
 	if doc.event == EVENT_ATTACHMENT:
