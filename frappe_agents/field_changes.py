@@ -150,11 +150,11 @@ def normalise(df: Any, value: Any, precision: int | None = None) -> Any:
 	if fieldtype in FLOAT_TYPES:
 		return flt(_number(value), precision)
 	if fieldtype == "Date":
-		return None if is_blank(value) else _parsed(getdate, value).isoformat()
+		return None if is_blank(value) else _parsed("Date", value).isoformat()
 	if fieldtype == "Datetime":
-		return None if is_blank(value) else _parsed(get_datetime, value).isoformat(" ")
+		return None if is_blank(value) else _parsed("Datetime", value).isoformat(" ")
 	if fieldtype == "Time":
-		return None if is_blank(value) else _parsed(get_time, value).isoformat()
+		return None if is_blank(value) else _parsed("Time", value).isoformat()
 	return _text(value)
 
 
@@ -222,13 +222,26 @@ def _number(value: Any) -> float:
 	return number
 
 
-def _parsed(parse: Any, value: Any) -> Any:
-	if not isinstance(value, str | datetime.date | datetime.time | datetime.timedelta):
-		raise UnusableValue("expected a date or time")
-	try:
-		return parse(value)
-	except Exception:
-		raise UnusableValue("expected a date or time in ISO form, such as 2026-11-18 or 14:30:00")
+def _parsed(fieldtype: str, value: Any) -> Any:
+	"""A date, datetime or time. Strings must be ISO: frappe's own parsers guess at
+	other forms and raise through `frappe.throw`, which leaves a message behind."""
+	if isinstance(value, str):
+		text = value.strip()
+		try:
+			if fieldtype == "Date":
+				return datetime.date.fromisoformat(text[:10])
+			if fieldtype == "Datetime":
+				return datetime.datetime.fromisoformat(text)
+			return datetime.time.fromisoformat(text)
+		except ValueError:
+			raise UnusableValue("expected a date or time in ISO form, such as 2026-11-18 or 14:30:00")
+	if fieldtype == "Date" and isinstance(value, datetime.date):
+		return getdate(value)
+	if fieldtype == "Datetime" and isinstance(value, datetime.date):
+		return get_datetime(value)
+	if fieldtype == "Time" and isinstance(value, datetime.time | datetime.timedelta | datetime.datetime):
+		return get_time(value)
+	raise UnusableValue("expected a date or time")
 
 
 def _text(value: Any) -> str:
