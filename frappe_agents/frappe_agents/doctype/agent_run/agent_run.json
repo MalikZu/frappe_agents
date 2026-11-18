@@ -13,6 +13,8 @@
   "effective_user",
   "run_as_mode",
   "surface",
+  "trigger",
+  "trigger_file",
   "model_profile",
   "context_doctype",
   "context_name",
@@ -66,7 +68,24 @@
    "fieldname": "surface",
    "fieldtype": "Select",
    "label": "Surface",
-   "options": "Desk Chat"
+   "options": "Desk Chat\nTrigger"
+  },
+  {
+   "description": "The trigger that started this run, when a document event started it.",
+   "fieldname": "trigger",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Trigger",
+   "options": "Agent Trigger",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "description": "The File that fired the trigger. Plain text rather than a link, so the run never stops anyone deleting the attachment.",
+   "fieldname": "trigger_file",
+   "fieldtype": "Data",
+   "label": "Trigger File",
+   "read_only": 1
   },
   {
    "description": "The model profile this run actually used. Empty on a run that never started.",
@@ -172,7 +191,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 18:00:00.000000",
+ "modified": "2026-11-18 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Run",
