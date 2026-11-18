@@ -253,6 +253,14 @@ class TestSavingATrigger(TriggerCase):
 		self.assertNotIn("Markdown Editor", TARGET_FIELDTYPES)
 
 
+class TestTheHook(AgentTestCase):
+	def test_the_dispatcher_is_registered_for_every_doctype(self):
+		"""A second "*" or "on_update" key in hooks.py is valid Python and drops this one."""
+		handlers = frappe.get_hooks("doc_events").get("*", {}).get("on_update") or []
+
+		self.assertIn("frappe_agents.triggers.dispatch.on_update", handlers)
+
+
 class TestWhichSavesFire(TriggerCase):
 	def test_a_change_to_the_watched_field_fires(self):
 		# Not the title: it names the order, and frappe keeps a name field in step
