@@ -223,14 +223,18 @@ class TestProposeUpdate(AgentTestCase):
 		self.assertNotIn(SECRET_RATE, payload["error"])
 
 	def test_an_agent_without_the_read_grant_is_refused(self):
-		"""Otherwise "already holds that value" would read a field one guess at a time."""
-		agent = make_matrix_agent([rule(CASE_DT, can_propose=1)])
+		"""Otherwise "already holds that value" would read a field one guess at a time.
+
+		Read on another doctype offers the tool; the call on this one still needs
+		Read on this one.
+		"""
+		agent = make_matrix_agent([rule(CASE_DT, can_propose=1), rule(PROJECT_DT, can_read=1, can_propose=1)])
 		case = make_case(notes="Called back.")
 
 		payload = self.propose(case.name, {"notes": "Called back."}, agent=agent.name)
 
 		self.assertFalse(payload["ok"])
-		self.assertIn("read", payload["error"])
+		self.assertIn(f"read {CASE_DT}", payload["error"])
 		self.assertNotIn("already hold", payload["error"])
 
 	def test_a_link_to_a_doctype_the_agent_may_not_read_is_resolved_at_approval(self):
@@ -449,7 +453,20 @@ class TestProposeUpdate(AgentTestCase):
 		result = self.approve(action, user=RATE_APPROVER)
 
 		self.assertEqual(result["status"], "Failed")
-		self.assertIn(f"{PROJECT_DT} you are not allowed to read", result["failure"])
+		self.assertIn("does not exist or that you are not allowed to read", result["failure"])
+		self.assertEqual(self.value(case.name, "project"), PROJECT_ALPHA)
+
+	def test_a_missing_link_reads_the_same_as_an_unreadable_one(self):
+		"""Two answers would tell an approver which records exist where they cannot read."""
+		agent = make_matrix_agent([rule(CASE_DT, can_read=1, can_propose=1)])
+		case = make_case()
+		# Kept as written: the agent may not read projects, so nothing looks it up.
+		action = self.proposed_by(agent.name, case.name, {"project": "FA Nowhere"})
+
+		result = self.approve(action)
+
+		self.assertEqual(result["status"], "Failed")
+		self.assertIn("does not exist or that you are not allowed to read", result["failure"])
 		self.assertEqual(self.value(case.name, "project"), PROJECT_ALPHA)
 
 	def test_a_save_refusal_is_recorded_without_its_values(self):
@@ -706,6 +723,11 @@ class TestNormalise(AgentTestCase):
 		self.assertNotEqual(
 			normalise(df, "3.6725", STORED_DECIMALS), normalise(df, "3.67251", STORED_DECIMALS)
 		)
+
+	def test_a_duration_keeps_its_fraction_of_a_second(self):
+		df = self.df("Duration")
+		self.assertEqual(normalise(df, "90.5", 9), 90.5)
+		self.assertNotEqual(normalise(df, "90.5", 9), normalise(df, 90, 9))
 
 	def test_a_word_is_not_a_number(self):
 		from frappe_agents.field_changes import UnusableValue
