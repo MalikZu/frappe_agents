@@ -17,3 +17,4 @@ frappe_agents.patches.v0_6_1.build_workspace_sidebar
 frappe_agents.patches.v0_6_1.update_agents_builder_instructions
 frappe_agents.patches.v0_7_0.redact_stored_event_logs
 frappe_agents.patches.v0_7_0.add_rehearsals
+frappe_agents.patches.v0_7_0.scrub_stored_master_values
