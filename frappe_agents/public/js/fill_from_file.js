@@ -23,12 +23,12 @@
 
 	const STYLE_ID = "frappe-agents-fill-styles";
 	const POLL_MS = 4000;
+	const MAX_POLL_ERRORS = 3;
 	// The extraction job's own timeout, plus a margin.
 	const GIVE_UP_MS = 16 * 60 * 1000;
 	const LOW_CONFIDENCE = 0.6;
 	const VALUE_CHARS = 200;
 	const READABLE_FILE = /\.(pdf|png|jpe?g|gif|webp)$/i;
-	const TEXT_TYPES = ["Data", "Link", "Small Text", "Text", "Long Text", "Select", "Dynamic Link"];
 
 	const STYLES = `
 		.fa-fill-panel { border: 1px solid var(--border-color); border-radius: var(--border-radius, 6px); padding: 10px 12px; margin: 0 0 12px; background: var(--card-bg, var(--control-bg)); }
@@ -162,7 +162,8 @@
 				label: __("Agent"),
 				options: agents.map((agent) => ({
 					value: agent.name,
-					label: agent.agent_name || agent.name,
+					// Select labels are rendered as HTML by the framework.
+					label: frappe.utils.escape_html(agent.agent_name || agent.name),
 				})),
 				default: agents[0].name,
 				reqd: 1,
@@ -175,7 +176,9 @@
 				label: __("Attached file"),
 				options: attachments.map((file) => ({
 					value: file.name,
-					label: file.file_name || file.name,
+					// A file name is whatever the uploader called it, and Select labels are
+					// rendered as HTML by the framework.
+					label: frappe.utils.escape_html(file.file_name || file.name),
 				})),
 				default: attachments[0].name,
 			});
@@ -219,6 +222,8 @@
 			docname: frm.is_new() ? null : frm.docname,
 			make_attachments_public: false,
 			allow_multiple: false,
+			// Only files stored in this site can be read.
+			allow_web_link: false,
 			restrictions: { allowed_file_types: ["application/pdf", "image/*"] },
 			on_success: (file_doc) => {
 				if (file_doc && file_doc.name) start(frm, agent, file_doc.name);
@@ -300,6 +305,9 @@
 			})
 			.catch(() => {
 				state.checking = false;
+				// One dropped request is not a failed reading. Give up after a few.
+				state.errors = (state.errors || 0) + 1;
+				if (state.errors < MAX_POLL_ERRORS) return;
 				stop_waiting(state);
 				draw_error(frm, __("The values could not be loaded. Try again."));
 			});
@@ -326,11 +334,17 @@
 		// are set after them so a fetch does not overwrite what the document says.
 		scalars.sort((a, b) => link_first(frm.doctype, a) - link_first(frm.doctype, b));
 
+		// Each set_value can wait on the server. If the person moves to another
+		// record meanwhile, the rest of these values are not for it.
+		const still_here = () =>
+			state.alive && state_of(frm) === state && frm.docname === state.docname;
 		try {
 			for (const fieldname of scalars) {
+				if (!still_here()) return;
 				await fill_scalar(frm, fieldname, values[fieldname], report);
 			}
 			for (const table of tables) {
+				if (!still_here()) return;
 				await fill_table(frm, table, values[table], report);
 			}
 		} catch (error) {
@@ -338,7 +352,7 @@
 			report.error = true;
 		}
 
-		if (!state.alive || state_of(frm) !== state) return;
+		if (!still_here()) return;
 		state.phase = "applied";
 		state.data = data;
 		state.report = report;
@@ -371,16 +385,15 @@
 		if (!df || df.read_only || df.hidden || !rows.length) return;
 		const child_doctype = df.options;
 
-		// A new form often starts with one empty row. Rows with nothing typed into
-		// any text column are not the person's work, so they make way.
-		const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+		// A new form often starts with one empty row. A row is the person's work if
+		// any field in it holds something other than what the row starts with; only
+		// rows with nothing of theirs make way, and only on a form never saved.
 		const existing = frm.doc[table] || [];
-		const blank = (row) =>
-			columns.every((column) => {
-				const cdf = frappe.meta.get_docfield(child_doctype, column);
-				return !cdf || !TEXT_TYPES.includes(cdf.fieldtype) || is_blank(row[column]);
-			});
-		if (existing.length && existing.every(blank)) {
+		const value_fields = (frappe.get_meta(child_doctype).fields || []).filter(
+			(cdf) => !frappe.model.no_value_type.includes(cdf.fieldtype),
+		);
+		const blank = (row) => value_fields.every((cdf) => is_untouched(cdf, row, row[cdf.fieldname]));
+		if (frm.is_new() && existing.length && existing.every(blank)) {
 			frm.clear_table(table);
 		}
 		if ((frm.doc[table] || []).length) {
@@ -471,11 +484,13 @@
 			]),
 		).appendTo($head);
 		const $actions = el("div", "fa-fill-actions").appendTo($head);
-		const url = data.source && data.source.file_url;
-		if (url && String(url).startsWith("/")) {
+		const url = String((data.source && data.source.file_url) || "");
+		if (url.startsWith("/files/") || url.startsWith("/private/files/")) {
 			$actions.append(button(__("Open the file"), () => window.open(url, "_blank", "noopener")));
 		}
-		$actions.append(button(__("Close"), () => cancel(frm)));
+		// Hides the panel only. The reading stays open so that saving the form still
+		// records it and attaches the file; a discarded reading would lose that.
+		$actions.append(button(__("Hide"), () => state.$panel.hide()));
 
 		el(
 			"div",
@@ -563,7 +578,7 @@
 				).appendTo($item);
 				if (!is_blank(flag.master_value))
 					el("span", "fa-fill-value", short(flag.master_value)).appendTo($item);
-			} else if (flag.master_name && !is_blank(flag.value)) {
+			} else if (flag.master_name && cint(flag.compared) && !is_blank(flag.value)) {
 				el(
 					"span",
 					"fa-fill-ok",
@@ -573,11 +588,12 @@
 
 			watch_master(frm, flag);
 			if (key.includes("[") || is_blank(flag.value)) continue;
-			const blocked = stale || cint(flag.mismatch);
 			$item.append(
 				button(__("Use the printed value"), () => use_printed(frm, key, flag), {
-					disabled: blocked,
-					reason: __("It does not match the record. Type it yourself after checking."),
+					disabled: is_blocked(frm, flag),
+					reason: __(
+						"Only offered when the linked record holds the same value. Type it yourself after checking.",
+					),
 				}),
 			);
 		}
@@ -615,22 +631,30 @@
 		});
 	}
 
+	/** One click only when the record the form links to now holds the same value. */
+	function is_blocked(frm, flag) {
+		return cint(flag.blocked) || cint(flag.mismatch) || master_changed(frm, flag);
+	}
+
 	function use_printed(frm, key, flag) {
 		// Asked again at the click: the link may have moved since the panel drew.
-		if (master_changed(frm, flag) || cint(flag.mismatch)) return draw_result(frm);
+		if (is_blocked(frm, flag)) return draw_result(frm);
 		frm.set_value(key, flag.value);
 	}
 
 	function draw_candidates(frm, candidates) {
-		const keys = Object.keys(candidates).filter((key) => !key.includes("["));
+		const keys = Object.keys(candidates);
 		if (!keys.length) return;
 		const $section = section(frm, __("Pick these yourself"));
 		for (const key of keys) {
 			const entry = candidates[key] || {};
+			const in_row = key.includes("[");
 			const $item = el("div", "fa-fill-item").appendTo($section);
-			el("span", "fa-fill-label", label_of(frm.doctype, key)).appendTo($item);
+			el("span", "fa-fill-label", sensitive_label(frm, key)).appendTo($item);
 			if (entry.text) el("span", "fa-fill-value", short(entry.text)).appendTo($item);
 			if (entry.note) el("span", "fa-fill-note", entry.note).appendTo($item);
+			// A row's link is picked in the row itself: its number may have moved.
+			if (in_row) continue;
 			for (const option of entry.options || []) {
 				$item.append(button(option.title || option.name, () => frm.set_value(key, option.name)));
 			}
@@ -715,14 +739,19 @@
 			.catch(() => teardown(frm));
 	}
 
-	frappe.ui.form.on("*", {
+	/** The same document, allowing for a new form that was just saved and renamed. */
+	function same_document(state, frm) {
+		if (state.docname === frm.docname) return true;
+		const renamed = frappe.model.new_names && frappe.model.new_names[state.docname];
+		return renamed === frm.docname;
+	}
+
+	const handlers = {
 		refresh(frm) {
 			try {
 				const state = state_of(frm);
 				// Another document in the same form object: this reading is not for it.
-				// A new form that was just saved has already moved the name on in
-				// after_save, which runs before this refresh.
-				if (state && state.docname !== frm.docname) teardown(frm);
+				if (state && !same_document(state, frm)) teardown(frm);
 
 				if (!can_fill(frm)) return;
 				const agents = frappe_agents.get_fill_agents(frm.doctype);
@@ -738,11 +767,27 @@
 		after_save(frm) {
 			try {
 				const state = state_of(frm);
-				if (state) state.docname = frm.docname;
+				if (state && same_document(state, frm)) state.docname = frm.docname;
 				record(frm);
 			} catch (error) {
 				console.error("frappe_agents: could not record the filled document", error);
 			}
 		},
-	});
+	};
+
+	// Registered per doctype rather than on "*": version-15 has no wildcard form
+	// handlers, and only the doctypes an agent may extract into need the button.
+	const registered = new Set();
+	function register() {
+		const boot = (frappe.boot && frappe.boot.frappe_agents) || {};
+		for (const agent of boot.form_agents || []) {
+			for (const doctype of agent.extract_doctypes || []) {
+				if (registered.has(doctype)) continue;
+				registered.add(doctype);
+				frappe.ui.form.on(doctype, handlers);
+			}
+		}
+	}
+	register();
+	$(document).on("startup", register);
 })();
