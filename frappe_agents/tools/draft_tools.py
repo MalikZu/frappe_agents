@@ -22,6 +22,12 @@ The tool only checks that the action is open to the user the run acts as. Applyi
 it is the approver's job, in `frappe_agents.actions`, under the approver's roles —
 nothing in this file moves a workflow state.
 
+`propose_update` is the same shape for a live record: a document of a doctype with
+no submit step, such as a ticket or a lead, which never leaves docstatus 0. It
+names plain fields and their new values, and records them with the values the
+document holds now. Proposing needs read, on the document and on each field's
+permlevel. Writing is the approver's job, in `frappe_agents.actions`.
+
 Two refusals in here carry more weight than they look:
 
 * **Workflow-governed doctypes.** Frappe does not block a server-side `doc.submit()`
@@ -47,22 +53,41 @@ from frappe.model import table_fields
 from frappe.model.workflow import WorkflowStateError, get_transitions, get_workflow, get_workflow_name
 from frappe.utils import cint, strip_html
 
-from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_UPDATE_DRAFT
+from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_READ, VERB_UPDATE_DRAFT
 from frappe_agents.actions import pending_action_for, record_proposal, rejected_proposal_for
 from frappe_agents.context.untrusted import wrap
+from frappe_agents.field_changes import (
+	MAX_FIELDS,
+	UnusableValue,
+	field_refusal,
+	has_field_access,
+	live_problem,
+	normalise,
+	precision_of,
+)
 from frappe_agents.runner.run import publish_event
 from frappe_agents.tools.base import (
 	CAPABILITY_DRAFT,
 	ToolDenied,
 	current_run,
+	has_grant,
 	require_draft_ownership,
 	require_grant,
 	row_cap,
 )
+from frappe_agents.updates import pending_update_fields
 
 ACTION_SUBMIT = "Submit"
 ACTION_CANCEL = "Cancel"
 ACTION_TRANSITION = "Workflow Transition"
+ACTION_UPDATE = "Update"
+# Pending field changes one record may carry at once. Disjoint changes compose,
+# because each is checked field by field; past this, the record is a queue.
+MAX_PENDING_UPDATES = 5
+# Fields stored as varchar, and frappe's default width for them. A longer value
+# would fail the approval's save; refusing it now tells the agent while it can fix it.
+LENGTH_LIMITED = frozenset({"Data", "Link", "Select"})
+DEFAULT_LENGTH = 140
 STATUS_PENDING = "Pending"
 
 REASON_LIMIT = 2000
@@ -306,7 +331,8 @@ def _propose(payload: dict, action_type: str) -> dict:
 	meta = _meta(doctype)
 	if not cint(meta.is_submittable):
 		raise ToolDenied(
-			f"{doctype} is not a submittable doctype — it has no submit or cancel step to propose."
+			f"{doctype} is not a submittable doctype — it has no submit or cancel step to propose. "
+			"To change fields on one of its records, use propose_update."
 		)
 
 	doc = _load(doctype, name)
@@ -446,6 +472,179 @@ def _available_actions(doc: Any) -> list[str]:
 	return actions
 
 
+def propose_update(payload: dict) -> dict:
+	"""Ask a human to change fields on a live record. Writes no document, only the proposal.
+
+	The whole call is refused if any field is: a proposal is approved as one
+	exact set of changes, so nothing is dropped quietly the way `update_draft`
+	strips system fields.
+	"""
+	doctype = _require_str(payload, "doctype")
+	name = _require_str(payload, "name")
+	values = _require_dict(payload, "values")
+	reason = _require_reason(payload)
+	run = _require_run("propose_update")
+
+	require_grant(doctype, VERB_PROPOSE)
+	# Read too: the tool compares each value with the stored one and says when they
+	# match, so without it Propose alone would be a way to read fields one guess at
+	# a time.
+	require_grant(doctype, VERB_READ)
+	meta = _meta(doctype)
+	problem = live_problem(meta)
+	if problem:
+		raise ToolDenied(problem)
+
+	doc = _load(doctype, name)
+	if not frappe.has_permission(doctype, "read", doc=doc):
+		raise ToolDenied(f"You are not allowed to read {doctype} {name}.")
+	if len(values) > MAX_FIELDS:
+		raise ValueError(f"Too many fields: {len(values)}. One proposal changes at most {MAX_FIELDS}.")
+
+	_refuse_fields(meta, doc, values)
+	proposed, seen = _proposed_change(meta, doc, values)
+	_refuse_overlap(doctype, name, proposed)
+	reason = _check_rejected(
+		doctype, name, ACTION_UPDATE, doc.modified, reason, payload, proposed_values=proposed
+	)
+
+	action = record_proposal(
+		run,
+		ACTION_UPDATE,
+		doctype,
+		name,
+		reason,
+		doc.modified,
+		proposed_values=proposed,
+		seen_values=seen,
+	)
+	# The new values only. What the fields hold now is shown on the approval form,
+	# to people who may read it there; the chat and the run log carry what the
+	# agent asked for, which it already said in its own call.
+	changes = [
+		{"fieldname": fieldname, "label": meta.get_label(fieldname), "value": value}
+		for fieldname, value in proposed.items()
+	]
+
+	publish_event(
+		run,
+		"action_proposed",
+		action=action.name,
+		action_type=ACTION_UPDATE,
+		target_doctype=doctype,
+		target_name=name,
+		reason=reason,
+		changes=changes,
+	)
+
+	return {
+		"action": action.name,
+		"action_type": ACTION_UPDATE,
+		"status": STATUS_PENDING,
+		"target_doctype": doctype,
+		"target_name": name,
+		"changes": changes,
+		"note": f"Proposed. {doctype} {name} is unchanged until an approver decides.",
+		"_docs_touched": f"{doctype}: {name}, Agent Action: {action.name}",
+	}
+
+
+def _refuse_fields(meta: Any, doc: Any, values: dict) -> None:
+	"""Refuse the call if any field may not be proposed. Never repeats a field's value."""
+	refusals = []
+	for fieldname in values:
+		refusal = field_refusal(meta, fieldname, doc)
+		if not refusal and not has_field_access(doc, meta.get_field(fieldname), "read"):
+			refusal = f"You are not allowed to read {fieldname} on {meta.name}."
+		if refusal:
+			refusals.append(refusal)
+	if refusals:
+		raise ToolDenied("Nothing was proposed. " + " ".join(refusals))
+
+
+def _proposed_change(meta: Any, doc: Any, values: dict) -> tuple[dict, dict]:
+	"""The new values and the current ones, normalised, for the fields that change."""
+	proposed: dict = {}
+	seen: dict = {}
+	problems: list[str] = []
+	unchanged: list[str] = []
+
+	for fieldname, raw in values.items():
+		df = meta.get_field(fieldname)
+		precision = precision_of(doc, df)
+		try:
+			value = _checked_value(df, normalise(df, raw, precision))
+		except UnusableValue as exc:
+			problems.append(f"{fieldname}: {exc}.")
+			continue
+		try:
+			current = normalise(df, doc.get(fieldname), precision)
+		except UnusableValue:
+			# What the database holds is not a value the field's type allows, so it
+			# cannot be compared against; the proposal would fail as stale anyway.
+			problems.append(f"{fieldname}: the stored value cannot be read as a {df.fieldtype}.")
+			continue
+		if value == current:
+			unchanged.append(fieldname)
+			continue
+		proposed[fieldname] = value
+		seen[fieldname] = current
+
+	if problems:
+		raise ValueError("Nothing was proposed. " + " ".join(problems))
+	if unchanged:
+		raise ValueError(
+			f"Nothing was proposed. {', '.join(unchanged)} already hold the value you gave. "
+			"Leave them out and propose only what changes."
+		)
+	return proposed, seen
+
+
+def _checked_value(df: Any, value: Any) -> Any:
+	"""A Select value from its options, a Link value as the record's own name."""
+	if df.fieldtype in LENGTH_LIMITED and isinstance(value, str):
+		limit = cint(df.length) or DEFAULT_LENGTH
+		if len(value) > limit:
+			raise UnusableValue(f"too long: at most {limit} characters")
+	if df.fieldtype == "Select" and value:
+		options = [option for option in (df.options or "").split("\n") if option]
+		if value not in options:
+			raise UnusableValue(f"expected one of {', '.join(options)}")
+	if df.fieldtype == "Link" and value:
+		# Only on a doctype the agent may read. Elsewhere the value is kept as given
+		# and the approval decides: it checks the record exists and the approver may
+		# read it, and resolves its real name then.
+		if not has_grant(df.options, VERB_READ):
+			return value
+		# Through the run user's own list permissions, so the answer is the record's
+		# real name — case included — or nothing, and never "it exists but you
+		# cannot see it".
+		try:
+			names = frappe.get_list(df.options, filters={"name": value}, pluck="name", limit_page_length=1)
+		except frappe.PermissionError:
+			names = []
+		if not names:
+			raise UnusableValue(f"expected the name of a {df.options} you can read")
+		return names[0]
+	return value
+
+
+def _refuse_overlap(doctype: str, name: str, proposed: dict) -> None:
+	pending = pending_update_fields(doctype, name)
+	for action, fields in pending.items():
+		overlap = sorted(fields & set(proposed))
+		if overlap:
+			raise ToolDenied(
+				f"There is already a pending change to {', '.join(overlap)} on {doctype} {name} "
+				f"({action}). Wait for that decision instead of proposing again."
+			)
+	if len(pending) >= MAX_PENDING_UPDATES:
+		raise ToolDenied(
+			f"{doctype} {name} already has {len(pending)} pending field changes. Wait for "
+			"some of them to be decided before proposing more."
+		)
+
+
 def _check_target_state(doc: Any, action_type: str) -> None:
 	docstatus = cint(doc.docstatus)
 	if action_type == ACTION_SUBMIT and docstatus != DRAFT:
@@ -500,6 +699,7 @@ def _check_rejected(
 	payload: dict,
 	workflow_action: str | None = None,
 	from_workflow_state: str | None = None,
+	proposed_values: dict | None = None,
 ) -> str:
 	"""Refuse to ask again what an approver already refused, and mark any second ask.
 
@@ -514,7 +714,7 @@ def _check_rejected(
 	who decides whether the change answers the note.
 	"""
 	rejected = rejected_proposal_for(
-		doctype, name, action_type, modified, workflow_action, from_workflow_state
+		doctype, name, action_type, modified, workflow_action, from_workflow_state, proposed_values
 	)
 	if not rejected:
 		return reason
@@ -534,8 +734,9 @@ def _check_rejected(
 		)
 
 	note = wrap(rejected.decision_note or "", "approver note")
+	what = workflow_action or ("field change" if action_type == ACTION_UPDATE else action_type.lower())
 	raise ToolDenied(
-		f"An approver already rejected this {(workflow_action or action_type).lower()} proposal "
+		f"An approver already rejected this {what} proposal "
 		f"for {doctype} {name}, "
 		f"and the document has not changed since. The approver wrote: {note} "
 		"Tell the user what the approver said. Propose it again with user_asked_again set "
@@ -807,7 +1008,9 @@ TOOLS = [
 			"permission. Submitted and cancelled documents are refused: those are decided "
 			"by a human through propose_cancel. Child tables replace the whole table, so "
 			"send every row you want to keep. Stripped system fields come back under "
-			"stripped_keys."
+			"stripped_keys. A record with no submit step, such as a ticket or a lead, is "
+			"live: a change to it takes effect at once. When a person should agree to the "
+			"change first, use propose_update instead."
 		),
 		"args_schema": {
 			"type": "object",
@@ -896,6 +1099,42 @@ TOOLS = [
 				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "action", "reason"],
+		},
+	},
+	{
+		"tool_name": "propose_update",
+		"handler_path": "frappe_agents.tools.draft_tools.propose_update",
+		"capability": CAPABILITY_DRAFT,
+		"description": (
+			"Propose that a human change fields on a live record: a document with no submit "
+			"step, such as a ticket, a lead or a task. This changes nothing: it records a "
+			"pending Agent Action with the new values, the values the record holds now, and "
+			"your reason, and an approver applies it under their own permissions. If any of "
+			"those fields changes before the decision, the proposal fails and you can propose "
+			"again. Plain fields only: text, numbers, dates, checkboxes, selects and links. "
+			"Tables, rich text, read-only, sensitive and workflow-state fields are refused, and "
+			"one bad field refuses the whole call. For a draft of a document that has a submit "
+			"step, use update_draft."
+		),
+		"args_schema": {
+			"type": "object",
+			"properties": {
+				"doctype": {"type": "string", "description": "DocType of the record, e.g. 'Task'."},
+				"name": {"type": "string", "description": "Name of the record."},
+				"values": {
+					"type": "object",
+					"description": (
+						'Fieldname to new value, e.g. {"status": "Closed", "priority": "High"}. '
+						"Only the fields that change."
+					),
+				},
+				"reason": {
+					"type": "string",
+					"description": "Why these values are right, in your own words. Required.",
+				},
+				"user_asked_again": USER_ASKED_AGAIN,
+			},
+			"required": ["doctype", "name", "values", "reason"],
 		},
 	},
 ]

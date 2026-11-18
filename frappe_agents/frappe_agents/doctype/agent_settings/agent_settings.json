@@ -15,7 +15,11 @@
   "max_extraction_pages",
   "max_extraction_file_mb",
   "pdf_parser_engine",
-  "extractions_per_user_per_day"
+  "extractions_per_user_per_day",
+  "mcp_section",
+  "mcp_enabled",
+  "mcp_requests_per_minute",
+  "mcp_calls_per_session"
  ],
  "fields": [
   {
@@ -87,12 +91,38 @@
    "fieldname": "extractions_per_user_per_day",
    "fieldtype": "Int",
    "label": "Extractions per User per Day"
+  },
+  {
+   "fieldname": "mcp_section",
+   "fieldtype": "Section Break",
+   "label": "Outside Clients (MCP)"
+  },
+  {
+   "default": "0",
+   "description": "Open the MCP endpoint on this site. Each agent must also tick Allow MCP. Document text read through it goes to the model of the client that calls it, not to a provider you configured.",
+   "fieldname": "mcp_enabled",
+   "fieldtype": "Check",
+   "label": "MCP Enabled"
+  },
+  {
+   "default": "60",
+   "description": "Requests one user may send to the MCP endpoint in a minute.",
+   "fieldname": "mcp_requests_per_minute",
+   "fieldtype": "Int",
+   "label": "MCP Requests per User per Minute"
+  },
+  {
+   "default": "50",
+   "description": "Tool calls one MCP session may make. The client then starts a new session.",
+   "fieldname": "mcp_calls_per_session",
+   "fieldtype": "Int",
+   "label": "MCP Tool Calls per Session"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-13 13:20:00.000000",
+ "modified": "2026-11-18 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Settings",

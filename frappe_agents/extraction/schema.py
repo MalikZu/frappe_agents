@@ -496,3 +496,46 @@ def _number(value: Any) -> float:
 		return float(str(value or "").strip() or 0)
 	except ValueError:
 		return 0.0
+
+
+def reviewed_values(spec: dict, values: dict, flags: dict) -> tuple[dict, list[str]]:
+	"""Everything in `values` that is a field we asked the model for.
+
+	Returns `(clean, ignored)`. Sensitive fields are dropped here without exception:
+	on the review screen they come back through `api._confirmed_values` or not at
+	all, and Fill from file never hands one to a form as a value. Run against a
+	schema built now, it also drops any field the user may no longer write.
+	"""
+	fields = spec.get("fields") or {}
+	tables = spec.get("child_tables") or {}
+	sensitive = set(spec.get("sensitive") or []) | set(flags or {})
+
+	clean: dict[str, Any] = {}
+	ignored: list[str] = []
+
+	for key, value in values.items():
+		if key in sensitive:
+			# Handled by the confirmation path, or not at all. Never here.
+			continue
+		if key in SYSTEM_FIELDS or str(key).startswith("__"):
+			ignored.append(key)
+			continue
+		if key in fields:
+			clean[key] = value
+			continue
+		if key in tables and isinstance(value, list):
+			clean[key] = [_reviewed_row(tables[key], row) for row in value if isinstance(row, dict)]
+			continue
+		ignored.append(key)
+
+	return clean, ignored
+
+
+def _reviewed_row(table: dict, row: dict) -> dict:
+	fields = table.get("fields") or {}
+	sensitive = set(table.get("sensitive") or [])
+	return {
+		key: value
+		for key, value in row.items()
+		if key in fields and key not in sensitive and key not in SYSTEM_FIELDS
+	}

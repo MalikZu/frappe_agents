@@ -64,13 +64,15 @@ open and running while it thinks, then folded into one line — **Thought for 4s
 — the moment it stops. Click the line to read it. The thinking is not the
 answer, and it is never what the conversation is stored with.
 
-## When the agent asks for a submit or a cancel
+## When the agent asks for an approval
 
-An agent cannot submit or cancel a document. It asks, and the chat shows a card:
-**Waiting for an approver**, the document, and the agent's reason. Someone else
-decides it — not you, if you asked, and not the person who owns the agent. The
-approvers who could decide it are notified, and you are notified when it is
-decided or expires. The card changes when that happens. See
+Some things an agent only asks for: a submit, a cancel, a workflow action, or a
+change to a live record such as a ticket. When it asks, the chat shows a card:
+**Waiting for an approver**, the document, and the agent's reason. A card for a
+field change also lists each field and its new value. Someone else decides it —
+not you, if you asked, and not the person who owns the agent. The approvers who
+could decide it are notified, and you are notified when it is decided or
+expires. The card changes when that happens. See
 [After a proposal is decided](#after-a-proposal-is-decided) and
 [Approvals](approvals.md).
 

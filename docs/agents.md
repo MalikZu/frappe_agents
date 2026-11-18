@@ -15,6 +15,9 @@ section](images/agent-form.png)
   have a reason not to.
 - **Service User** — the agent acts as one account you name.
 
+A trigger only accepts a Session User agent. It runs as the person whose action
+fired it. See [Agent triggers](triggers.md).
+
 A service user runs with no human in the loop. Its permissions are the whole
 blast radius, so the form checks it:
 
@@ -93,6 +96,16 @@ document the file hangs off. See [Files in chat](files-in-chat.md).
 
 **Show in Forms** offers the agent from the **Ask Agent** button on documents.
 **Form Doctypes** limits that button to the doctypes you name.
+It also offers **Fill from file** on every doctype where the agent has the
+**Extract** verb. See [Fill from file](extraction.md#fill-from-file).
+
+**Allow MCP** lets outside clients such as Claude Code or an IDE call this
+agent's tools. It is off by default, and Agent Settings must allow MCP too. Over
+MCP the agent never goes past Draft. See [Outside clients](mcp.md).
+
+An agent can also run with no chat at all, when a document event happens: a file
+is attached, or a field changes. That is a trigger, and it is its own record. See
+[Agent triggers](triggers.md).
 
 ## Skills
 
@@ -131,3 +144,9 @@ standing between a misconfigured agent and a large bill.
 
 A new agent reaches nothing until you give it access rules. That is deliberate:
 the first thing you write on an agent is what it is for.
+
+## Testing
+
+Test an agent before you enable it for users, and again after you change its
+model. Write rehearsals for it, and load the prompt-injection pack. See
+[Rehearsals](rehearsals.md).

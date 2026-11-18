@@ -3,3 +3,4 @@
 import "./chat_ui.js";
 import "./form_button.js";
 import "./agent_action_list.js";
+import "./fill_from_file.js";

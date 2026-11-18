@@ -338,7 +338,7 @@ const WAITING_REFRESH_MS = 500;
 
 // Tools whose result is a proposal waiting for a person. Their finished event is
 // what a reopened conversation redraws its approval cards from.
-const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel", "propose_transition"];
+const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel", "propose_transition", "propose_update"];
 
 // How much of a conversation is kept in memory, and how many conversations.
 // Oldest events go first: a run that is still going will write its own log the
@@ -576,6 +576,7 @@ function action_verb(state) {
 	}
 	if (state.action_type === "Submit") return __("Submit");
 	if (state.action_type === "Cancel") return __("Cancel");
+	if (state.action_type === "Update") return __("Change fields");
 	// A redacted transition has no action name, and an unknown type has no verb
 	// of its own. Neither is a submit.
 	if (state.action_type === "Workflow Transition") return __("Workflow action");
@@ -1684,7 +1685,8 @@ frappe_agents.ChatUI = class ChatUI {
 
 		if (run.output_message) {
 			// Already on screen when the log carried it, which it does for every
-			// run that recorded one.
+			// run that recorded one. Both are stored with the same values held
+			// back, so the answer in the log and the column match.
 			if (run.output_message !== replayed.said) {
 				this.$log.append(this.make_bubble(run.output_message, "", true));
 			}
@@ -1795,6 +1797,7 @@ frappe_agents.ChatUI = class ChatUI {
 				action_type: proposal.action_type,
 				workflow_action: proposal.workflow_action,
 				from_workflow_state: proposal.workflow_state,
+				changes: proposal.changes,
 				target_doctype: proposal.target_doctype,
 				target_name: proposal.target_name,
 				reason: reasons[event.toolCallId] || "",
@@ -2476,6 +2479,24 @@ frappe_agents.ChatUI = class ChatUI {
 		} else if (state.target_doctype && state.target_name) {
 			$("<div class='agent-chat-action-target'></div>")
 				.text(`${__(state.target_doctype)}: ${state.target_name}`)
+				.appendTo($card);
+		}
+		// A field change lists the new values only, as text. What the fields hold
+		// now is on the approval form, for the people allowed to read it there.
+		// The values come with the live event. The server never hands them back,
+		// so a reloaded card names the fields instead.
+		const changes = Array.isArray(state.changes) ? state.changes : [];
+		if (visible && changes.length) {
+			changes.forEach((change) => {
+				const value =
+					change.value === null || change.value === "" ? __("empty") : String(change.value);
+				$("<div class='agent-chat-action-line'></div>")
+					.text(__("{0}: {1}", [__(change.label || change.fieldname || ""), value]))
+					.appendTo($card);
+			});
+		} else if (visible && state.update_fields) {
+			$("<div class='agent-chat-action-line'></div>")
+				.text(__("Fields: {0}", [state.update_fields]))
 				.appendTo($card);
 		}
 		if (visible && state.reason) {

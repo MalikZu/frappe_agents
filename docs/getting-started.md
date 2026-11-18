@@ -31,12 +31,12 @@ The app is the same on both. Two things differ on v15, and both are noted where
 they matter: there is no desk tile, and masked fields are not redacted
 automatically. See [Running the app](admin.md).
 
-Installing sets up four roles, two starting access profiles, a catalog of known
+Installing sets up five roles, two starting access profiles, a catalog of known
 providers and models — all switched off and without keys — and the **Agents**
 workspace. It changes nothing about how your site already works: until you
 create an agent and give it access, there is nothing to run.
 
-## The four roles
+## The roles
 
 | Role | Does what |
 |---|---|
@@ -44,8 +44,9 @@ create an agent and give it access, there is nothing to run.
 | **Agent User** | Talks to agents in chat and from a document form |
 | **Agent Approver** | Decides the proposals agents write |
 | **Agent Auditor** | Reads the tool-call trail |
+| **Agent Rehearsal User** | A test account a rehearsal may run as. See [Rehearsals](rehearsals.md) |
 
-All four need Desk access. Agent Approver and Agent Auditor are both privileged
+All of them need Desk access. Agent Approver and Agent Auditor are both privileged
 in their own way — an approver commits things to your business, and an auditor
 reads argument and result summaries across everyone's runs. Grant them the way
 you would grant any other role that sees everything.

@@ -59,6 +59,10 @@ TOOL_RULES = (
 # for documents a Workflow governs. Without it the model learns that tool only
 # from the refusal propose_submit gives on such a document.
 #
+# CHANGED ON PURPOSE, 2026-11-18: one more sentence, naming propose_update for
+# records with no submit step. update_draft changes those live, and the model
+# cannot tell a live record from a draft by its docstatus alone.
+#
 # CHANGED ON PURPOSE, 2026-11-18: one sentence added on the proposal updates a
 # user message may open with, and on not proposing a rejected action again. It
 # belongs here because only an agent that can propose is ever told a decision.
@@ -69,6 +73,9 @@ DRAFT_RULES = (
 	"and so is cancelling: call propose_submit or propose_cancel and state your reason. "
 	"On a document a Workflow governs, call propose_transition with one of the "
 	"workflow's actions instead. "
+	"A record with no submit step, such as a ticket or a lead, is live, not a draft: "
+	"when a person should agree to a change to it, call propose_update instead of "
+	"update_draft. "
 	"The approver reads that reason next to the document, so make it specific — what the "
 	"document commits to, what you checked, and why now.\n"
 	"A proposal is not an act. Never tell the user that a document was submitted or "

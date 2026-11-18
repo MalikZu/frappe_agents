@@ -6,6 +6,9 @@ becomes a Purchase Invoice draft; a résumé becomes a Job Applicant draft.
 Extraction never produces a finished document. It produces a draft with holes
 where the risky values were, and a review screen for filling them.
 
+There is a second way to use it: [Fill from file](#fill-from-file) reads a file
+into a form you have open, and you save the form yourself.
+
 ```mermaid
 flowchart TD
     A["A file is attached"] --> B{"Permission on the file · permission to create<br/>size · pages · daily cap"}
@@ -102,8 +105,9 @@ duplicate warnings, and the sensitive fields waiting on you.
 Ordinary values you can edit freely. A sensitive value is different: you confirm
 it field by field, against the source document in front of you. **A sensitive
 value that you did not explicitly confirm is dropped**, and the response names
-what it dropped. This is the only path in the app that can write a sensitive
-field into a document.
+what it dropped. This is the only path where the app itself writes a sensitive
+field into a document. [Fill from file](#fill-from-file) never does: you type
+the value into the form, or click to use it, and save.
 
 Accepting saves the draft under your own write permission, with nothing
 bypassed, and validates it in full — the holes left for review have to be filled
@@ -132,8 +136,9 @@ cannot open would be an existence oracle wearing a helpful label.
 | **Pending** | Queued |
 | **Running** | The model is reading it |
 | **Needs Review** | A draft exists and is waiting for a person |
-| **Accepted** | A reviewer accepted it |
-| **Discarded** | A person threw it away |
+| **Ready** | Fill from file only: the values wait for the form that asked |
+| **Accepted** | A reviewer accepted it, or the filled form was saved |
+| **Discarded** | A person threw it away, or a Fill from file reading waited more than 24 hours |
 | **Failed** | It could not be done — reason on the row |
 
 The job never raises. A failure is recorded on the Document Extraction row where
@@ -141,3 +146,110 @@ a human can read it, not swallowed into a log.
 
 Discard wins a race. If you discard the request while the model is still
 thinking, the reading finishes, its result is dropped, and the row says so.
+
+## Fill from file
+
+**Fill from file** is a button on a form. It reads a PDF or an image and puts
+what it reads into the open form. Nothing is saved for you. You check the
+values, and you save the form under your own permission.
+
+It uses the same reading as everything above, with every check in it: file
+permission, permission on the doctype, the caps, the profile's file support,
+and the sensitive-field gate. The only difference is the last step. No draft is
+created. The values wait on the Document Extraction row, with status **Ready**,
+until your form collects them.
+
+### Turn it on for a doctype
+
+The button belongs to an agent. An agent offers it on a doctype when all of
+these are true:
+
+- **Show in Forms** is ticked on the agent.
+- The agent has a **Model Profile** that can read the file type. Tick
+  **Supports PDF** or **Supports Images** on the profile where needed.
+- The agent's access rules give **Extract** on that doctype. See
+  [Access](access.md).
+
+To turn it on:
+
+1. Open the agent.
+2. Tick **Show in Forms**.
+3. Add an access rule for the doctype, for example Purchase Invoice.
+4. Tick **Extract** on that rule.
+5. Save the agent.
+6. Fill in **Agent Settings → Sensitive Fields** for that doctype, if you have
+   not already.
+
+People see the button after their next page load. They need the **Agent User**
+role, a role the agent allows, and permission to create the doctype. On a saved
+draft they need write permission on that draft.
+
+An agent with no access rules yet, on the old tool selection, does not offer the
+button anywhere.
+
+### Fill a new form
+
+1. Open a new form.
+2. Click **Fill from file**.
+3. If the dialog shows **Agent**, select the agent.
+4. Click **Upload a file**.
+5. Select the PDF or image.
+6. Wait until the panel at the top of the form says "Filled". You can keep
+   working while the file is read.
+7. Click **Open the file**.
+8. Compare each highlighted field with the file.
+9. Type each field listed under **Check these by hand. They were left empty on
+   purpose.**
+10. Save the form.
+
+### Fill a saved draft
+
+1. Open the draft.
+2. Click **Fill from file**.
+3. If the dialog shows **Agent**, select the agent.
+4. Select the file in **Attached file**, then click **Read this file**. To use
+   a different file, click **Upload a new file** instead.
+5. Do steps 6 to 10 of [Fill a new form](#fill-a-new-form).
+
+When you save, the save records the reading against the document and attaches
+the file to it.
+
+### What the panel shows
+
+- **Highlighted fields** came from the file. Hover one to see the page and the
+  model's confidence. An orange mark means the model was unsure.
+- **Check these by hand** lists the sensitive fields. They stay empty. Each one
+  shows what the file printed and, when the document links to a record that
+  holds the same field, whether the two match.
+- **Pick these yourself** lists links the file named but no single record
+  matched. Click a suggestion, or pick the record in the field.
+- **Already filled in** lists fields that had a value before. The fill does not
+  overwrite them. Click **Use the file's value** to take the file's value.
+- **Tables that already had rows** lists child tables the fill left alone.
+  Click **Add them** to append the rows from the file.
+- **This may be a duplicate** says when the same file was read before, or a
+  value that must be unique already exists.
+
+**Use the printed value** is offered only when the record the form links to
+holds the same value. It is not offered when the values differ, when there was
+nothing to compare with, or when you changed the link after the reading. In
+those cases, check the value somewhere other than the file, and type it.
+
+### What is recorded
+
+Every fill is a Document Extraction row with **Purpose** set to Fill Form, the
+agent it used, and the person who clicked. Its tokens, file and model are
+recorded like any other extraction.
+
+The save records the reading itself, on the server. Closing the tab, losing the
+connection, or looking at another record before you save does not lose the
+record. When the form is saved, each sensitive flag records whether the saved
+value was left empty, is the printed value, or was typed. The saved value is
+compared with the record the document now links to. The value itself stays on
+the document and is not copied onto the row.
+
+A reading that no saved document is tied to within 24 hours is closed as
+**Discarded** by the daily job. Click **Cancel** in the panel while it reads to close it sooner.
+Click **Hide** to hide the panel after the fill; saving the form still records
+the reading. Reload the form to throw away values you do not want.
+

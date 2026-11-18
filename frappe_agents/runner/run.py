@@ -51,11 +51,13 @@ from frappe_agents.harness.provider_events import (
 )
 from frappe_agents.harness.tools import AgentTool, AgentToolResult
 from frappe_agents.model_profiles import check_profile
+from frappe_agents.redaction import EventRedactor
 from frappe_agents.runner.proposal_updates import note_for, with_note
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
 	CAPABILITY_DRAFT,
+	FORBIDDEN_USERS,
 	KillSwitchActive,
 	execute_tool,
 	log_interrupted_call,
@@ -99,7 +101,6 @@ STREAM_EVENTS = {
 	ThinkingEndEvent: ("thinking", "end"),
 }
 
-FORBIDDEN_USERS = ("Administrator", "Guest")
 DEFAULT_MAX_STEPS = 10
 DEFAULT_MAX_DEPTH = 3
 HISTORY_LIMIT = 20
@@ -224,6 +225,9 @@ DRAFT_DISCIPLINE = (
 	"and so is cancelling: call propose_submit or propose_cancel and state your reason. "
 	"On a document a Workflow governs, call propose_transition with one of the "
 	"workflow's actions instead. "
+	"A record with no submit step, such as a ticket or a lead, is live, not a draft: "
+	"when a person should agree to a change to it, call propose_update instead of "
+	"update_draft. "
 	"The approver reads that reason next to the document, so make it specific — what the "
 	"document commits to, what you checked, and why now.\n"
 	"A proposal is not an act. Never tell the user that a document was submitted or "
@@ -262,6 +266,11 @@ def execute_run(run_name: str) -> None:
 	finally:
 		# Restore the job's original identity once the run ends.
 		frappe.set_user(original_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
+		if run is not None and run.get("trigger"):
+			# A triggered run holds its document until it ends, on every way out.
+			from frappe_agents.triggers.dispatch import release
+
+			release(run)
 
 
 def _execute(run: Any) -> None:
@@ -290,6 +299,15 @@ def _execute(run: Any) -> None:
 	# effective user, and the finally block above restores the worker's identity.
 	frappe.set_user(effective_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
+	if run.get("trigger"):
+		# A document event started this run. What it reads is the trigger's to
+		# decide, read here as the run's user — and a File Text trigger is done
+		# before any model is called.
+		from frappe_agents.triggers.execution import prepare_trigger_run
+
+		if prepare_trigger_run(run, agent):
+			return
+
 	try:
 		profile = resolve_run_profile(agent, run)
 	except (frappe.PermissionError, frappe.ValidationError) as exc:
@@ -302,7 +320,15 @@ def _execute(run: Any) -> None:
 	provider = ModelProfileProvider(profile)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
-	max_turns = cint(agent.max_steps) or DEFAULT_MAX_STEPS
+	if run.get("trigger"):
+		# A document wrote this run's input, not a person. Its stored copies keep
+		# back what the document's sensitive fields hold, wherever it appears.
+		from frappe_agents.tools.base import HELD_BACK_FLAG
+
+		events.redactor.input_from_document = True
+		events.redactor.hold_back(run.flags.get(HELD_BACK_FLAG) or set())
+	# A triggered run has no tools, so its first answer is its last.
+	max_turns = 1 if run.get("trigger") else cint(agent.max_steps) or DEFAULT_MAX_STEPS
 
 	try:
 		asyncio.run(
@@ -322,7 +348,8 @@ def _execute(run: Any) -> None:
 		_update(
 			run,
 			{
-				"tokens_in": provider.tokens_in,
+				# Plus what a triggered run spent reading a scan before the model ran.
+				"tokens_in": provider.tokens_in + cint(run.flags.get("trigger_tokens")),
 				"tokens_out": provider.tokens_out,
 				"steps_taken": events.steps,
 			},
@@ -338,11 +365,23 @@ def _execute(run: Any) -> None:
 	if events.final_text is None:
 		return _fail(run, events.failure(max_turns))
 
+	if run.get("trigger"):
+		# The model answered. The runtime writes that answer into the one field
+		# the trigger names, or the run fails saying why it could not.
+		from frappe_agents.triggers.execution import finish_trigger_run
+
+		problem = finish_trigger_run(run, events.final_text)
+		if problem:
+			_update(run, {"output_message": events.redactor.scrub(events.final_text)})
+			return _fail(run, problem)
+
 	_update(
 		run,
 		{
 			"status": "Completed",
-			"output_message": events.final_text,
+			# Stored by the log's rule, so the answer column and the answer in the
+			# log say the same thing. The live frame is the raw text, as streamed.
+			"output_message": events.redactor.scrub(events.final_text),
 			"ended_at": now_datetime(),
 		},
 	)
@@ -364,7 +403,7 @@ async def _drive(
 	# What a tool call turned out to be, keyed by call id. The event models forbid
 	# extra fields, so an outcome cannot travel on the event itself.
 	outcomes: dict[str, bool] = {}
-	tools = _tools(run, cancellation, agent, outcomes)
+	tools = _tools(run, cancellation, agent, outcomes, events.redactor)
 	names = {tool.name for tool in tools}
 
 	async def before_tool_call(call: Any) -> tuple[bool, str | None]:
@@ -598,6 +637,7 @@ class RunEvents:
 		self.final_text: str | None = None
 		self.error: str | None = None
 		self.updates = StreamThrottle(self._publish_update)
+		self.redactor = EventRedactor()
 
 	def handle(self, event: Any) -> None:
 		if isinstance(event, MessageUpdateEvent):
@@ -623,7 +663,10 @@ class RunEvents:
 		# the log should not have to infer order from the position in a list that
 		# has had its middle dropped.
 		payload["seq"] = self.seq
-		self.entries.append(payload)
+		# Two copies from here. The live frame goes only to the user the run acts
+		# for, who already holds every value in it. The stored one is read by
+		# auditors, so it keeps back what the audit row keeps back.
+		self.entries.append(self._stored(payload))
 		publish_event(self.run, HARNESS_EVENT, seq=self.seq, event=payload)
 
 		if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
@@ -633,6 +676,20 @@ class RunEvents:
 		"""The kept events, as the JSON the run row stores."""
 		return _event_log(self.entries)
 
+	def _stored(self, payload: dict) -> dict:
+		"""The copy of one event the log may keep.
+
+		Fails closed: an event the redactor cannot read is stored as what it was
+		and when, without its body, rather than raw.
+		"""
+		try:
+			return self.redactor.event(payload)
+		except Exception:
+			frappe.logger("frappe_agents").error(
+				f"could not redact event {payload.get('seq')} of run {self.run.name}", exc_info=True
+			)
+			return self.redactor.withhold(payload)
+
 	def failure(self, max_turns: int) -> str:
 		"""Why a run ended without an answer.
 
@@ -640,7 +697,8 @@ class RunEvents:
 		else that stopped the loop reports the loop's own words.
 		"""
 		if self.error and self.steps < max_turns:
-			return self.error
+			# Stored on the row and in the log, so held back like the log.
+			return self.redactor.scrub(self.error)
 		return f"Stopped after {self.steps} steps without a final answer."
 
 	def _stream(self, event: Any) -> None:
@@ -693,13 +751,23 @@ def _check_kill_switch(cancellation: RunCancellation) -> None:
 		cancellation.cancel(KILL_SWITCH_MESSAGE)
 
 
-def _tools(run: Any, cancellation: RunCancellation, agent: Any, outcomes: dict[str, bool]) -> list[AgentTool]:
+def _tools(
+	run: Any,
+	cancellation: RunCancellation,
+	agent: Any,
+	outcomes: dict[str, bool],
+	redactor: EventRedactor | None = None,
+) -> list[AgentTool]:
 	"""The agent's tools, in the shape the loop holds them.
 
 	The schemas are the same ones the model has always been sent. Only the
 	executor is new, and it does nothing but call `execute_tool`.
 	"""
 	tools = []
+	if run.get("trigger"):
+		# The model on a triggered run reads what it is handed and answers. Any
+		# tool it asks for anyway is refused, and audited, by `execute_tool`.
+		return tools
 	for schema in get_tool_schemas(agent):
 		name = schema["name"]
 		tools.append(
@@ -708,13 +776,19 @@ def _tools(run: Any, cancellation: RunCancellation, agent: Any, outcomes: dict[s
 				label=name,
 				description=schema.get("description") or "",
 				parameters=schema.get("args_schema") or {},
-				execute_fn=_executor(run, cancellation, name, outcomes),
+				execute_fn=_executor(run, cancellation, name, outcomes, redactor),
 			)
 		)
 	return tools
 
 
-def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict[str, bool]) -> Any:
+def _executor(
+	run: Any,
+	cancellation: RunCancellation,
+	name: str,
+	outcomes: dict[str, bool],
+	redactor: EventRedactor | None = None,
+) -> Any:
 	"""One tool's executor: `execute_tool` and nothing else.
 
 	`execute_tool` stays the only thing that runs a tool, so the capability gate,
@@ -728,6 +802,7 @@ def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict
 		try:
 			result, content = _call_tool(run, cancellation, name, args)
 			outcomes[tool_call_id] = bool(result.get("ok"))
+			_record_result(redactor, tool_call_id, args, result, content)
 			return AgentToolResult(content=[TextContent(text=content)])
 		except asyncio.CancelledError:
 			# The one path `execute_tool` cannot write its own row on: the call is
@@ -739,6 +814,24 @@ def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict
 			raise
 
 	return execute
+
+
+def _record_result(redactor: Any, tool_call_id: str, args: dict, result: dict, content: str) -> None:
+	"""Hand the log's redactor the result while it is still a structure.
+
+	`content` may be cut at the model's limit, and a cut JSON string cannot be
+	redacted by key with certainty. If this fails, the log keeps the marker in
+	place of the result rather than the result.
+	"""
+	if redactor is None:
+		return
+	try:
+		redactor.record_result(tool_call_id, args, result, content, _tool_content)
+	except Exception:
+		frappe.logger("frappe_agents").error(
+			f"could not redact the result of tool call {tool_call_id}", exc_info=True
+		)
+		redactor.hold_back_result(tool_call_id, content)
 
 
 def _call_tool(run: Any, cancellation: RunCancellation, name: str, args: dict) -> tuple[dict, str]:
@@ -769,6 +862,10 @@ def _call_tool(run: Any, cancellation: RunCancellation, name: str, args: dict) -
 
 def build_system_prompt(agent: Any, run: Any) -> str:
 	"""The agent's instructions, its approved skills, the focal document, the files, the rules."""
+	if run.get("trigger"):
+		from frappe_agents.triggers.execution import trigger_system_prompt
+
+		return trigger_system_prompt(agent, run)
 	parts = (
 		(agent.instructions or "").strip(),
 		_skills_section(agent, run),
@@ -1075,8 +1172,10 @@ def _read_logs(rows: list[dict]) -> None:
 	was sent less than the whole conversation.
 
 	It goes through `get_list` like the first one. The log holds tool results as
-	the model saw them, unredacted, and the ownership check on Agent Run is what
-	stands between that and somebody else's conversation.
+	the model saw them, less the values an audit row holds back, and the
+	ownership check on Agent Run is what stands between that and somebody else's
+	conversation. A replayed turn therefore hands the model `[redacted]` where a
+	sensitive value was: the model is told the call happened, not the secret.
 	"""
 	replayable = [row for row in rows if _is_replayed(row)]
 	for row in replayable[:-REPLAY_LIMIT]:
