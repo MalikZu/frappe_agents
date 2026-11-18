@@ -151,18 +151,22 @@ Any attempt to close the wrapper early from inside the text is defused first.
 
 This covers the long free-text fieldtypes, the ones with room to hide an
 instruction: Text, Small Text, Long Text, Text Editor, HTML Editor, Markdown
-Editor and Code. Data and Select values are short and structured and are not
-wrapped.
+Editor and Code. Data and Select values are short and structured and are
+usually not wrapped. The exceptions are below.
 
 Every read tool that returns this text wraps it:
 
-- `search_documents` wraps each free-text field in each row, the title field
-  too.
+- `search_documents` wraps each free-text field in each row. It also wraps the
+  doctype's title field, whatever its type. A title is usually a Data field,
+  and it holds whatever its author typed.
 - `get_document_context`, `get_document_slice` and `read_document` wrap fields,
   comments, emails and file text.
-- `run_report` wraps each cell in a free-text column. A report column can have
-  no type, or be typed Data and still hold a paragraph. In those columns, a
-  string longer than 120 characters is wrapped too.
+- `run_report` wraps each cell in a free-text column. A report column often has
+  no type, or a type that does not say what it holds, so the rule is reversed
+  there. A cell is left alone when its column is a number, date, time, check or
+  duration type, or when the cell is a short label: 24 characters or fewer, or
+  one word of up to 140 characters, such as a document name. Every other text
+  cell is wrapped.
 
 `search_documents` and `run_report` cut wrapped text to 2,000 characters. That
 is the limit a document's fields slice uses.
