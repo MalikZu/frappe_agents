@@ -66,6 +66,8 @@ FN_AVG = "avg"
 FN_MIN = "min"
 FN_MAX = "max"
 FUNCTIONS = (FN_COUNT, FN_SUM, FN_AVG, FN_MIN, FN_MAX)
+# Keys every summary row carries beside its groups. A group may not reuse one.
+RESULT_KEYS = (FN_COUNT, "suppressed", "status_word")
 
 NUMERIC_FIELDTYPES = frozenset({"Int", "Float", "Currency", "Percent"})
 ORDERED_FIELDTYPES = NUMERIC_FIELDTYPES | {"Date", "Datetime"}
@@ -100,6 +102,7 @@ def summarize_documents(payload: dict) -> dict:
 
 	group_by = _resolve_group_by(meta, payload.get("group_by"), allowed_levels, withheld)
 	aggregates = _resolve_aggregates(meta, payload.get("aggregates"), allowed_levels, withheld)
+	_refuse_colliding_groups(meta, group_by, aggregates)
 	filters = _resolve_filters(meta, payload.get("filters"), allowed_levels)
 	_refuse_withheld_filters(meta, filters, withheld)
 	limit = _resolve_limit(payload.get("limit") or MAX_GROUPS, row_cap(doctype, MAX_GROUPS))
@@ -180,18 +183,18 @@ def _group_label(meta: Any, fieldname: str, value: Any) -> Any:
 	"""A group value as the model may see it: authored text arrives wrapped.
 
 	The same rules search_documents and run_report follow. The title field is
-	whatever the person who made the document typed, so it is always wrapped. Any
-	other value that can be typed, a Data field or a document name, is wrapped
-	unless it is a label: short, or one token.
+	whatever the person who made the document typed, so it is always wrapped,
+	whatever its type, short or not. Any other value that can be typed, a Data
+	field or a document name, is wrapped unless it is a label: short, or one token.
 	"""
 	if not isinstance(value, str) or not value:
 		return value
 	df = meta.get_field(fieldname)
-	if df and df.fieldtype in STRUCTURED_GROUP_FIELDTYPES:
-		return value
-	is_title = fieldname == meta.title_field
-	if not is_title and _is_label(value):
-		return value
+	if fieldname != meta.title_field:
+		if df and df.fieldtype in STRUCTURED_GROUP_FIELDTYPES:
+			return value
+		if _is_label(value):
+			return value
 	if df:
 		return field_value(df, value, f"{meta.name} group", authored=True)
 	return wrap(value, f"{meta.name} group {fieldname}")
@@ -317,6 +320,18 @@ def _checked_field(meta: Any, fieldname: str, allowed_levels: list, withheld: se
 	if df.fieldtype in UNTRUSTED_FIELDTYPES:
 		raise ValueError(f"Cannot {use} {meta.name} by {fieldname}: it is free text.")
 	return df
+
+
+def _refuse_colliding_groups(meta: Any, group_by: list, aggregates: list) -> None:
+	# A group and a result column share one row. A field called count, or one
+	# named like an aggregate's alias, would overwrite the other or be overwritten.
+	taken = {alias for _fn, _field, alias in aggregates} | set(RESULT_KEYS)
+	for fieldname in group_by:
+		if fieldname in taken:
+			raise ValueError(
+				f"Cannot group {meta.name} by {fieldname}: the summary uses that name for its own "
+				"column. Use search_documents to read that field."
+			)
 
 
 def _refuse_withheld_filters(meta: Any, filters: dict, withheld: set) -> None:
