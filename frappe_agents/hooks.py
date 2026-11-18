@@ -58,9 +58,11 @@ agent_tools = [
 # --------------
 
 # A proposal nobody decided is not a decision. Sweep pending actions past the
-# expiry in Agent Settings so the agent has to make its case again.
+# expiry in Agent Settings so the agent has to make its case again. A Fill from
+# file reading no form came back for is closed the same way.
 scheduler_events = {
 	"daily": [
 		"frappe_agents.actions.expire_stale_actions",
+		"frappe_agents.extraction.fill.discard_stale_fills",
 	],
 }

@@ -20,20 +20,21 @@ from frappe.utils import cint, get_datetime, now_datetime, today
 from frappe_agents.access.preview import effective_access as access_preview
 from frappe_agents.actions import APPROVER_ROLE, separation_of_duties_block
 from frappe_agents.context.attachments import conversation_attachments
+from frappe_agents.extraction import fill
 from frappe_agents.extraction.pipeline import (
 	EXTRACTION,
 	STATUS_ACCEPTED,
 	STATUS_DISCARDED,
 	STATUS_NEEDS_REVIEW,
+	STATUS_READY,
 	publish_extraction,
 	queue_extraction,
 	record_fields,
 	stored_status,
 )
-from frappe_agents.extraction.schema import build_extraction_schema
+from frappe_agents.extraction.schema import build_extraction_schema, reviewed_values
 from frappe_agents.model_profiles import check_profile, profile_choices
 from frappe_agents.tools.base import AUTONOMY_CAPABILITIES, runtime_enabled
-from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
 from frappe_agents.tools.registry import agent_tool_order
 
 MAX_MESSAGE_CHARS = 20_000
@@ -872,7 +873,7 @@ def apply_extraction(name: str, values: Any = None, confirmed: Any = None) -> di
 	spec = build_extraction_schema(doc.target_doctype, frappe.session.user)
 	flags = frappe.parse_json(doc.sensitive_flags) or {}
 
-	reviewed, ignored = _reviewed_values(spec, values, flags)
+	reviewed, ignored = reviewed_values(spec, values, flags)
 	applied, withheld = _confirmed_values(flags, values, confirmed)
 
 	draft = frappe.get_doc(doc.target_doctype, doc.created_doc)
@@ -947,53 +948,44 @@ def discard_extraction(name: str) -> dict:
 	}
 
 
+# --- fill from file ---------------------------------------------------------
+#
+# The same extraction, ending in a form instead of a draft: see
+# `extraction/fill.py`. Every door re-checks the agent through `_chat_agent`, so a
+# disabled agent, a role taken away or the runtime switched off stops a fill the
+# way it stops a chat.
+
+
+@frappe.whitelist(methods=["POST"])
+def fill_from_file(agent: str, file: str, doctype: str, docname: str | None = None) -> dict:
+	"""Read a file for the form the person has open. Returns the reading's name."""
+	_require_agent_user()
+	return fill.start_fill(_chat_agent(agent), file, doctype, docname)
+
+
+@frappe.whitelist()
+def get_fill_values(extraction: str) -> dict:
+	"""Where a fill is, and once it is ready, the values for the form. Owner only."""
+	_require_agent_user()
+	doc = fill.fill_row(extraction)
+	if doc.status == STATUS_READY:
+		fill.require_fill_grant(_chat_agent(doc.agent), doc.target_doctype)
+	return fill.fill_values(doc)
+
+
+@frappe.whitelist(methods=["POST"])
+def record_filled_document(extraction: str, docname: str) -> dict:
+	"""Tie a fill to the document the person saved from it. Owner only."""
+	_require_agent_user()
+	return fill.record_filled(fill.fill_row(extraction), docname)
+
+
 def _extraction_for_review(name: str) -> Any:
 	"""The extraction, if this user owns it or manages the system."""
 	doc = frappe.get_doc(EXTRACTION, name)
 	if doc.owner != frappe.session.user and SYSTEM_MANAGER not in set(frappe.get_roles()):
 		raise frappe.PermissionError(_("This extraction belongs to {0}.").format(doc.owner))
 	return doc
-
-
-def _reviewed_values(spec: dict, values: dict, flags: dict) -> tuple[dict, list[str]]:
-	"""Everything the reviewer sent that is a field we asked the model for.
-
-	Sensitive fields are dropped here without exception — they come back through
-	`_confirmed_values` or not at all.
-	"""
-	fields = spec.get("fields") or {}
-	tables = spec.get("child_tables") or {}
-	sensitive = set(spec.get("sensitive") or []) | set(flags or {})
-
-	clean: dict[str, Any] = {}
-	ignored: list[str] = []
-
-	for key, value in values.items():
-		if key in sensitive:
-			# Handled by the confirmation path, or not at all. Never here.
-			continue
-		if key in SYSTEM_FIELDS or str(key).startswith("__"):
-			ignored.append(key)
-			continue
-		if key in fields:
-			clean[key] = value
-			continue
-		if key in tables and isinstance(value, list):
-			clean[key] = [_reviewed_row(tables[key], row) for row in value if isinstance(row, dict)]
-			continue
-		ignored.append(key)
-
-	return clean, ignored
-
-
-def _reviewed_row(table: dict, row: dict) -> dict:
-	fields = table.get("fields") or {}
-	sensitive = set(table.get("sensitive") or [])
-	return {
-		key: value
-		for key, value in row.items()
-		if key in fields and key not in sensitive and key not in SYSTEM_FIELDS
-	}
 
 
 def _confirmed_values(flags: dict, values: dict, confirmed: list[str]) -> tuple[dict, list[str]]:

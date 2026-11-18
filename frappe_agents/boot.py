@@ -8,6 +8,8 @@ cheap and it must never raise: an exception here breaks the desk for that user.
 
 import frappe
 
+from frappe_agents.extraction.fill import extract_doctypes
+
 
 def boot_form_agents(bootinfo) -> None:
 	"""Attach the agents this user may open from a form, with the doctypes they cover."""
@@ -52,6 +54,9 @@ def _form_agents() -> list[dict]:
 				"doctypes": [
 					link.document_type for link in (agent.get("form_doctypes") or []) if link.document_type
 				],
+				# Where Fill from file may use this agent: its Extract rules, not the
+				# form list above. Empty means nowhere.
+				"extract_doctypes": extract_doctypes(agent),
 			}
 		)
 	return agents
