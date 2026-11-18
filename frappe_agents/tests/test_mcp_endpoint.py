@@ -393,6 +393,27 @@ class TestMCPEndpoint(AgentTestCase):
 		self.assertEqual(second.status_code, 404)
 		self.assertEqual(len(tool_calls_for(session)), 1)
 
+	def test_the_call_cap_holds_when_the_cache_lost_the_count(self):
+		"""The cache count restarts from what the run recorded, not from zero."""
+		session = self.open_session()
+		self.call(session, "search_documents", {"doctype": ORDER_DT, "fields": ["name"]})
+		frappe.cache.delete(frappe.cache.make_key(f"frappe_agents:mcp_calls:{session}"))
+
+		with extraction_settings(mcp_calls_per_session=1):
+			response, _ = self.call(session, "search_documents", {"doctype": ORDER_DT, "fields": ["name"]})
+
+		self.assertEqual(response.status_code, 404)
+		self.assertEqual(len(tool_calls_for(session)), 1)
+
+	def test_a_late_count_never_lowers_the_recorded_one(self):
+		"""Two calls that finish out of order each write their count; the higher stands."""
+		session = self.open_session()
+
+		server._record_count(session, 3)
+		server._record_count(session, 2)
+
+		self.assertEqual(frappe.db.get_value("Agent Run", session, "steps_taken"), 3)
+
 	def test_delete_ends_the_session(self):
 		session = self.open_session()
 
