@@ -114,9 +114,13 @@ class TestTheAgentIsTold(ProposalCase):
 
 		_run, wire = self.next_turn()
 
+		# The note sits in the approver-note wrapper whole, with the closer it
+		# typed escaped, so the wrapper closes once and only after the note.
+		opener = '<untrusted source="approver note">'
 		last = wire[-1]["content"]
-		self.assertEqual(last.count("</untrusted>"), 1)
-		self.assertIn("&lt;/untrusted>", last)
+		self.assertEqual(last.count(opener), 1)
+		note = last.split(opener, 1)[1].split("</untrusted>", 1)[0]
+		self.assertEqual(note, HOSTILE.replace("</untrusted>", "&lt;/untrusted>"))
 
 	def test_an_applied_proposal_is_told(self):
 		self.approve()
