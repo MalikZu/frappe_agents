@@ -30,6 +30,9 @@ OUTCOME_ERROR = "Error"
 RUN_FLAG = "agent_current_run"
 
 INTERRUPTED = "The tool call was interrupted before it finished."
+TRIGGER_HAS_NO_TOOLS = (
+	"A run a trigger started has no tools. The trigger reads the input and writes the answer itself."
+)
 
 SETTINGS = "Agent Settings"
 KILL_SWITCH_FIELD = "global_enabled"
@@ -114,12 +117,16 @@ def _grants() -> Any:
 	return grants
 
 
-def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
+def execute_tool(run: Any, tool_name: str, args: dict | None = None, *, by_runtime: bool = False) -> dict:
 	"""Run one tool for one Agent Run and log it.
 
 	`run` is an Agent Run document or its name. Returns
 	`{"ok": bool, "result": any, "error": str | None}`. Handler failures come back
 	as data so the model can react; only the kill switch is raised.
+
+	`by_runtime` says the runtime itself is calling, not the model. Only a run a
+	trigger started cares: its model holds no tools, and the trigger's own read
+	and write are the only calls it may make.
 	"""
 	args = args if isinstance(args, dict) else {}
 	started = time.monotonic()
@@ -149,6 +156,8 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 	previous_run = frappe.flags.get(RUN_FLAG)
 	frappe.flags[RUN_FLAG] = run_doc
 	try:
+		if run_doc.get("trigger") and not by_runtime:
+			raise ToolDenied(TRIGGER_HAS_NO_TOOLS)
 		handler = _resolve_handler(run_doc, tool_name)
 		result = handler(args)
 		if isinstance(result, dict):
