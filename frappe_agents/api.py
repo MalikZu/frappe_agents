@@ -393,7 +393,11 @@ def stop_run(run: str) -> dict:
 	that picks it up finds nothing to do. A Running run is told through the cache,
 	because the job running it holds one transaction and cannot see this commit:
 	it stops at its next turn, and a tool it already asked for is refused and
-	audited rather than run.
+	audited rather than run. A run that still reads Queued here may already be a
+	worker's — its Running is not committed yet — and `cancel_queued_run` tells
+	the two apart without waiting on that worker.
+
+	A finished run is answered with its status and left alone.
 
 	Stopping a turn is not cancelling a document. Nothing the run drafted changes.
 	"""
@@ -401,7 +405,10 @@ def stop_run(run: str) -> dict:
 	if not values or values.effective_user != frappe.session.user:
 		frappe.throw(_("You can only stop your own turns."), frappe.PermissionError)
 	if values.status not in STOPPABLE_STATUSES:
-		frappe.throw(_("This turn has already finished."))
+		# Nothing left to stop, and nothing is written. The status is the answer:
+		# a chat still showing Stop missed the run's last frame, and this is how
+		# it finds out the turn is over.
+		return {"run": values.name, "status": values.status}
 
 	reason = _("Stopped by you.")
 	# Published first, so a job that picked the run up a moment ago still sees it.
