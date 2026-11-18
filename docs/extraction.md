@@ -218,9 +218,10 @@ Extraction row records which document it became.
 - **This may be a duplicate** says when the same file was read before, or a
   value that must be unique already exists.
 
-**Use the printed value** is not offered when the printed value differs from
-the linked record, or when you changed that link after the reading. Type the
-value yourself after you check it somewhere other than the file.
+**Use the printed value** is offered only when the record the form links to
+holds the same value. It is not offered when the values differ, when there was
+nothing to compare with, or when you changed the link after the reading. In
+those cases, check the value somewhere other than the file, and type it.
 
 ### What is recorded
 
@@ -234,6 +235,7 @@ with the record the document now links to. The value itself stays on the
 document and is not copied onto the row.
 
 A reading that no form collects within 24 hours is closed as **Discarded** by
-the daily job. Click **Close** in the panel to close it sooner. Values already
-in the form stay there, unsaved. Reload the form to throw them away.
+the daily job. Click **Cancel** in the panel while it reads to close it sooner.
+Click **Hide** to hide the panel after the fill; saving the form still records
+the reading. Reload the form to throw away values you do not want.
 
