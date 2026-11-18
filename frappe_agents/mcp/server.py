@@ -72,6 +72,11 @@ VERSION_HEADER = "MCP-Protocol-Version"
 IDLE_MINUTES = 30
 LIFETIME_HOURS = 8
 
+# Open sessions one user may hold on one agent. A client that reconnects on every
+# launch would otherwise leave a Running run behind each time; the oldest is
+# ended when a new one would go past this.
+MAX_OPEN_SESSIONS = 5
+
 DEFAULT_REQUESTS_PER_MINUTE = 60
 DEFAULT_CALLS_PER_SESSION = 50
 RATE_WINDOW_SECONDS = 60
@@ -131,6 +136,9 @@ def handle(**kwargs: Any) -> Response:
 	except Refusal as exc:
 		return _error(None, exc.code, exc.message, status=exc.status, headers=exc.headers)
 	except Exception:
+		# Whatever this request wrote goes. Returning a response makes Frappe
+		# commit, and a draft kept behind a 500 is a draft the client makes twice.
+		frappe.db.rollback()
 		frappe.log_error(title="MCP endpoint failed")
 		return _error(None, INTERNAL_ERROR, "The server could not handle this request.", status=500)
 
@@ -171,14 +179,15 @@ def _rate_limit(settings: Any) -> None:
 	limit = cint(settings.get("mcp_requests_per_minute")) or DEFAULT_REQUESTS_PER_MINUTE
 	user = frappe.session.user
 	caller = user if user and user != "Guest" else (_request_ip() or "unknown")
-	window = int(time.time() // RATE_WINDOW_SECONDS)
+	now = _clock()
+	window = int(now // RATE_WINDOW_SECONDS)
 
 	key = frappe.cache.make_key(f"frappe_agents:mcp_rate:{caller}:{window}")
 	count = cint(frappe.cache.incrby(key, 1))
 	if count == 1:
 		frappe.cache.expire(key, RATE_WINDOW_SECONDS * 2)
 	if count > limit:
-		retry = RATE_WINDOW_SECONDS - int(time.time()) % RATE_WINDOW_SECONDS
+		retry = RATE_WINDOW_SECONDS - int(now) % RATE_WINDOW_SECONDS
 		raise Refusal(
 			429,
 			f"Too many requests: the limit is {limit} a minute.",
@@ -210,7 +219,7 @@ def _authenticated_user() -> str:
 	"""
 	user = _credential_user()
 	if not user or user != frappe.session.user:
-		raise Refusal(401, AUTH_HINT)
+		raise Refusal(401, AUTH_HINT, headers={"WWW-Authenticate": 'token realm="frappe_agents"'})
 	if user in FORBIDDEN_USERS:
 		raise Refusal(403, f"The MCP endpoint never acts as {user}.")
 
@@ -373,15 +382,17 @@ def _call(request_id: Any, params: dict, run: Any, agent: Any, settings: Any) ->
 	if not isinstance(arguments, dict):
 		return _error(request_id, INVALID_PARAMS, "arguments must be an object.")
 
-	cap = cint(settings.get("mcp_calls_per_session")) or DEFAULT_CALLS_PER_SESSION
-	if cint(run.steps_taken) >= cap:
-		_end(run.name, STATUS_COMPLETED)
-		raise Refusal(404, f"This session has made its {cap} tool calls. Start a new one with initialize.")
-
 	try:
 		_check_budget(agent, settings)
 	except frappe.ValidationError as exc:
 		return _error(request_id, REFUSED, _text(exc))
+
+	# Counted before the call, in the database: two calls in flight at once must
+	# not both read the same count and both slip under the cap.
+	cap = cint(settings.get("mcp_calls_per_session")) or DEFAULT_CALLS_PER_SESSION
+	if _count_call(run.name) > cap:
+		_end(run.name, STATUS_COMPLETED)
+		raise Refusal(404, f"This session has made its {cap} tool calls. Start a new one with initialize.")
 
 	offered = {tool["name"] for tool in tool_list(agent)}
 
@@ -393,8 +404,6 @@ def _call(request_id: Any, params: dict, run: Any, agent: Any, settings: Any) ->
 		# Audited by `execute_tool`. The session ends with the runtime.
 		_end(run.name, STATUS_CANCELLED, str(exc))
 		return _result(request_id, _tool_result({"ok": False, "result": None, "error": str(exc)}))
-
-	_touch(run, steps_taken=cint(run.steps_taken) + 1)
 
 	if name not in offered:
 		return _error(request_id, INVALID_PARAMS, f"Unknown tool: {name}")
@@ -500,7 +509,19 @@ def _open_session(user: str, agent: Any, client: Any) -> Any:
 	# writes it, exactly as `start_run` does for chat.
 	run.flags.ignore_permissions = True
 	run.insert(ignore_permissions=True)
+	_end_surplus_sessions(user, agent.name)
 	return run
+
+
+def _end_surplus_sessions(user: str, agent: str) -> None:
+	open_runs = frappe.get_all(
+		"Agent Run",
+		filters={"surface": SURFACE_MCP, "status": STATUS_RUNNING, "effective_user": user, "agent": agent},
+		order_by="creation desc",
+		pluck="name",
+	)
+	for name in open_runs[MAX_OPEN_SESSIONS:]:
+		_end(name, STATUS_COMPLETED)
 
 
 def _session(user: str, agent: Any) -> Any:
@@ -538,6 +559,22 @@ def _session(user: str, agent: Any) -> Any:
 		raise Refusal(404, "The session expired. Start a new one with initialize.")
 
 	return frappe.get_doc("Agent Run", row.name)
+
+
+def _count_call(name: str) -> int:
+	"""Add one to the session's call count and return the new count.
+
+	One UPDATE, so the row lock orders concurrent calls. Moving `modified` here
+	is also what keeps a busy session from timing out.
+	"""
+	run = frappe.qb.DocType("Agent Run")
+	(
+		frappe.qb.update(run)
+		.set(run.steps_taken, run.steps_taken + 1)
+		.set(run.modified, now_datetime())
+		.where(run.name == name)
+	).run()
+	return cint(frappe.db.get_value("Agent Run", name, "steps_taken"))
 
 
 def _touch(run: Any, **values: Any) -> None:
@@ -581,6 +618,10 @@ def _printable(value: Any) -> str:
 	if not isinstance(value, str):
 		return ""
 	return "".join(char for char in value if char.isprintable()).strip()
+
+
+def _clock() -> float:
+	return time.time()
 
 
 def _request_ip() -> str | None:
