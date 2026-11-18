@@ -226,6 +226,10 @@ Every read tool that returns this text wraps it:
   duration type, or when the cell is a short label: 24 characters or fewer, or
   one word of up to 140 characters, such as a document name. Every other text
   cell is wrapped.
+- `summarize_documents` wraps group values. It wraps the title field, whatever
+  its type and however short. It wraps any other text value, such as a Data
+  field or a document name, by the same label rule as `run_report`. Select,
+  check, date and number groups are left alone.
 
 `search_documents` and `run_report` cut wrapped text to 2,000 characters. That
 is the limit a document's fields slice uses.
