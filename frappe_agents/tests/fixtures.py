@@ -253,6 +253,9 @@ _ENABLEMENT_CHANGES: list[tuple[str, str]] = []
 WORKFLOW_NAME = "FA Test Order Workflow"
 WORKFLOW_DRAFT_STATE = "FA Workflow Draft"
 WORKFLOW_APPROVED_STATE = "FA Workflow Approved"
+# The middle state of the two-level Workflow. The action out of it has the same
+# name as the action into it, the way real approval chains reuse "Approve".
+WORKFLOW_MIDDLE_STATE = "FA Workflow Manager Approved"
 WORKFLOW_ACTION = "FA Workflow Approve"
 WORKFLOW_ROLE = "System Manager"
 
@@ -1048,12 +1051,16 @@ def active_workflow(
 	doctype: str = ORDER_DT,
 	roles: tuple[str, ...] = (WORKFLOW_ROLE,),
 	allow_self_approval: int = 1,
+	two_level: bool = False,
 ):
 	"""Put a minimal active Workflow on `doctype` for the duration of the block.
 
 	Two states and one action between them. `roles` are the roles the action is
 	open to, one transition row each — the way a Workflow says "either of these".
 	The approved state is submitted, so applying the action submits the document.
+
+	`two_level` puts a draft middle state in between, reached and left by the same
+	action: Draft -Approve-> Manager Approved -Approve-> Approved.
 
 	Teardown deletes the Workflow *and* drops the cached answer:
 	`get_workflow_name` caches an empty string as readily as a name, so a Workflow
@@ -1065,6 +1072,15 @@ def active_workflow(
 	# test had written so far — so a crash inside the block can leave the row
 	# behind for the next run to trip over.
 	_drop_workflow(doctype)
+
+	steps = [(WORKFLOW_DRAFT_STATE, WORKFLOW_APPROVED_STATE)]
+	middle = []
+	if two_level:
+		steps = [
+			(WORKFLOW_DRAFT_STATE, WORKFLOW_MIDDLE_STATE),
+			(WORKFLOW_MIDDLE_STATE, WORKFLOW_APPROVED_STATE),
+		]
+		middle = [{"state": WORKFLOW_MIDDLE_STATE, "doc_status": "0", "allow_edit": WORKFLOW_ROLE}]
 
 	workflow = frappe.get_doc(
 		{
@@ -1079,6 +1095,7 @@ def active_workflow(
 					"doc_status": "0",
 					"allow_edit": WORKFLOW_ROLE,
 				},
+				*middle,
 				{
 					"state": WORKFLOW_APPROVED_STATE,
 					"doc_status": "1",
@@ -1087,12 +1104,13 @@ def active_workflow(
 			],
 			"transitions": [
 				{
-					"state": WORKFLOW_DRAFT_STATE,
+					"state": state,
 					"action": WORKFLOW_ACTION,
-					"next_state": WORKFLOW_APPROVED_STATE,
+					"next_state": next_state,
 					"allowed": role,
 					"allow_self_approval": allow_self_approval,
 				}
+				for state, next_state in steps
 				for role in roles
 			],
 		}
@@ -1136,7 +1154,7 @@ def _drop_workflow(doctype: str, commit: bool = False) -> None:
 
 def _ensure_workflow_masters() -> None:
 	"""The Workflow's states and action are Links to master records of their own."""
-	for state in (WORKFLOW_DRAFT_STATE, WORKFLOW_APPROVED_STATE):
+	for state in (WORKFLOW_DRAFT_STATE, WORKFLOW_MIDDLE_STATE, WORKFLOW_APPROVED_STATE):
 		if not frappe.db.exists("Workflow State", state):
 			frappe.get_doc({"doctype": "Workflow State", "workflow_state_name": state}).insert(
 				ignore_permissions=True

@@ -22,6 +22,7 @@ Administrator proves nothing.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 import frappe
 from frappe.model.workflow import apply_workflow
@@ -36,12 +37,15 @@ from frappe_agents.tests.fixtures import (
 	WORKFLOW_ACTION,
 	WORKFLOW_APPROVED_STATE,
 	WORKFLOW_DRAFT_STATE,
+	WORKFLOW_MIDDLE_STATE,
+	WORKFLOW_NAME,
 	AgentTestCase,
 	actions_for,
 	active_workflow,
 	as_user,
 	call_tool,
 	make_order_draft,
+	make_proposal,
 )
 
 REASON = "The amount matches the signed quotation, and the project is approved."
@@ -85,6 +89,8 @@ class TestWorkflowTransitions(AgentTestCase):
 			self.assertEqual(action.status, "Pending")
 			self.assertEqual(action.action_type, "Workflow Transition")
 			self.assertEqual(action.workflow_action, WORKFLOW_ACTION)
+			self.assertEqual(action.workflow_name, WORKFLOW_NAME)
+			self.assertEqual(action.from_workflow_state, WORKFLOW_DRAFT_STATE)
 			self.assertEqual(action.requested_by, DRAFT_USER)
 			self.assertEqual(action.run, run.name)
 			self.assertEqual(payload["result"]["workflow_state"], WORKFLOW_DRAFT_STATE)
@@ -208,11 +214,86 @@ class TestWorkflowTransitions(AgentTestCase):
 					approve_action(action, stale)
 			self.assertEqual(frappe.db.get_value("Agent Action", action, "status"), "Pending")
 
-			# Reloaded and approved again: the Workflow has no such step from here.
+			# Reloaded and approved again: the proposal was for the step out of Draft.
 			with as_user(APPROVER_USER):
 				result = approve_action(action, self.modified_of(order.name))
 			self.assertEqual(result["status"], "Failed")
-			self.assertEqual(frappe.db.get_value("Agent Action", action, "edited_before_approval"), 1)
+			self.assertIn(WORKFLOW_DRAFT_STATE, frappe.db.get_value("Agent Action", action, "failure"))
+
+	def test_a_reused_verb_does_not_take_the_next_step(self):
+		"""Draft -Approve-> Manager Approved -Approve-> Approved.
+
+		The agent proposed the first Approve. A person took that step by hand. The
+		approver reloads and approves the still-pending card: without the from-state
+		that would be the second Approve, which submits — a step the run's user was
+		never offered. It has to fail and leave the document where it is.
+		"""
+		with active_workflow(ORDER_DT, roles=BOTH, two_level=True):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.proposed(order.name)
+
+			with as_user(APPROVER_USER):
+				apply_workflow(frappe.get_doc(ORDER_DT, order.name), WORKFLOW_ACTION)
+			self.assertEqual(self.state_of(order.name), (0, WORKFLOW_MIDDLE_STATE))
+
+			with as_user(APPROVER_USER):
+				result = approve_action(action, self.modified_of(order.name))
+
+			self.assertEqual(result["status"], "Failed")
+			failure = frappe.db.get_value("Agent Action", action, "failure")
+			self.assertIn(WORKFLOW_DRAFT_STATE, failure)
+			self.assertIn(WORKFLOW_MIDDLE_STATE, failure)
+			self.assertEqual(self.state_of(order.name), (0, WORKFLOW_MIDDLE_STATE))
+
+	def test_the_first_level_of_a_reused_verb_still_applies(self):
+		with active_workflow(ORDER_DT, roles=BOTH, two_level=True):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.proposed(order.name)
+
+			with as_user(APPROVER_USER):
+				result = approve_action(action, self.modified_of(order.name))
+
+			self.assertEqual(result["status"], "Applied")
+			self.assertEqual(self.state_of(order.name), (0, WORKFLOW_MIDDLE_STATE))
+
+	def test_a_proposal_without_its_from_state_fails_closed(self):
+		with active_workflow(ORDER_DT, roles=BOTH):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.proposed(order.name)
+			frappe.db.set_value("Agent Action", action, "from_workflow_state", None, update_modified=False)
+
+			with as_user(APPROVER_USER):
+				result = approve_action(action, self.modified_of(order.name))
+
+			self.assertEqual(result["status"], "Failed")
+			self.assertEqual(self.state_of(order.name), (0, WORKFLOW_DRAFT_STATE))
+
+	def test_a_doctype_that_submits_in_the_background_is_refused(self):
+		"""Frappe would queue the submit and return, and the row would say Applied too early."""
+		with active_workflow(ORDER_DT, roles=BOTH):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.proposed(order.name)
+
+			with patch("frappe_agents.actions._queues_in_background", return_value=True):
+				with as_user(APPROVER_USER):
+					result = approve_action(action, self.modified_of(order.name))
+
+			self.assertEqual(result["status"], "Failed")
+			self.assertIn("background", frappe.db.get_value("Agent Action", action, "failure"))
+			self.assertEqual(self.state_of(order.name), (0, WORKFLOW_DRAFT_STATE))
+
+	def test_a_submit_proposal_fails_if_a_workflow_is_switched_on_before_approval(self):
+		"""The approve-time re-check: a plain submit would jump the new Workflow."""
+		order = make_order_draft(user=DRAFT_USER)
+		action = make_proposal(order.name, user=DRAFT_USER)
+
+		with active_workflow(ORDER_DT, roles=BOTH):
+			with as_user(APPROVER_USER):
+				result = approve_action(action, self.modified_of(order.name))
+
+			self.assertEqual(result["status"], "Failed")
+			self.assertIn("Workflow", frappe.db.get_value("Agent Action", action, "failure"))
+			self.assertEqual(frappe.db.get_value(ORDER_DT, order.name, "docstatus"), 0)
 
 	def test_the_requester_cannot_approve_their_own_transition(self):
 		with active_workflow(ORDER_DT, roles=BOTH):
