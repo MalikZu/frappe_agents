@@ -277,3 +277,17 @@ class TestStopRun(AgentTestCase):
 		values = frappe.db.get_value("Agent Run", run.name, ["status", "error"], as_dict=True)
 		self.assertEqual(values.status, "Cancelled")
 		self.assertEqual(values.error, self.stopped_reason())
+
+	def test_a_stopped_run_that_breaks_some_other_way_still_fails(self):
+		"""Only a provider error is read as the stop. A bug is a bug."""
+		run = self.make_run()
+
+		def stop_then_break() -> dict:
+			stop_run(run.name)
+			raise RuntimeError("Something else broke.")
+
+		run_with_model(run.name, [stop_then_break])
+
+		values = frappe.db.get_value("Agent Run", run.name, ["status", "error"], as_dict=True)
+		self.assertEqual(values.status, "Failed")
+		self.assertEqual(values.error, "Something else broke.")
