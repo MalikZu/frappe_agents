@@ -91,6 +91,9 @@ Enter does not send; what you type stays in the box for the next turn.
 1. Click **Stop**, or press Escape in the message box.
 
 The waiting line says **Stopping…**, and the turn ends with **Stopped by you.**
+If the page does not hear back from the turn within two minutes, the message box
+is given back to you and the line asks you to reload the page. The turn still
+ends on the server.
 
 A turn that has not started yet stops at once. A turn that is running stops
 before its next call to the model; an answer it is already writing is still
