@@ -14,6 +14,11 @@ Only the hidden list is written, never the note itself, so no old turn changes
 what it sends to the model. A proposal still pending is left alone and is told
 normally once it is decided. Re-running adds nothing: a name already listed is
 kept once.
+
+A conversation with no Completed or Failed run is left alone. Only a run the
+history replays can record that something was told, and such a conversation has
+none. Its decisions are told on its next turn, ten to a turn, like new ones.
+Stamping a cancelled or queued run would count for nothing.
 """
 
 import frappe

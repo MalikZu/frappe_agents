@@ -26,6 +26,7 @@ translated: the bytes of a turn must not depend on the language of the day.
 """
 
 import re
+import unicodedata
 from typing import Any
 
 import frappe
@@ -57,7 +58,11 @@ NOTE_TEXT_LIMIT = 1000
 TOLD = (STATUS_APPLIED, STATUS_REJECTED, STATUS_FAILED, STATUS_EXPIRED)
 # The opening bracket of anything that reads like the note's own markers. Text a
 # person wrote loses it, so a line they typed cannot pose as the system's block.
-_MARKER = re.compile(r"\[(?=\s*(?:end\s+of\s+)?proposal\s+updates)", re.IGNORECASE)
+# Matched on a normalised copy: fullwidth letters fold to plain ones there, and
+# brackets NFKC does not fold are listed.
+_MARKER = re.compile(r"[\[⟦〚【〔⁅❲](?=\s*(?:end\s+of\s+)?proposal\s+updates)", re.IGNORECASE)
+# Characters that print as nothing, and so can split a marker without showing.
+_INVISIBLE = frozenset("\u00ad\u200b\u200c\u200d\u200e\u200f\u2060\u2061\u2062\u2063\u2064\ufeff")
 
 
 def note_for(run: Any, delivered_statuses: tuple[str, ...]) -> dict | None:
@@ -99,8 +104,26 @@ def with_note(note: str | None, message: str | None) -> str:
 
 
 def defuse(text: str) -> str:
-	"""Text a person wrote, with anything shaped like the note's markers made inert."""
-	return _MARKER.sub("(", text) if text else text
+	"""Text a person wrote, with anything shaped like the note's markers made inert.
+
+	The marker is looked for in a copy folded with NFKC and stripped of invisible
+	characters, so a lookalike reads as what it looks like. Only the bracket that
+	opens a marker is changed, in the text as typed: everything else stays byte
+	for byte, because a turn already sent is sent again unchanged.
+	"""
+	if not text:
+		return text
+	folded, origin = [], []
+	for index, char in enumerate(text):
+		if char in _INVISIBLE:
+			continue
+		for part in unicodedata.normalize("NFKC", char):
+			folded.append(part)
+			origin.append(index)
+	starts = {origin[match.start()] for match in _MARKER.finditer("".join(folded))}
+	if not starts:
+		return text
+	return "".join("(" if index in starts else char for index, char in enumerate(text))
 
 
 def render(states: list[dict], secrets: set[str] | frozenset = frozenset()) -> str:
