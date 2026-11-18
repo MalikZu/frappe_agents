@@ -344,6 +344,8 @@ def _execute(run: Any) -> None:
 	publish_event(run, "status", status="Running")
 	_note_proposal_updates(run)
 
+	# `run=` is how a turn parked in a provider retry backoff hears Stop.
+	# Drop it and nothing fails; Stop just stops reaching that wait.
 	provider = ModelProfileProvider(profile, run=run.name)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
