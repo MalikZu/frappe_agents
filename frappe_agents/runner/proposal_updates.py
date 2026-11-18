@@ -25,6 +25,7 @@ is cleaned before it sits in a line the system writes. The note is not
 translated: the bytes of a turn must not depend on the language of the day.
 """
 
+import re
 from typing import Any
 
 import frappe
@@ -54,6 +55,9 @@ RUN_WINDOW = 200
 NOTE_ITEMS = 10
 NOTE_TEXT_LIMIT = 1000
 TOLD = (STATUS_APPLIED, STATUS_REJECTED, STATUS_FAILED, STATUS_EXPIRED)
+# The opening bracket of anything that reads like the note's own markers. Text a
+# person wrote loses it, so a line they typed cannot pose as the system's block.
+_MARKER = re.compile(r"\[(?=\s*(?:end\s+of\s+)?proposal\s+updates)", re.IGNORECASE)
 
 
 def note_for(run: Any, delivered_statuses: tuple[str, ...]) -> dict | None:
@@ -78,23 +82,47 @@ def note_for(run: Any, delivered_statuses: tuple[str, ...]) -> dict | None:
 	# note and failure text here.
 	secrets = _held_back(states)
 	return {
-		"proposal_updates": scrub(render(states), secrets),
+		"proposal_updates": render(states, secrets),
 		"proposal_updates_for": "\n".join(state["action"] for state in states),
 	}
 
 
 def with_note(note: str | None, message: str | None) -> str:
-	"""The text of a user turn: the stored note, if there is one, then the message."""
+	"""The text of a user turn: the stored note, if there is one, then the message.
+
+	The message is the user's own text, so a marker typed into it is defused.
+	"""
+	message = defuse(message or "")
 	if not note:
-		return message or ""
-	return f"{note}\n\n{message or ''}"
+		return message
+	return f"{note}\n\n{message}"
 
 
-def render(states: list[dict]) -> str:
+def defuse(text: str) -> str:
+	"""Text a person wrote, with anything shaped like the note's markers made inert."""
+	return _MARKER.sub("(", text) if text else text
+
+
+def render(states: list[dict], secrets: set[str] | frozenset = frozenset()) -> str:
 	lines = [HEAD]
-	lines += [f"- {_line(state)}" for state in states]
+	lines += [f"- {_line(state, secrets)}" for state in states]
 	lines.append(TAIL)
 	return "\n".join(lines)
+
+
+def document_secrets(doctype: str, name: str) -> set[str]:
+	"""The values a document holds in its sensitive fields, child rows included.
+
+	Read as the session user, after the permission check. Raises when the
+	document cannot be read, so a caller never treats "unknown" as "none".
+	"""
+	keys = doctype_sensitive_keys(doctype)
+	if not keys:
+		return set()
+	doc = frappe.get_doc(doctype, name)
+	if not frappe.has_permission(doctype, "read", doc=doc):
+		raise frappe.PermissionError(f"{doctype} {name} cannot be read.")
+	return redact(doc.as_dict(), keys)[1]
 
 
 def _untold(run: Any, delivered_statuses: tuple[str, ...]) -> list[dict]:
@@ -154,27 +182,30 @@ def _held_back(states: list[dict]) -> set[str]:
 	for state in states:
 		if not state.get("target_visible"):
 			continue
-		doctype, name = state["target_doctype"], state["target_name"]
 		try:
-			keys = doctype_sensitive_keys(doctype)
-			if not keys:
-				continue
-			doc = frappe.get_doc(doctype, name)
-			if not frappe.has_permission(doctype, "read", doc=doc):
-				raise frappe.PermissionError
-			secrets |= redact(doc.as_dict(), keys)[1]
+			secrets |= document_secrets(state["target_doctype"], state["target_name"])
 		except Exception:
 			state["decision_note"] = None
 			state["failure"] = None
 	return secrets
 
 
-def _line(state: dict) -> str:
+def _authored(text: str, secrets: set[str] | frozenset) -> str:
+	"""Text a person wrote, made safe to sit in the note.
+
+	Scrubbed before it is wrapped: a held-back value can be any word, "untrusted"
+	included, and scrubbing the finished note would rewrite the wrapper's own tags.
+	"""
+	return defuse(scrub(str(text), secrets) or "")
+
+
+def _line(state: dict, secrets: set[str] | frozenset = frozenset()) -> str:
 	verb = _verb(state)
 	if state.get("target_visible"):
 		# A doctype is named by an administrator. A document name can be any text a
 		# user typed, so it is read as data like the note is.
-		target = f"{plain(state['target_doctype'])} {wrap(plain(state['target_name']), 'document name')}"
+		name = plain(_authored(state["target_name"], secrets))
+		target = f"{plain(state['target_doctype'])} {wrap(name, 'document name')}"
 	else:
 		target = "a document you can no longer read"
 	subject = f"Your proposal to {verb} {target}"
@@ -185,13 +216,14 @@ def _line(state: dict) -> str:
 	if status == STATUS_REJECTED:
 		line = f"{subject} was rejected."
 		if state.get("decision_note"):
-			note = wrap(_cut(state["decision_note"]), "approver note")
+			note = wrap(_cut(_authored(state["decision_note"], secrets)), "approver note")
 			line += f" The approver wrote: {note}"
 		return line
 	if status == STATUS_FAILED:
 		line = f"{subject} was approved, but applying it failed."
 		if state.get("failure"):
-			line += f" The reason: {wrap(_cut(state['failure']), 'failure message')}"
+			failure = _authored(state["failure"], secrets)
+			line += f" The reason: {wrap(_cut(failure), 'failure message')}"
 		return line
 	return f"{subject} expired with nobody deciding it."
 
