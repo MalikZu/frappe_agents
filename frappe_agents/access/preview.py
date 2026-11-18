@@ -48,7 +48,7 @@ VERB_TITLES = {
 	VERB_READ: "Read",
 	VERB_CREATE_DRAFT: "Create drafts",
 	VERB_UPDATE_DRAFT: "Edit drafts",
-	VERB_PROPOSE: "Propose submit, cancel or a workflow action",
+	VERB_PROPOSE: "Propose submit, cancel, a workflow action or a field change",
 	VERB_EXTRACT: "Extract into",
 }
 REPORT_TITLE = "Run"
