@@ -75,7 +75,7 @@ def run_all(agent: str, model_profile: str | None = None) -> dict:
 	Each rehearsal goes through the same door a single one does. A rehearsal the
 	door refuses is reported by name, and the rest still run.
 	"""
-	_require_manager()
+	require_manager()
 	frappe.has_permission("Agent", "read", doc=agent, throw=True)
 	names = frappe.get_list(
 		REHEARSAL,
@@ -429,12 +429,12 @@ def _proposals(proposals: list[str], closed: list[str]) -> list[dict]:
 
 
 def _rehearsal_for_manager(name: str) -> Any:
-	_require_manager()
+	require_manager()
 	frappe.has_permission(REHEARSAL, "write", doc=name, throw=True)
 	return frappe.get_doc(REHEARSAL, name)
 
 
-def _require_manager() -> None:
+def require_manager() -> None:
 	roles = set(frappe.get_roles())
 	if not roles & {MANAGER_ROLE, SYSTEM_MANAGER}:
 		raise frappe.PermissionError(_("You need the {0} role to run rehearsals.").format(MANAGER_ROLE))
@@ -453,3 +453,65 @@ def validate_prompt(prompt: str | None) -> None:
 		frappe.throw(
 			_("The prompt is {0} characters. The limit is {1}.").format(len(prompt), MAX_MESSAGE_CHARS)
 		)
+
+
+# How many scored results the comparison reads, newest first. Enough for every
+# rehearsal of an agent on a handful of models, several times over.
+COMPARISON_LIMIT = 1000
+
+
+@frappe.whitelist()
+def comparison(agent: str) -> dict:
+	"""The newest scored verdict of each rehearsal of an agent, on each model it ran on.
+
+	One row per rehearsal, one column per model profile. Read through `get_list`,
+	so it shows exactly the results the caller may read.
+	"""
+	require_manager()
+	frappe.has_permission("Agent", "read", doc=agent, throw=True)
+	rehearsals = frappe.get_list(
+		REHEARSAL,
+		filters={"agent": agent},
+		fields=["name", "title"],
+		order_by="creation asc",
+	)
+	results = frappe.get_list(
+		RESULT,
+		filters={"agent": agent, "status": STATUS_SCORED},
+		fields=[
+			"name",
+			"rehearsal",
+			"model_profile",
+			"verdict",
+			"tokens_in",
+			"tokens_out",
+			"cost",
+			"creation",
+		],
+		order_by="creation desc",
+		limit_page_length=COMPARISON_LIMIT,
+	)
+
+	profiles: list[str] = []
+	cells: dict[str, dict] = {}
+	for row in results:
+		profile = row.model_profile or ""
+		if profile not in profiles:
+			profiles.append(profile)
+		by_profile = cells.setdefault(row.rehearsal, {})
+		if profile in by_profile:
+			continue
+		by_profile[profile] = {
+			"result": row.name,
+			"verdict": row.verdict,
+			"tokens": cint(row.tokens_in) + cint(row.tokens_out),
+			"cost": row.cost,
+		}
+
+	return {
+		"profiles": sorted(profiles),
+		"rows": [
+			{"rehearsal": row.name, "title": row.title, "cells": cells.get(row.name, {})}
+			for row in rehearsals
+		],
+	}
