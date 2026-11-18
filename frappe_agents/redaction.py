@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import frappe
+from frappe.utils import format_timedelta
 
 REDACTED = "[redacted]"
 
@@ -48,6 +49,13 @@ _NUMERIC = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
 _NUMBER_IN_TEXT = re.compile(r"(?<!\d)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?!\d)")
 # Parts joined by hyphens or slashes: a date (2025-01-02), a reference (ORD-2025-0001).
 _CHAIN = re.compile(r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)+")
+# The shapes of a chain that keep the numbers in it. An ISO datetime reaches the
+# chain as 2025-01-02T10 — the rest of its time is joined by colons.
+_ISO_DATE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}(?:[Tt]\d{1,2})?")
+_DATE = re.compile(r"\d{4}([-/])\d{1,2}\1\d{1,2}(?:[Tt]\d{1,2})?|\d{1,2}([-/])\d{1,2}\2\d{4}")
+# Word parts, then the number parts, then at most one single-letter suffix. The
+# number parts are checked by `_numbers_look_like_a_reference` as well.
+_REFERENCE = re.compile(r"(?:[A-Za-z][A-Za-z0-9]*[-/])+(\d+(?:[-/]\d+)+)(?:-[A-Za-z])?")
 # A number below this many significant digits is not taken out of prose. 100 or
 # 12 is in every sentence; replacing each one would corrupt what an auditor reads.
 NUMBER_MIN_DIGITS = 4
@@ -189,7 +197,10 @@ def _collect(value: Any, secrets: set[str]) -> None:
 		unwrapped = _UNTRUSTED.fullmatch(value)
 		if unwrapped:
 			secrets.add(unwrapped.group(1))
-	elif isinstance(value, (int, float, Decimal, datetime.date, datetime.time, datetime.timedelta)):
+	elif isinstance(value, datetime.timedelta):
+		# Not str(): a day or more, or a fraction of a second, reads differently there.
+		secrets.add(format_timedelta(value))
+	elif isinstance(value, (int, float, Decimal, datetime.date, datetime.time)):
 		secrets.add(str(value))
 	elif isinstance(value, dict):
 		for item in value.values():
@@ -254,40 +265,52 @@ def _scrub_numbers(text: str, numbers: set[Decimal]) -> str:
 def _in_chain(text: str, span: tuple[int, int], chains: list[tuple[int, int]]) -> bool:
 	"""Whether a number is one part of a date or a reference, and not a value.
 
-	Only two shapes count, joined by hyphens or slashes:
+	Only these shapes count, joined by hyphens or slashes:
 
-	* a date: three digit parts, the year first or last — 2025-01-02, 02/01/2025;
-	* a reference: one or more letter parts, then two or more digit parts —
-	  ORD-2025-0001, HR-EMP-2025-0001.
+	* a date: three number parts, the year first or last — 2025-01-02,
+	  02/01/2025 — and an ISO date with its time, 2025-01-02T10:00:00;
+	* a date range: dates joined by a slash — 2025-01-02/2025-02-01;
+	* a reference: one or more word parts, then number parts that read as a
+	  naming series — a 2- or 4-digit year first, and a zero-padded counter of 3
+	  digits or more after it — then at most one single-letter suffix:
+	  ORD-2025-0001, SINV-25-00012, PO2-2025-0001, ORD-2025-0001-A.
 
-	Anything else is how a value is written: a range (98765-99000-1), an amount
-	with its unit (98765/month/employee, AED-98765/month), a label
-	(net-pay-98765). Those are held back. A unit word never protects a number.
+	The number must lie wholly inside the date or reference; one that runs past
+	it (2025-01-02T98,765) is held back.
+
+	Anything else is how a value is written, and is held back: a range
+	(98765-99000-1, AED-98765-99000), an amount with its unit or currency
+	(98765/month/employee, AED-98765/month, AED-98765-99000-pm), a label in front
+	of a range (Q1-98765-99000, net-pay-98765). No word protects a number except
+	a reference's own prefix and its single-letter suffix.
 	"""
 	start, end = span
 	for chain_start, chain_end in chains:
-		if chain_start <= start < chain_end or chain_start < end <= chain_end:
-			parts = re.split(r"[-/]", text[chain_start:chain_end])
-			return _is_date(parts) or _is_reference(parts)
+		if chain_start <= start and end <= chain_end:
+			return _is_kept_shape(text[chain_start:chain_end])
+		if start < chain_end and chain_start < end:
+			return False
 	return False
 
 
-def _is_date(parts: list[str]) -> bool:
-	if len(parts) != 3 or not all(part.isdigit() for part in parts):
-		return False
-	lengths = [len(part) for part in parts]
-	short = (1, 2)
-	return (lengths[0] == 4 and lengths[1] in short and lengths[2] in short) or (
-		lengths[0] in short and lengths[1] in short and lengths[2] == 4
-	)
+def _is_kept_shape(chain: str) -> bool:
+	if _DATE.fullmatch(chain):
+		return True
+	reference = _REFERENCE.fullmatch(chain)
+	if reference and _numbers_look_like_a_reference(reference.group(1)):
+		return True
+	dates = chain.split("/")
+	return len(dates) >= 2 and all(_ISO_DATE.fullmatch(date) for date in dates)
 
 
-def _is_reference(parts: list[str]) -> bool:
-	letters = 0
-	while letters < len(parts) and parts[letters].isalpha():
-		letters += 1
-	digits = parts[letters:]
-	return letters >= 1 and len(digits) >= 2 and all(part.isdigit() for part in digits)
+def _numbers_look_like_a_reference(numbers: str) -> bool:
+	"""A year first (2025, 25), then a zero-padded counter (0001, 00012).
+
+	That is the shape a naming series writes. A salary range does not have it:
+	98765-99000 starts with no year, and 2050-3000 has no zero-padded counter.
+	"""
+	parts = re.split(r"[-/]", numbers)
+	return len(parts[0]) in (2, 4) and any(len(part) >= 3 and part.startswith("0") for part in parts[1:])
 
 
 def scrub_values(value: Any, secrets: set[str]) -> Any:

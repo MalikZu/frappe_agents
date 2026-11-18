@@ -94,10 +94,17 @@ class TestToolExposure(AgentTestCase):
 				"propose_submit",
 				"propose_cancel",
 				"propose_transition",
-				"propose_update",
 				"extract_document",
 			},
 		)
+
+	def test_propose_update_needs_read_on_the_same_target(self):
+		"""It compares values with the stored ones, so Propose alone does not offer it."""
+		propose_only = make_matrix_agent([rule(ORDER_DT, can_propose=1), rule(TICKET_DT, can_read=1)])
+		self.assertNotIn("propose_update", exposed_tool_names(propose_only))
+
+		with_read = make_matrix_agent([rule(TICKET_DT, can_read=1, can_propose=1)])
+		self.assertIn("propose_update", exposed_tool_names(with_read))
 
 	def test_proposals_need_the_autonomy_as_well_as_the_rule(self):
 		"""The ceiling is unchanged: a Suggest agent proposes nothing, rule or no rule."""

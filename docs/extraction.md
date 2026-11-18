@@ -207,9 +207,12 @@ button anywhere.
 1. Open the draft.
 2. Click **Fill from file**.
 3. If the dialog shows **Agent**, select the agent.
-4. Select the file in **Attached file**, then click **Read this file**. To use
-   a different file, click **Upload a new file** instead.
-5. Do steps 6 to 10 of [Fill a new form](#fill-a-new-form).
+4. Select the file in **Attached file**.
+5. Click **Read this file**.
+6. Do steps 6 to 10 of [Fill a new form](#fill-a-new-form).
+
+To read a file that is not attached to the draft, click **Upload a new file**
+instead of steps 4 and 5. Then select the PDF or image.
 
 When you save, the save records the reading against the document and attaches
 the file to it.
@@ -247,6 +250,11 @@ record. When the form is saved, each sensitive flag records whether the saved
 value was left empty, is the printed value, or was typed. The saved value is
 compared with the record the document now links to. The value itself stays on
 the document and is not copied onto the row.
+
+Only a save from the filled form records the reading. A document written any
+other way does not carry the reading's name, so it is not recorded: an API call,
+a data import, or a change made straight in the database. The reading then
+stays **Ready**.
 
 A reading that no saved document is tied to within 24 hours is closed as
 **Discarded** by the daily job. Click **Cancel** in the panel while it reads to close it sooner.

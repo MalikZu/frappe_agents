@@ -135,12 +135,14 @@ def _field_problem(meta: Any, target: Any, fieldname: str, value: Any, seen: dic
 		).format(label)
 
 	if df.fieldtype == "Link" and not is_blank(value):
-		if not frappe.db.exists(df.options, value):
-			return _("The {0} the proposal sets {1} to no longer exists.").format(_(df.options), label)
-		if not frappe.has_permission(df.options, "read", doc=value):
-			return _("The proposal sets {0} to a {1} you are not allowed to read.").format(
-				label, _(df.options)
-			)
+		# One answer for both: telling "gone" from "not yours to read" would let an
+		# approver learn which records exist in a doctype they may not read.
+		if not frappe.db.exists(df.options, value) or not frappe.has_permission(
+			df.options, "read", doc=value
+		):
+			return _(
+				"The proposal sets {0} to a {1} that does not exist or that you are not allowed to read."
+			).format(label, _(df.options))
 	return None
 
 

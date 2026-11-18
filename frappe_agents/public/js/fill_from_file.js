@@ -720,9 +720,10 @@
 
 	function cancel(frm) {
 		const state = state_of(frm);
-		if (state && ["reading", "applied"].includes(state.phase)) {
-			// Closes the reading for the audit trail. Values already in the form stay
-			// there, unsaved; reloading the form throws them away.
+		if (state && ["reading", "applying", "applied"].includes(state.phase)) {
+			// Closes the reading for the audit trail. A fill still running stops at its
+			// next field. Values already in the form stay there, unsaved; reloading the
+			// form throws them away.
 			frappe.call({ method: DISCARD_METHOD, args: { name: state.extraction } }).catch(() => {});
 		}
 		if (frm.doc && state && frm.doc[TOKEN_KEY] === state.extraction) delete frm.doc[TOKEN_KEY];

@@ -14,6 +14,7 @@ import json
 from unittest.mock import patch
 
 import frappe
+from frappe.utils import format_timedelta
 
 from frappe_agents import redaction
 from frappe_agents.api import get_conversation
@@ -455,6 +456,102 @@ class TestNumbersStayInTheirPlace(AgentTestCase):
 		for written in ("2025-01-02", "02/01/2025", "ORD-2025-0001", "HR-EMP-2025-0001"):
 			with self.subTest(written=written):
 				self.assertEqual(scrub(written, secrets), written)
+
+	def test_an_iso_datetime_keeps_its_year(self):
+		_, secrets = redact({"amount": 2025}, {"amount"})
+
+		for written in ("2025-01-02T10:00:00", "2025-01-02T10:00:00Z", "2025-01-02T10:00:00+04:00"):
+			with self.subTest(written=written):
+				self.assertEqual(scrub(f"Sent {written}.", secrets), f"Sent {written}.")
+
+	def test_a_wider_reference_or_a_date_range_keeps_its_number(self):
+		_, secrets = redact({"amount": 2025}, {"amount"})
+
+		for written in (
+			"A1-2025-0001",
+			"PO2-2025-0001",
+			"ORD-2025-0001-A",
+			"ORD-2025-0001-1",
+			"SINV-25-00012",
+			"2025-01-02/2025-02-01",
+		):
+			with self.subTest(written=written):
+				self.assertEqual(scrub(written, secrets), written)
+
+	def test_a_value_in_a_reference_like_shape_is_still_held_back(self):
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in ("AED-98765-99000/year", "98765-01-02", "net-pay-98765-A"):
+			with self.subTest(written=written):
+				self.assertNotIn("98765", scrub(written, secrets))
+
+	def test_a_unit_or_currency_suffix_never_keeps_a_number(self):
+		"""Only a single letter may follow a reference. pm, yr and AED are units."""
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in (
+			"AED-98765-99000-pm",
+			"AED-98765-99000-pa",
+			"USD-98765-99000-yr",
+			"AED-98765-99000-year",
+			"pay-98765-00-AED",
+			"salary/98765/12-mo",
+			"net-pay-98765-00-A",
+			"EMP-98765-1-A",
+		):
+			with self.subTest(written=written):
+				self.assertNotIn("98765", scrub(written, secrets))
+
+	def test_a_longer_suffix_breaks_a_reference(self):
+		_, secrets = redact({"amount": 2025}, {"amount"})
+
+		for written in ("EMP-2025-0001-ABCD", "ORD-2025-0001-AB"):
+			with self.subTest(written=written):
+				self.assertNotIn("2025", scrub(written, secrets))
+
+	def test_a_label_in_front_of_a_range_never_keeps_a_number(self):
+		"""A quarter, a fiscal year or a grade before a salary range is not a reference."""
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in (
+			"Q1-98765-99000",
+			"FY25-98765-99000",
+			"grade-B2-98765-99000",
+			"B2/98765/12",
+			"H1/98765/0",
+			"T1-2-98765",
+			"x1-98765-1",
+			"Q1-98765-0001",
+			"AED-98765-99000",
+		):
+			with self.subTest(written=written):
+				self.assertNotIn("98765", scrub(written, secrets))
+
+	def test_a_year_and_a_round_number_are_not_a_reference(self):
+		_, secrets = redact({"amount": 2025}, {"amount"})
+
+		self.assertNotIn("2025", scrub("AED-2025-3000", secrets))
+
+	def test_a_number_that_runs_past_a_date_or_reference_is_held_back(self):
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in ("2025-01-02T98,765", "ORD-2025-98,765"):
+			with self.subTest(written=written):
+				self.assertNotIn("98,765", scrub(written, secrets))
+
+	def test_a_duration_is_collected_as_it_is_stored(self):
+		# as_json writes a timedelta with format_timedelta, not str(): they differ
+		# from a day up, and for a fraction of a second.
+		long = datetime.timedelta(days=1, hours=2, minutes=5)
+		short = datetime.timedelta(hours=3, seconds=7.25)
+
+		_, secrets = redact({"duration": long, "break": short}, {"duration", "break"})
+
+		self.assertEqual(secrets, {format_timedelta(long), format_timedelta(short)})
+		self.assertEqual(format_timedelta(long), "26:05:00")
+		stored = frappe.as_json({"duration": long})
+		self.assertIn(format_timedelta(long), stored)
+		self.assertEqual(scrub(f"Worked {format_timedelta(long)}.", secrets), f"Worked {REDACTED}.")
 
 	def test_a_date_read_live_is_learned_like_a_date_read_from_text(self):
 		"""A tool hands a Date over as an object, before it is serialised."""

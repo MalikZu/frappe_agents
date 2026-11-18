@@ -201,13 +201,8 @@ def record_filled(doc: Any, docname: str, saved: Any = None) -> dict:
 	target = doc.get("target_name")
 	if target and docname != target:
 		frappe.throw(_("This reading was for {0} {1}.").format(doctype, target))
-	# Write, not read: this attaches a file to the document and says the person
-	# filled it. Missing and not writable answer alike.
-	if (
-		not docname
-		or not frappe.db.exists(doctype, docname)
-		or not frappe.has_permission(doctype, "write", doc=docname)
-	):
+	if not _may_record_against(doctype, docname, target):
+		# Missing and not permitted answer alike.
 		raise frappe.PermissionError(_("You are not allowed to change {0} {1}.").format(doctype, docname))
 
 	saved = saved if saved is not None else frappe.get_doc(doctype, docname)
@@ -236,6 +231,25 @@ def record_filled(doc: Any, docname: str, saved: Any = None) -> dict:
 	return _recorded(doc, docname)
 
 
+def _may_record_against(doctype: str, docname: str, target: str | None) -> bool:
+	"""Whether this user may tie a reading to this document.
+
+	A saved draft that was filled needs write on it, which the fill needed too. A
+	new form's document needs no more than having been created by this person:
+	a role may create a doctype without being allowed to change it afterwards,
+	and recording what they just created is not changing it. Anything else they
+	did not create must at least be readable, so that "not yours" is not a way to
+	learn that a record exists.
+	"""
+	if not docname or not frappe.db.exists(doctype, docname):
+		return False
+	if target:
+		return bool(frappe.has_permission(doctype, "write", doc=docname))
+	if frappe.db.get_value(doctype, docname, "owner") == frappe.session.user:
+		return True
+	return bool(frappe.has_permission(doctype, "read", doc=docname))
+
+
 def stamp_on_save(doc: Any, method: str | None = None) -> None:
 	"""`on_update` for every doctype: record a fill when the form saved from it.
 
@@ -253,6 +267,7 @@ def stamp_on_save(doc: Any, method: str | None = None) -> None:
 	if not reading or not isinstance(reading, str):
 		return
 	savepoint = "fa_fill_stamp"
+	messages = _message_count()
 	frappe.db.savepoint(savepoint)
 	try:
 		row = fill_row(reading)
@@ -260,11 +275,24 @@ def stamp_on_save(doc: Any, method: str | None = None) -> None:
 			record_filled(row, doc.name, saved=doc)
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
+		# A refusal raised with `frappe.throw` has already queued its message for the
+		# browser. The save succeeded, so the person must not see an error dialog.
+		_drop_messages_since(messages)
 		frappe.logger("frappe_agents").warning(
 			f"could not record fill {reading} against {doc.doctype} {doc.name}", exc_info=True
 		)
 	finally:
 		doc.__dict__.pop(TOKEN_KEY, None)
+
+
+def _message_count() -> int:
+	return len(getattr(frappe.local, "message_log", None) or [])
+
+
+def _drop_messages_since(count: int) -> None:
+	log = getattr(frappe.local, "message_log", None)
+	if log is not None and len(log) > count:
+		del log[count:]
 
 
 def _recorded(doc: Any, docname: str) -> dict:
@@ -549,6 +577,7 @@ def _attach_source(doc: Any, doctype: str, docname: str) -> bool:
 	and reported, never raised.
 	"""
 	savepoint = "fa_fill_attach"
+	messages = _message_count()
 	frappe.db.savepoint(savepoint)
 	try:
 		if not _source_attached(doc, doctype, docname):
@@ -556,6 +585,7 @@ def _attach_source(doc: Any, doctype: str, docname: str) -> bool:
 		return True
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
+		_drop_messages_since(messages)
 		frappe.logger("frappe_agents").warning(
 			f"could not attach the source of {doc.name} to {doctype} {docname}", exc_info=True
 		)
