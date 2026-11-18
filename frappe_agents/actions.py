@@ -736,11 +736,13 @@ def rejected_proposal_for(
 	"""This user's latest rejected proposal for the same action on this document, if any.
 
 	The row carries `same_version`: whether it was rejected on the document as it
-	is now. Read through `get_list`, so it finds the session user's own proposals
-	and nobody else's. A workflow action is the same action only with the same verb
-	out of the same state.
+	is now. Read through `get_list` and filtered to the session user's own
+	proposals: a user who may read everyone's, an approver say, is still held
+	only to the rejections their own agent was told about. A workflow action is
+	the same action only with the same verb out of the same state.
 	"""
 	filters = {
+		"requested_by": frappe.session.user,
 		"target_doctype": target_doctype,
 		"target_name": target_name,
 		"action_type": action_type,

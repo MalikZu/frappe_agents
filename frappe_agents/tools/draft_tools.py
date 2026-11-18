@@ -518,10 +518,20 @@ def _check_rejected(
 	)
 	if not rejected:
 		return reason
-	if payload.get("user_asked_again") is True:
-		return f"Proposed again at the user's request, after an earlier rejection.\n\n{reason}"
+	# The system knows that a rejection exists and whether the document changed.
+	# It does not know what the user said: `user_asked_again` is the agent's word,
+	# and the marker says so rather than vouching for it.
+	asked = " The agent says the user asked for this." if payload.get("user_asked_again") is True else ""
 	if not rejected.same_version:
-		return f"Proposed again after an earlier rejection. The document changed since.\n\n{reason}"
+		return (
+			f"Proposed again after an earlier rejection ({rejected.name}). "
+			f"The document changed since.{asked}\n\n{reason}"
+		)
+	if asked:
+		return (
+			f"Proposed again after an earlier rejection ({rejected.name}) "
+			f"of this same version of the document.{asked}\n\n{reason}"
+		)
 
 	note = wrap(rejected.decision_note or "", "approver note")
 	raise ToolDenied(
