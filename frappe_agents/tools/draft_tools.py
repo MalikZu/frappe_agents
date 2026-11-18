@@ -363,7 +363,8 @@ def propose_transition(payload: dict) -> dict:
 	if not frappe.has_permission(doctype, "read", doc=doc):
 		raise ToolDenied(f"You are not allowed to read {doctype} {name}.")
 
-	if not get_workflow_name(doctype):
+	workflow = get_workflow_name(doctype)
+	if not workflow:
 		raise ToolDenied(
 			f"{doctype} has no active Workflow, so there is no workflow action to propose. "
 			"Use propose_submit or propose_cancel instead."
@@ -378,10 +379,21 @@ def propose_transition(payload: dict) -> dict:
 			f"state {state}. Actions open to you now: {offered}."
 		)
 
-	_refuse_duplicate(doctype, name, ACTION_TRANSITION, workflow_action)
+	_refuse_duplicate(doctype, name, ACTION_TRANSITION, workflow_action, state)
 
+	# The Workflow and the state go on the row with the verb: the same verb can mean
+	# a different step from another state, and the approval refuses anything but
+	# the step proposed here.
 	action = record_proposal(
-		run, ACTION_TRANSITION, doctype, name, reason, doc.modified, workflow_action=workflow_action
+		run,
+		ACTION_TRANSITION,
+		doctype,
+		name,
+		reason,
+		doc.modified,
+		workflow_action=workflow_action,
+		workflow_name=workflow,
+		from_workflow_state=state,
 	)
 
 	publish_event(
@@ -390,6 +402,7 @@ def propose_transition(payload: dict) -> dict:
 		action=action.name,
 		action_type=ACTION_TRANSITION,
 		workflow_action=workflow_action,
+		from_workflow_state=state,
 		target_doctype=doctype,
 		target_name=name,
 		reason=reason,
@@ -457,8 +470,14 @@ def _refuse_workflow(doctype: str) -> None:
 		)
 
 
-def _refuse_duplicate(doctype: str, name: str, action_type: str, workflow_action: str | None = None) -> None:
-	existing = pending_action_for(doctype, name, action_type, workflow_action)
+def _refuse_duplicate(
+	doctype: str,
+	name: str,
+	action_type: str,
+	workflow_action: str | None = None,
+	from_workflow_state: str | None = None,
+) -> None:
+	existing = pending_action_for(doctype, name, action_type, workflow_action, from_workflow_state)
 	if existing:
 		what = f"'{workflow_action}'" if workflow_action else action_type.lower()
 		raise ToolDenied(
