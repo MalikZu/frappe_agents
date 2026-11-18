@@ -3,7 +3,7 @@
  "allow_rename": 0,
  "autoname": "hash",
  "creation": "2026-11-18 12:00:00.000000",
- "description": "One run of one rehearsal, scored. Written by framework code only.",
+ "description": "One run of one rehearsal, scored. Written by framework code only. An Agent Manager reads the results they started.",
  "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
@@ -208,6 +208,7 @@
  "permissions": [
   {
    "export": 1,
+   "if_owner": 1,
    "read": 1,
    "report": 1,
    "role": "Agent Manager"

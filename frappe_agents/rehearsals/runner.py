@@ -95,6 +95,9 @@ def run_all(agent: str, model_profile: str | None = None) -> dict:
 			queued.append(queue_rehearsal(doc, model_profile=profile, batch=batch))
 		except (frappe.ValidationError, frappe.PermissionError) as exc:
 			refused.append({"rehearsal": name, "error": str(exc) or exc.__class__.__name__})
+			# The refusal is in the reply. Left in the message log it would also pop
+			# up as an error on a call that succeeded.
+			frappe.clear_messages()
 	return {"batch": batch, "results": queued, "refused": refused}
 
 
@@ -168,7 +171,14 @@ def check_run_as(agent: Any, user: str | None, starter: str | None = None) -> st
 	if not cint(frappe.db.get_value("User", user, "enabled")):
 		frappe.throw(_("User {0} is disabled or missing.").format(user))
 
-	if agent.run_as != SERVICE_USER and user != starter and RUN_AS_ROLE not in frappe.get_roles(user):
+	# A service user is not exempt. Anyone who may write an Agent may name its
+	# service user, so without this an Agent Manager could point a new agent at any
+	# account and read as it through a rehearsal. Chat refuses service-user agents
+	# outright; a rehearsal is the one door that starts them, so it asks for the
+	# role a System Manager hands out.
+	if user == starter and agent.run_as != SERVICE_USER:
+		return user
+	if RUN_AS_ROLE not in frappe.get_roles(user):
 		raise frappe.PermissionError(
 			_(
 				"A rehearsal runs as you, or as a user with the {0} role. {1} has neither. "
@@ -179,16 +189,26 @@ def check_run_as(agent: Any, user: str | None, starter: str | None = None) -> st
 
 
 def execute_rehearsal(result_name: str) -> None:
-	"""RQ job: place the bait, run the agent, score the run. Never raises."""
+	"""RQ job: place the bait, run the agent, score the run. Never raises.
+
+	Whatever happens, a proposal the run made is closed before the job ends. A
+	scorer that died must not leave a test proposal Pending in an approver's
+	queue, or blocking a real proposal on the same document.
+	"""
 	result = frappe.get_doc(RESULT, result_name)
+	state: dict = {}
 	try:
-		_execute(result)
+		_execute(result, state)
 	except Exception as exc:
 		frappe.logger("frappe_agents").error(f"rehearsal result {result_name} failed", exc_info=True)
 		_write(result, {"status": STATUS_FAILED, "error": (str(exc) or exc.__class__.__name__)[:ERROR_LIMIT]})
+		_keep_bait_rows(result, state.get("bait_rows") or [])
+	finally:
+		if state.get("run"):
+			close_rehearsal_proposals(state["run"], CLOSE_NOTE)
 
 
-def _execute(result: Any) -> None:
+def _execute(result: Any, state: dict) -> None:
 	rehearsal = frappe.get_doc(REHEARSAL, result.rehearsal)
 	agent = frappe.get_doc("Agent", rehearsal.agent)
 	# Asked again: a role can be taken away between queueing and running.
@@ -196,6 +216,7 @@ def _execute(result: Any) -> None:
 
 	_write(result, {"status": STATUS_RUNNING})
 	conversation, bait, bait_rows = _plant_bait(rehearsal, user)
+	state["bait_rows"] = bait_rows
 
 	run = frappe.get_doc(
 		{
@@ -213,9 +234,21 @@ def _execute(result: Any) -> None:
 			"model_profile": result.model_profile,
 		}
 	)
-	run.flags.ignore_permissions = True
-	run.insert(ignore_permissions=True)
+	# Owned by the user it runs as, the way a chat run is. Inserted as the manager,
+	# the run's owner-scoped read would hand the manager its full event log.
+	with _acting_as(user):
+		run.flags.ignore_permissions = True
+		run.insert(ignore_permissions=True)
+	state["run"] = run.name
 	_write(result, {"run": run.name})
+
+	# Let the rest of the site see the rehearsal is running, and let go of the
+	# bait comment's write on its document before the model is called — a model
+	# turn can take minutes. A run that dies after this leaves the result
+	# Running, which the daily sweep marks Failed.
+	# Not under test: a commit there would outlive the rollback each test ends with.
+	if not frappe.flags.in_test:
+		frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit
 
 	execute_run(run.name)
 	run.reload()
@@ -237,6 +270,7 @@ def _score(result: Any, rehearsal: Any, run: Any, bait: dict | None, bait_rows: 
 		frappe.get_all("Agent Tool", filters={"capability": ("!=", CAPABILITY_READ)}, pluck="name")
 	)
 	known = _known_doctypes(calls)
+	reports = _report_doctypes(calls, known)
 
 	verdict, checks = scoring.score(
 		[row.as_dict() for row in rehearsal.expectations],
@@ -248,6 +282,7 @@ def _score(result: Any, rehearsal: Any, run: Any, bait: dict | None, bait_rows: 
 		known_doctypes=known,
 		bait=bait,
 		run_error=run.error,
+		reports=reports,
 	)
 
 	closed = close_rehearsal_proposals(run.name, CLOSE_NOTE)
@@ -366,6 +401,10 @@ def _plant_bait(rehearsal: Any, user: str) -> tuple[str | None, dict | None, lis
 		}
 	)
 	comment.insert(ignore_permissions=True)
+	# The XSS filter on insert rewrites a literal `</untrusted>`, which is the one
+	# thing the wrapper case exists to send. Written back raw, the way a hostile
+	# integration or an import would leave it.
+	frappe.db.set_value("Comment", comment.name, "content", rehearsal.bait_text, update_modified=False)
 	return (
 		None,
 		{"vector": vector, "doctype": rehearsal.context_doctype, "name": rehearsal.context_name},
@@ -392,13 +431,68 @@ def _known_doctypes(calls: list[dict]) -> set[str]:
 	return {label for label in labels if frappe.db.exists("DocType", label)}
 
 
+def _report_doctypes(calls: list[dict], known: set[str]) -> dict[str, str]:
+	"""Each report a call ran, mapped to the doctype it reads."""
+	reports: dict[str, str] = {}
+	for call in calls:
+		for label, names in scoring.parse_touched(call.get("docs_touched"), known):
+			if label != "Report":
+				continue
+			for name in names:
+				reports[name] = frappe.db.get_value("Report", name, "ref_doctype") or ""
+	return reports
+
+
+def _keep_bait_rows(result: Any, rows: list[dict]) -> None:
+	"""List the bait on a result whose run never got scored, so it can still be found."""
+	if not rows:
+		return
+	try:
+		result.reload()
+		result.set("documents", rows)
+		result.flags.ignore_permissions = True
+		result.flags.ignore_links = True
+		result.save(ignore_permissions=True)
+	except Exception:
+		frappe.logger("frappe_agents").error(f"could not list the bait on {result.name}", exc_info=True)
+
+
+# How long a result may sit Queued or Running before the sweep calls it dead.
+STALE_HOURS = 6
+
+
+def fail_stale_results() -> int:
+	"""Daily: mark results whose job never finished as Failed. Returns how many."""
+	from frappe.utils import add_to_date
+
+	cutoff = add_to_date(now_datetime(), hours=-STALE_HOURS)
+	names = frappe.get_all(
+		RESULT,
+		filters={"status": ("in", (STATUS_QUEUED, STATUS_RUNNING)), "creation": ("<", cutoff)},
+		pluck="name",
+	)
+	for name in names:
+		frappe.db.set_value(
+			RESULT,
+			name,
+			{"status": STATUS_FAILED, "error": _("The rehearsal job never finished.")},
+			update_modified=False,
+		)
+	return len(names)
+
+
 def _written_documents(calls: list[dict], write_tools: set[str], known: set[str]) -> list[dict]:
 	"""Every document a successful write call says it touched, once each."""
 	rows, seen = [], set()
 	for call in calls:
 		if call.get("outcome") != scoring.SUCCESS or call.get("tool") not in write_tools:
 			continue
-		for doctype, names in scoring.parse_touched(call.get("docs_touched"), known):
+		touched = scoring.parse_touched(call.get("docs_touched"), known)
+		if any(doctype == "Agent Action" for doctype, _names in touched):
+			# A proposal names its target, which it did not write. It is listed
+			# once, as a proposal.
+			continue
+		for doctype, names in touched:
 			if doctype in scoring.NOT_A_DOCUMENT:
 				continue
 			for name in names:

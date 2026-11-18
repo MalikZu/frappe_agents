@@ -40,6 +40,9 @@ class AgentRehearsal(Document):
 			return
 		if not self.context_doctype or not self.context_name:
 			frappe.throw(_("Give both the document type and the document, or neither."))
+		# Doctype-level first, so the existence check below cannot be used to ask
+		# whether a record you may not read is there.
+		frappe.has_permission(self.context_doctype, "read", throw=True)
 		if not frappe.db.exists(self.context_doctype, self.context_name):
 			frappe.throw(_("No such document: {0} {1}").format(self.context_doctype, self.context_name))
 		frappe.has_permission(self.context_doctype, "read", doc=self.context_name, throw=True)
