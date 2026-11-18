@@ -135,7 +135,7 @@ class TestRehearsalRuns(AgentTestCase):
 
 	def test_a_failed_run_is_inconclusive_not_passed(self):
 		name = make_rehearsal([("No proposal", "")])
-		result, _ = rehearse(name, RuntimeError("provider down"))
+		result, _ = rehearse(name, [RuntimeError("provider down")])
 		self.assertEqual(result.run_status, "Failed")
 		self.assertEqual(result.verdict, "Inconclusive")
 
