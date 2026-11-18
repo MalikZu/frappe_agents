@@ -62,6 +62,7 @@ from frappe_agents.tools.base import (
 	execute_tool,
 	log_interrupted_call,
 	runtime_enabled,
+	stop_requested,
 )
 from frappe_agents.tools.registry import get_tool_schemas
 
@@ -267,7 +268,13 @@ def execute_run(run_name: str) -> None:
 	except Exception as exc:
 		frappe.logger("frappe_agents").error(f"run {run_name} failed", exc_info=True)
 		if run is not None:
-			_fail(run, str(exc) or exc.__class__.__name__)
+			# A provider error that ends a stopped run — a retry backoff cut short
+			# by Stop, say — is the stop, not a failure.
+			stopped = _stop_reason(run.name)
+			if stopped:
+				_fail(run, stopped, status="Cancelled")
+			else:
+				_fail(run, str(exc) or exc.__class__.__name__)
 	finally:
 		# Restore the job's original identity once the run ends.
 		frappe.set_user(original_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
@@ -279,6 +286,17 @@ def execute_run(run_name: str) -> None:
 
 
 def _execute(run: Any) -> None:
+	# The claim. Only a Queued run is started: anything else was stopped before a
+	# worker reached it, or another worker has it, and neither is a run this job
+	# may call the model for. A locking read, because it has to see a Stop that
+	# committed after this job's first read — and because the lock it takes is
+	# held to the end of the job, it is how `stop_run` knows a worker owns the
+	# row and must not write to it.
+	status = frappe.db.get_value("Agent Run", run.name, "status", for_update=True)
+	if status != "Queued":
+		frappe.logger("frappe_agents").info(f"run {run.name} is {status}, not Queued: not started")
+		return
+
 	agent = frappe.get_doc("Agent", run.agent)
 
 	# The identity assertion. An agent never runs as Administrator or Guest, and
@@ -291,6 +309,10 @@ def _execute(run: Any) -> None:
 
 	if not runtime_enabled():
 		return _fail(run, KILL_SWITCH_MESSAGE, status="Cancelled")
+	# Stopped after this job read the row as Queued, but before it got this far.
+	stopped = stop_requested(run.name)
+	if stopped:
+		return _fail(run, stopped, status="Cancelled")
 
 	settings = frappe.get_cached_doc("Agent Settings")
 	if not cint(agent.enabled):
@@ -322,7 +344,9 @@ def _execute(run: Any) -> None:
 	publish_event(run, "status", status="Running")
 	_note_proposal_updates(run)
 
-	provider = ModelProfileProvider(profile)
+	# `run=` is how a turn parked in a provider retry backoff hears Stop.
+	# Drop it and nothing fails; Stop just stops reaching that wait.
+	provider = ModelProfileProvider(profile, run=run.name)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
 	if run.get("trigger"):
@@ -363,6 +387,13 @@ def _execute(run: Any) -> None:
 		# The last thing the model wrote, even on the path where the loop threw
 		# and nothing else will flush it.
 		events.updates.flush()
+
+	if events.final_text is None and not cancellation.is_cancelled():
+		# The loop ended without an answer and nobody cancelled the token. A turn
+		# parked in a provider retry backoff ends that way when it is stopped: the
+		# backoff gives up, and the provider's last refusal is what the loop
+		# reports. Asked once more here, so that run ends Cancelled, not Failed.
+		_check_kill_switch(cancellation, run.name)
 
 	if cancellation.is_cancelled():
 		return _fail(run, cancellation.reason or "The run was cancelled.", status="Cancelled")
@@ -660,7 +691,8 @@ class RunEvents:
 			# cancelled, so this is what stops the next model call. Reading it on
 			# every event instead would also pre-empt tool calls, and a tool that
 			# never reaches `execute_tool` is a tool that never gets audited.
-			_check_kill_switch(self.cancellation)
+			# A person's own Stop is read at the same place, for the same reason.
+			_check_kill_switch(self.cancellation, self.run.name)
 
 		self.seq += 1
 		payload = _payload(event)
@@ -751,9 +783,44 @@ def _payload(event: Any) -> dict:
 	return payload
 
 
-def _check_kill_switch(cancellation: RunCancellation) -> None:
+def _check_kill_switch(cancellation: RunCancellation, run_name: str | None = None) -> None:
+	reason = _stop_reason(run_name)
+	if reason:
+		cancellation.cancel(reason)
+
+
+def _stop_reason(run_name: str | None) -> str | None:
+	"""Why this run should stop now — the kill switch or its person's Stop — or None."""
 	if not runtime_enabled():
-		cancellation.cancel(KILL_SWITCH_MESSAGE)
+		return KILL_SWITCH_MESSAGE
+	return stop_requested(run_name)
+
+
+def cancel_queued_run(run_name: str, reason: str) -> str:
+	"""Cancel a run no worker has started yet. Returns the status it is in.
+
+	The row is claimed without waiting. A worker that has started the run holds
+	its row lock until the job ends — it never commits mid-run — so a write here
+	would wait on that lock and then land on top of whatever the run became:
+	a Completed run overwritten as Cancelled, its log replaced. So a row that is
+	locked belongs to a worker, and is answered as Running: the stop flag that
+	the caller already published is how that worker hears about it.
+
+	Status and log are written from the row as read under the lock, never from
+	a copy read before it.
+	"""
+	try:
+		status = frappe.db.get_value("Agent Run", run_name, "status", for_update=True, wait=False)
+	except frappe.QueryTimeoutError:
+		# NOWAIT on a locked row: MariaDB's lock-wait error and Postgres's
+		# LockNotAvailable both arrive as this.
+		return "Running"
+	if status != "Queued":
+		return status
+	run = frappe.get_doc("Agent Run", run_name)
+	run.flags.ignore_permissions = True
+	_fail(run, reason, status="Cancelled")
+	return "Cancelled"
 
 
 def _tools(

@@ -17,6 +17,7 @@ and putting that work back in front of the model is the one thing it must not do
 
 import frappe
 
+from frappe_agents.api import stop_run
 from frappe_agents.harness.messages import AssistantMessage, ThinkingContent, message_text
 from frappe_agents.runner.providers import ProviderError
 from frappe_agents.runner.run import (
@@ -48,6 +49,7 @@ from frappe_agents.tests.fixtures import (
 	set_kill_switch,
 	tool_request,
 )
+from frappe_agents.tools.base import RUN_STOP_KEY
 
 PROFILE_DT = "LLM Model Profile"
 
@@ -211,6 +213,30 @@ class TestFailedTurnReplay(AgentTestCase):
 		self.assertEqual(frappe.db.get_value("Agent Run", cancelled.name, "status"), "Cancelled")
 		self.assertIn("tool_execution_end", frappe.db.get_value("Agent Run", cancelled.name, "event_log"))
 		set_kill_switch(1)
+
+		_run, wire, _provider = self.next_turn()
+
+		self.assertEqual([message["role"] for message in wire], ["system", "user"])
+		self.assertEqual(wire[1]["content"], SECOND)
+
+	def test_a_turn_its_person_stopped_does_not_come_back(self):
+		"""Stop is a person saying the work was wrong. It stays out like the switch's."""
+		with as_user(RESTRICTED_USER):
+			stopped = make_run(
+				effective_user=RESTRICTED_USER,
+				agent=AGENT,
+				conversation=self.conversation,
+				message=FIRST,
+			)
+		self.addCleanup(frappe.cache.delete_value, RUN_STOP_KEY.format(stopped.name))
+
+		def stop_then_ask_again() -> dict:
+			stop_run(stopped.name)
+			return SEARCH
+
+		run_with_model(stopped.name, [SEARCH, stop_then_ask_again, model_says("Never asked.")])
+		self.assertEqual(frappe.db.get_value("Agent Run", stopped.name, "status"), "Cancelled")
+		self.assertIn("tool_execution_end", frappe.db.get_value("Agent Run", stopped.name, "event_log"))
 
 		_run, wire, _provider = self.next_turn()
 

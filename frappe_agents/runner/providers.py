@@ -903,6 +903,47 @@ def _runtime_probe(key: str | None = None) -> "Callable[[], bool] | None":
 	return stopped
 
 
+def _run_stop_probe(run: str | None) -> "Callable[[], bool] | None":
+	"""A read of one run's Stop flag that a worker thread is allowed to make.
+
+	Built the way `_runtime_probe` is built, for the same reason: the key is
+	rendered here, where frappe still answers, and the raw GET survives the thread
+	boundary. Any value at all means stop — the flag is only ever written by Stop.
+	"""
+	if not run:
+		return None
+	try:
+		from frappe_agents.tools.base import RUN_STOP_KEY
+
+		cache = frappe.cache
+		full_key = cache.make_key(RUN_STOP_KEY.format(run))
+	except Exception:
+		return None
+
+	def stopped() -> bool:
+		try:
+			return cache.get(full_key) is not None
+		except Exception:
+			return False
+
+	stopped.key = full_key
+	return stopped
+
+
+def _stop_probe(run: str | None) -> "Callable[[], bool] | None":
+	"""The kill switch and this run's own Stop, asked as one question."""
+	probes = [probe for probe in (_runtime_probe(), _run_stop_probe(run)) if probe is not None]
+	if not probes:
+		return None
+	if len(probes) == 1:
+		return probes[0]
+
+	def stopped() -> bool:
+		return any(probe() for probe in probes)
+
+	return stopped
+
+
 class ProviderStream:
 	"""The normalized chunk stream, with the socket behind it still reachable.
 
@@ -1026,7 +1067,7 @@ class ProviderStream:
 
 
 def call_model_stream(
-	profile: Any, messages: list[dict], tool_schemas: list[dict] | None = None
+	profile: Any, messages: list[dict], tool_schemas: list[dict] | None = None, run: str | None = None
 ) -> ProviderStream:
 	"""Call the model and yield the answer as it is written.
 
@@ -1037,13 +1078,16 @@ def call_model_stream(
 	The profile is resolved before the generator is handed over, so a disabled
 	provider or a missing key fails here and now, the way `call_model` fails —
 	not on the first chunk somebody pulls.
+
+	`run` names the Agent Run this call belongs to. A retry backoff then also ends
+	when the person it acts for presses Stop.
 	"""
 	profile, provider, api_key = _resolve_profile(profile)
 	tool_schemas = tool_schemas or []
 
 	# Built here, on the thread that still has a frappe context, because the
 	# thread that will read it does not. See `_runtime_probe`.
-	stream = ProviderStream(stopped=_runtime_probe())
+	stream = ProviderStream(stopped=_stop_probe(run))
 	if provider.provider_type == PROVIDER_ANTHROPIC:
 		build = _stream_anthropic
 	elif provider.provider_type == PROVIDER_RESPONSES:
