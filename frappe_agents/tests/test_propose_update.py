@@ -52,6 +52,7 @@ from frappe_agents.tests.fixtures import (
 	make_submitted_order,
 	set_kill_switch,
 )
+from frappe_agents.tests.test_action_notifications import notices
 
 REASON = "The customer confirmed it by phone this morning."
 SECRET_RATE = "rate-9431"
@@ -488,6 +489,20 @@ class TestProposeUpdate(AgentTestCase):
 			"Notification Log", {"document_name": action.name, "for_user": APPROVER_USER}, "subject"
 		)
 		self.assertIn("proposes to change fields on", subject or "")
+
+	def test_the_requester_is_told_how_a_change_ended(self):
+		"""Through the same notices a submit gets, worded as a change."""
+		applied = self.proposed(make_case().name, {"priority": "High"})
+		failed = self.proposed(make_case().name, {"status": "Working"})
+
+		self.approve(applied)
+		self.approve(failed, user=WEAK_APPROVER)
+
+		for action, words in ((applied, "approved the proposal to change fields on"), (failed, "failed")):
+			rows = notices(action, DRAFT_USER)
+			self.assertEqual(len(rows), 1, action)
+			self.assertIn(words, rows[0].subject)
+			self.assertIn("change fields on", rows[0].subject)
 
 
 class TestNormalise(AgentTestCase):
