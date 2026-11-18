@@ -49,6 +49,7 @@ from frappe_agents.tests.fixtures import (
 	ORDER_ITEM_DT,
 	PROJECT_DT,
 	RESTRICTED_USER,
+	SECRET_SCORE_FIELD,
 	SKILL_AUTHOR,
 	SKILL_WRITER,
 	TEST_REPORT,
@@ -218,7 +219,7 @@ class TestDescribingADoctype(BuilderCase):
 		for user in (RESTRICTED_USER, OPEN_USER):
 			described = self.described(TICKET_DT, user=user)
 			self.assertNotIn(SECRET_FIELD, [field["fieldname"] for field in described["fields"]])
-			self.assertEqual(described["restricted_fields"], [SECRET_FIELD])
+			self.assertEqual(described["restricted_fields"], [SECRET_FIELD, SECRET_SCORE_FIELD])
 
 	def test_it_describes_the_table_its_own_suggested_rules_live_in(self):
 		"""Without this the Builder cannot write a blueprint at all.
