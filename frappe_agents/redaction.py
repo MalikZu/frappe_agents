@@ -12,6 +12,7 @@ outcome. Only values that must not become audit content are replaced with
 """
 
 import copy
+import datetime
 import json
 import re
 from decimal import Decimal, InvalidOperation
@@ -174,9 +175,12 @@ def _changed_field_is_sensitive(value: dict, keys: set[str]) -> bool:
 def _collect(value: Any, secrets: set[str]) -> None:
 	"""Every value under a redacted key, as text, so prose can be scrubbed of it later.
 
-	Numbers count: a salary is a secret whatever its type. A value wrapped as
-	untrusted text is also kept without its wrapper, because that is the form a
-	model repeats it in.
+	Numbers count: a salary is a secret whatever its type. So do dates, times,
+	durations and decimals, which a tool hands over as objects before they are
+	serialised: each is kept in the string form `frappe.as_json` writes it in, so
+	a result read live and the same result read back from its text learn the same
+	value. A value wrapped as untrusted text is also kept without its wrapper,
+	because that is the form a model repeats it in.
 	"""
 	if isinstance(value, bool) or value is None:
 		return
@@ -185,7 +189,7 @@ def _collect(value: Any, secrets: set[str]) -> None:
 		unwrapped = _UNTRUSTED.fullmatch(value)
 		if unwrapped:
 			secrets.add(unwrapped.group(1))
-	elif isinstance(value, (int, float)):
+	elif isinstance(value, (int, float, Decimal, datetime.date, datetime.time, datetime.timedelta)):
 		secrets.add(str(value))
 	elif isinstance(value, dict):
 		for item in value.values():
@@ -203,7 +207,7 @@ def scrub(text: str | None, secrets: set[str]) -> str | None:
 	"""
 	if not text or not secrets:
 		return text
-	numbers = {number for number in map(_number, secrets) if number is not None}
+	numbers = {number for number in (_number(secret) for secret in secrets) if number is not None}
 	for secret in secrets:
 		if len(secret) >= SCRUB_MIN_LENGTH and not _NUMERIC.fullmatch(secret) and secret in text:
 			text = text.replace(secret, REDACTED)
@@ -250,16 +254,40 @@ def _scrub_numbers(text: str, numbers: set[Decimal]) -> str:
 def _in_chain(text: str, span: tuple[int, int], chains: list[tuple[int, int]]) -> bool:
 	"""Whether a number is one part of a date or a reference, and not a value.
 
-	Three or more parts joined by hyphens or slashes is one: 2025-01-02,
-	02/01/2025, ORD-2025-0001. Two parts are not, because two parts are how a
-	value is written too — a range (98765-99000), an amount and its unit
-	(98765/month), a currency and an amount (AED-98765). Those are held back.
+	Only two shapes count, joined by hyphens or slashes:
+
+	* a date: three digit parts, the year first or last — 2025-01-02, 02/01/2025;
+	* a reference: one or more letter parts, then two or more digit parts —
+	  ORD-2025-0001, HR-EMP-2025-0001.
+
+	Anything else is how a value is written: a range (98765-99000-1), an amount
+	with its unit (98765/month/employee, AED-98765/month), a label
+	(net-pay-98765). Those are held back. A unit word never protects a number.
 	"""
 	start, end = span
 	for chain_start, chain_end in chains:
 		if chain_start <= start < chain_end or chain_start < end <= chain_end:
-			return len(re.split(r"[-/]", text[chain_start:chain_end])) >= 3
+			parts = re.split(r"[-/]", text[chain_start:chain_end])
+			return _is_date(parts) or _is_reference(parts)
 	return False
+
+
+def _is_date(parts: list[str]) -> bool:
+	if len(parts) != 3 or not all(part.isdigit() for part in parts):
+		return False
+	lengths = [len(part) for part in parts]
+	short = (1, 2)
+	return (lengths[0] == 4 and lengths[1] in short and lengths[2] in short) or (
+		lengths[0] in short and lengths[1] in short and lengths[2] == 4
+	)
+
+
+def _is_reference(parts: list[str]) -> bool:
+	letters = 0
+	while letters < len(parts) and parts[letters].isalpha():
+		letters += 1
+	digits = parts[letters:]
+	return letters >= 1 and len(digits) >= 2 and all(part.isdigit() for part in digits)
 
 
 def scrub_values(value: Any, secrets: set[str]) -> Any:
