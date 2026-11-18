@@ -9,6 +9,7 @@ sensitive must be `[redacted]` in both. The live frame is the exception: it goes
 only to the user who ran the turn, who already holds the value.
 """
 
+import datetime
 import json
 from unittest.mock import patch
 
@@ -432,6 +433,63 @@ class TestNumbersStayInTheirPlace(AgentTestCase):
 			scrub(text, {"2025", "1500"}),
 			f"{REDACTED} on 2025-01-02, 02/01/2025, ORD-2025-0001, 12025, 2025.5 and 15000; then {REDACTED}.",
 		)
+
+	def test_a_unit_or_a_label_never_protects_a_number(self):
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in (
+			"98765-99000/year",
+			"AED-98765/month",
+			"98765/month/employee",
+			"salary/98765/month",
+			"net-pay-98765",
+			"98765-99000-1",
+		):
+			with self.subTest(written=written):
+				self.assertNotIn("98765", scrub(written, secrets))
+
+	def test_a_date_or_a_reference_keeps_its_number(self):
+		_, secrets = redact({"amount": 2025}, {"amount"})
+
+		for written in ("2025-01-02", "02/01/2025", "ORD-2025-0001", "HR-EMP-2025-0001"):
+			with self.subTest(written=written):
+				self.assertEqual(scrub(written, secrets), written)
+
+	def test_a_date_read_live_is_learned_like_a_date_read_from_text(self):
+		"""A tool hands a Date over as an object, before it is serialised."""
+		args = {"doctype": ORDER_DT, "slice": "fields"}
+		born = datetime.date(1990, 5, 17)
+		result = {"ok": True, "result": {"fields": {"name": "FA-1", "date_of_birth": born}}, "error": None}
+		original = redaction.doctype_sensitive_keys
+		with patch(
+			"frappe_agents.redaction.doctype_sensitive_keys",
+			side_effect=lambda doctype: original(doctype) | {"date_of_birth"},
+		):
+			redactor = EventRedactor()
+			redactor.event({"type": "tool_execution_start", "toolCallId": "call_1", "args": args})
+			text = frappe.as_json(result)
+			redactor.record_result("call_1", args, result, text, frappe.as_json)
+			ended = redactor.event(
+				{
+					"type": "tool_execution_end",
+					"toolCallId": "call_1",
+					"result": {"content": [{"type": "text", "text": text}]},
+				}
+			)
+			said = redactor.event(
+				{
+					"type": "message_end",
+					"message": {
+						"role": "assistant",
+						"content": [{"type": "text", "text": "Born 1990-05-17."}],
+					},
+				}
+			)
+
+		stored = json.loads(ended["result"]["content"][0]["text"])
+		self.assertEqual(stored["result"]["fields"]["date_of_birth"], REDACTED)
+		self.assertEqual(said["message"]["content"][0]["text"], f"Born {REDACTED}.")
+		self.assertEqual(redactor.scrub("Born 1990-05-17."), f"Born {REDACTED}.")
 
 	def test_prose_loses_a_currency_value_in_every_form_it_is_written(self):
 		# A Currency field reaches the redactor as a float, so the value held back
