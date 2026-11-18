@@ -127,9 +127,10 @@ See [Workflow actions](approvals.md#workflow-actions).
 user the agent runs as, from the document's current state. The refusal lists
 the actions that are open.
 
-**An approved workflow action failed.** The workflow decided as you: you do not
-hold the transition's role, its condition no longer holds, or it forbids
-approving a document you own. The reason is on the row.
+**An approved workflow action failed.** The reason is on the row. Either the
+document left the state the agent proposed from, or the workflow decided as you:
+you do not hold the transition's role, its condition no longer holds, or it
+forbids approving a document you own.
 
 **Nothing can be approved.** The kill switch is off. Rejecting still works.
 

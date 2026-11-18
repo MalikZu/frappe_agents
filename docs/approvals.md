@@ -92,10 +92,15 @@ move through a **Workflow**: Draft, then Pending Approval, then Approved. On
 those documents the agent proposes one of the workflow's own actions, such as
 **Approve** or **Send for Review**, with the `propose_transition` tool.
 
-The agent can only propose an action the workflow offers *the user it runs as*,
-from the document's current state, with the transition's condition met. It is
-the same list that user sees under the **Actions** button. If the agent names
-another action, it is refused and told which ones are open.
+The agent can only propose an action the workflow offers *the user it runs as*:
+a transition out of the document's current state, open to one of that user's
+roles, with its condition met. If the agent names another action, it is refused
+and told which ones are open. Self-approval and document permissions are not
+checked at this point. They are checked for the approver, below.
+
+The proposal records the action **and the state it was proposed from**. Workflows
+often reuse an action name: Draft → *Approve* → Manager Approved → *Approve* →
+Approved. A proposal to approve out of Draft never becomes the second Approve.
 
 The approver applies the action. Frappe's own workflow engine runs it in the
 approver's session, so the workflow checks the approver, not the agent:
@@ -108,10 +113,14 @@ approver's session, so the workflow checks the approver, not the agent:
   the action submits it.
 
 Every check above this section still runs first: separation of duties, read
-permission, the timestamp lock and the kill switch. If the document moved to
-another state since the agent proposed, the lock refuses the approval. Read it
-again, and approve again only if the action still makes sense — the workflow
-fails it if that step is no longer open from the new state.
+permission, the timestamp lock and the kill switch. Then two more:
+
+- **The document must still be in the state the agent proposed from, under the
+  same Workflow.** If someone moved it on, the approval fails. The agent can
+  propose again from the new state.
+- **The doctype must not submit in the background.** Frappe would queue the
+  submit, and the approval could not tell whether it went through. Apply the
+  action from the document itself.
 
 The agent never applies a workflow action itself. No tool can.
 
