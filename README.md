@@ -39,6 +39,8 @@ broad rights. This app is built the other way around:
   duties and an edited-before-approval quality metric.
 - **Document extraction**: an attached PDF or image becomes a draft for human
   review, with bank and payment details held back until confirmed by hand.
+- **Fill from file** on a form: a PDF or image fills the open form for you to
+  check and save, with the same checks and the same payment details held back.
 - **Any model provider** over three wire formats (OpenAI-compatible, OpenAI
   Responses and Anthropic) — OpenRouter, Ollama and friends included. The
   provider is a config field, not a dependency.

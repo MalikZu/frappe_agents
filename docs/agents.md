@@ -93,6 +93,8 @@ document the file hangs off. See [Files in chat](files-in-chat.md).
 
 **Show in Forms** offers the agent from the **Ask Agent** button on documents.
 **Form Doctypes** limits that button to the doctypes you name.
+It also offers **Fill from file** on every doctype where the agent has the
+**Extract** verb. See [Fill from file](extraction.md#fill-from-file).
 
 **Allow MCP** lets outside clients such as Claude Code or an IDE call this
 agent's tools. It is off by default, and Agent Settings must allow MCP too. Over

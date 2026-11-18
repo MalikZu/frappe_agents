@@ -55,12 +55,26 @@ agent_tools = [
 	"frappe_agents.tools.builder_tools",
 ]
 
+# Document events
+# ---------------
+
+# Fill from file: a form filled from a reading carries the reading's name until it
+# is saved, and the save itself records the reading against the document. Every
+# other save pays one attribute lookup.
+doc_events = {
+	"*": {
+		"on_update": "frappe_agents.extraction.fill.stamp_on_save",
+	},
+}
+
 # Scheduled jobs
 # --------------
 
 # A proposal nobody decided is not a decision. Sweep pending actions past the
-# expiry in Agent Settings so the agent has to make its case again. And an MCP
-# client that goes away never says so: end the sessions nobody is using.
+# expiry in Agent Settings so the agent has to make its case again. A rehearsal
+# whose job never finished, and a Fill from file reading no saved document was
+# tied to, are closed the same way. And an MCP client that goes away never says
+# so: end the sessions nobody is using.
 scheduler_events = {
 	"hourly": [
 		"frappe_agents.mcp.server.close_idle_sessions",
@@ -68,5 +82,6 @@ scheduler_events = {
 	"daily": [
 		"frappe_agents.actions.expire_stale_actions",
 		"frappe_agents.rehearsals.runner.fail_stale_results",
+		"frappe_agents.extraction.fill.discard_stale_fills",
 	],
 }

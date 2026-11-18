@@ -22,7 +22,7 @@ One rule row names one target and ticks what is allowed on it:
 | Draft New | create documents, always as drafts |
 | Draft Edit | change a draft it or its user already made |
 | Propose | ask a person to submit, cancel, take a workflow action or change a live record's fields — never do it |
-| Extract | read an attached file into a draft of this doctype |
+| Extract | read an attached file into a draft of this doctype, or into an open form with [Fill from file](extraction.md#fill-from-file) |
 
 Two more columns narrow a row:
 

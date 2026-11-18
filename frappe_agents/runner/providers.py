@@ -2323,6 +2323,19 @@ def _looks_dated(model: str) -> bool:
 	return len(tail) == 8 and tail.isdigit()
 
 
+def check_extract_capability(profile: Any, media_type: str) -> None:
+	"""Whether this profile is declared able to read this file, asked before any call.
+
+	The same check `call_model_extract` makes, without the API key: a request that
+	is going to be refused for its file type should hear so while the person is
+	still looking at the button, not from a Failed row later.
+	"""
+	if isinstance(profile, str):
+		profile = frappe.get_cached_doc("LLM Model Profile", profile)
+	provider = frappe.get_cached_doc("LLM Provider", profile.provider)
+	_check_file_capability(provider, profile, (media_type or "").lower(), _is_openrouter(provider))
+
+
 def _check_file_capability(provider: Any, profile: Any, media_type: str, openrouter: bool) -> None:
 	"""Refuse a file type the endpoint was never declared able to read.
 

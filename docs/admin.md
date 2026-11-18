@@ -83,17 +83,22 @@ call *did* stays readable — the tool, the doctype, the field names, the outcom
 
 ## Scheduled work
 
-One daily job: **expire stale actions**. It moves proposals nobody decided to
-Expired after the number of days in Agent Settings.
+Three daily jobs and one hourly job. Each is safe to run by hand and safe to run
+twice.
 
-The expiry job is safe to run by hand and safe to run twice. Expiry is the
-clock, not a decision — nobody is recorded as having decided, and the agent may
-propose the same thing again.
-
-One hourly job: **close idle MCP sessions**. It ends MCP sessions nobody has used
-for 30 minutes. It is also safe to run by hand and safe to run twice: a client
-whose session it ended opens a new one. See
-[Outside clients](mcp.md#sessions-and-limits).
+- **Expire stale actions** (daily) moves proposals nobody decided to Expired
+  after the number of days in Agent Settings. Expiry is the clock, not a
+  decision — nobody is recorded as having decided, and the agent may propose the
+  same thing again.
+- **Fail stale rehearsal results** (daily) marks a rehearsal result still Queued
+  or Running after 6 hours as Failed. Its job never finished. See
+  [Rehearsals](rehearsals.md).
+- **Close stale Fill from file readings** (daily) moves a reading that is still
+  **Ready** after 24 hours to Discarded. No saved document was tied to it. See
+  [Fill from file](extraction.md#fill-from-file).
+- **Close idle MCP sessions** (hourly) ends MCP sessions nobody has used for 30
+  minutes. A client whose session it ended opens a new one. See
+  [Outside clients](mcp.md#sessions-and-limits).
 
 ## Upgrading
 
