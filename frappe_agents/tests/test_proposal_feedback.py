@@ -30,9 +30,14 @@ from frappe_agents.tests.fixtures import (
 	BLIND_APPROVER,
 	DRAFT_AGENT,
 	DRAFT_USER,
+	DRAFTER_ROLE,
 	ORDER_DT,
 	SECOND_DRAFTER,
+	SUBMITTER_ROLE,
+	WORKFLOW_ACTION,
+	WORKFLOW_DRAFT_STATE,
 	AgentTestCase,
+	active_workflow,
 	as_user,
 	call_tool,
 	make_conversation,
@@ -286,5 +291,96 @@ class TestARejectionIsNotAskedAgain(ProposalCase):
 		)
 
 		payload = self.propose_again()
+
+		self.assertTrue(payload["ok"], payload.get("error"))
+
+
+class TestTheDecisionEvent(ProposalCase):
+	def decided_events(self, decide) -> list:
+		with patch("frappe.publish_realtime") as publish:
+			decide()
+		return [c for c in publish.call_args_list if c.args and c.args[0] == "agent_action_decided"]
+
+	def test_the_realtime_payload_carries_no_field_values(self):
+		order = frappe.get_doc(ORDER_DT, self.order.name)
+		events = self.decided_events(lambda: self.reject())
+
+		self.assertEqual(len(events), 1)
+		payload = events[0].args[1]
+		# Names and a status, nothing read out of the document or the decision.
+		self.assertEqual(set(payload), {"action", "status", "run"})
+		self.assertEqual(payload, {"action": self.action, "status": "Rejected", "run": self.first.name})
+		sent = frappe.as_json(payload)
+		for value in (NOTE, self.order.name, order.order_title, "quotation"):
+			self.assertNotIn(str(value), sent)
+		self.assertTrue(events[0].kwargs.get("after_commit"))
+
+
+class TestAWorkflowTransition(AgentTestCase):
+	"""The same story for a proposal that names one of a Workflow's own actions."""
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.enterContext(active_workflow(ORDER_DT, roles=(DRAFTER_ROLE, SUBMITTER_ROLE)))
+		self.conversation = make_conversation(DRAFT_USER, agent=DRAFT_AGENT).name
+		self.order = make_order_draft(user=DRAFT_USER)
+		with as_user(DRAFT_USER):
+			self.first = make_run(
+				effective_user=DRAFT_USER, agent=DRAFT_AGENT, conversation=self.conversation, message=FIRST
+			)
+		payload, _ = self.propose(run=self.first)
+		self.assertTrue(payload["ok"], payload.get("error"))
+		self.action = payload["result"]["action"]
+		self.first.flags.ignore_permissions = True
+		self.first.db_set({"status": "Completed", "output_message": "I proposed it."}, update_modified=False)
+		with as_user(APPROVER_USER):
+			reject_action(self.action, note=NOTE)
+
+	def propose(self, run=None, **extra):
+		args = {
+			"doctype": ORDER_DT,
+			"name": self.order.name,
+			"action": WORKFLOW_ACTION,
+			"reason": "Approve it.",
+		}
+		return call_tool(DRAFT_USER, "propose_transition", {**args, **extra}, run=run)
+
+	def test_the_card_names_the_action_and_the_state_it_was_proposed_from(self):
+		with as_user(DRAFT_USER):
+			state = get_action_state(self.action)
+
+		self.assertEqual(state["status"], "Rejected")
+		self.assertEqual(state["workflow_action"], WORKFLOW_ACTION)
+		self.assertEqual(state["from_workflow_state"], WORKFLOW_DRAFT_STATE)
+		self.assertEqual(state["decision_note"], NOTE)
+
+	def test_a_user_who_cannot_read_the_target_sees_no_workflow_names(self):
+		with as_user(BLIND_APPROVER):
+			state = get_action_state(self.action)
+
+		for key in ("workflow_action", "workflow_name", "from_workflow_state", "target_name"):
+			self.assertIsNone(state[key], key)
+
+	def test_the_next_turn_names_the_action_and_the_state(self):
+		with as_user(DRAFT_USER):
+			run = make_run(
+				effective_user=DRAFT_USER, agent=DRAFT_AGENT, conversation=self.conversation, message=LATER
+			)
+		provider = run_with_model(run.name, model_says("Noted."))
+		last = wire_messages(provider.calls[0]["system"], provider.messages(0))[-1]["content"]
+
+		self.assertIn(
+			f'apply the workflow action "{WORKFLOW_ACTION}" from the state "{WORKFLOW_DRAFT_STATE}"', last
+		)
+		self.assertIn(f'<untrusted source="approver note">{NOTE}</untrusted>', last)
+
+	def test_the_same_action_on_the_same_version_is_refused(self):
+		payload, _ = self.propose()
+
+		self.assertFalse(payload["ok"])
+		self.assertIn("already rejected", payload["error"])
+
+	def test_the_user_asking_again_lets_it_through(self):
+		payload, _ = self.propose(user_asked_again=True)
 
 		self.assertTrue(payload["ok"], payload.get("error"))
