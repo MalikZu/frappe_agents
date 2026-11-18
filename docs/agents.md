@@ -15,6 +15,9 @@ section](images/agent-form.png)
   have a reason not to.
 - **Service User** — the agent acts as one account you name.
 
+A trigger only accepts a Session User agent. It runs as the person whose action
+fired it. See [Agent triggers](triggers.md).
+
 A service user runs with no human in the loop. Its permissions are the whole
 blast radius, so the form checks it:
 
@@ -99,6 +102,10 @@ It also offers **Fill from file** on every doctype where the agent has the
 **Allow MCP** lets outside clients such as Claude Code or an IDE call this
 agent's tools. It is off by default, and Agent Settings must allow MCP too. Over
 MCP the agent never goes past Draft. See [Outside clients](mcp.md).
+
+An agent can also run with no chat at all, when a document event happens: a file
+is attached, or a field changes. That is a trigger, and it is its own record. See
+[Agent triggers](triggers.md).
 
 ## Skills
 

@@ -24,6 +24,7 @@ from frappe_agents.redaction import (
 	masking_supported,
 	redact,
 	scrub,
+	scrub_values,
 	sensitive_keys,
 )
 
@@ -40,7 +41,8 @@ RUN_FLAG = "agent_current_run"
 
 # Nobody a tool call may run as, whoever wrote the run row. The runner refuses
 # them before a run starts; `execute_tool` refuses them again, because it now has
-# a caller that is not the runner.
+# a caller that is not the runner. Kept here, in a module the save-path trigger
+# hook can import without pulling in the model runtime.
 FORBIDDEN_USERS = ("Administrator", "Guest")
 
 # The run surface an outside MCP client drives. A run on it is offered fewer
@@ -53,6 +55,12 @@ MCP_CAPABILITIES = frozenset({CAPABILITY_READ, CAPABILITY_DRAFT})
 MCP_SAVEPOINT = "frappe_agents_mcp_call"
 
 INTERRUPTED = "The tool call was interrupted before it finished."
+# Set on a run doc by a caller that knows values to hold back before any key
+# names them. `execute_tool` takes them out of the audit row.
+HELD_BACK_FLAG = "held_back_values"
+TRIGGER_HAS_NO_TOOLS = (
+	"A run a trigger started has no tools. The trigger reads the input and writes the answer itself."
+)
 
 SETTINGS = "Agent Settings"
 KILL_SWITCH_FIELD = "global_enabled"
@@ -124,7 +132,9 @@ def _grants() -> Any:
 	return grants
 
 
-def execute_tool(run: Any, tool_name: str, args: dict | None = None, atomic: bool = False) -> dict:
+def execute_tool(
+	run: Any, tool_name: str, args: dict | None = None, atomic: bool = False, *, by_runtime: bool = False
+) -> dict:
 	"""Run one tool for one Agent Run and log it.
 
 	`run` is an Agent Run document or its name. Returns
@@ -134,6 +144,10 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, atomic: boo
 	`atomic` undoes whatever the handler wrote when the call does not succeed.
 	The audit row is written after the undo, so it survives it. It undoes rows,
 	not callbacks: anything the handler queued to run after commit still runs.
+
+	`by_runtime` says the runtime itself is calling, not the model. Only a run a
+	trigger started cares: its model holds no tools, and the trigger's own read
+	and write are the only calls it may make.
 	"""
 	args = args if isinstance(args, dict) else {}
 	started = time.monotonic()
@@ -170,6 +184,8 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, atomic: boo
 	if atomic:
 		frappe.db.savepoint(MCP_SAVEPOINT)
 	try:
+		if run_doc.get("trigger") and not by_runtime:
+			raise ToolDenied(TRIGGER_HAS_NO_TOOLS)
 		handler = _resolve_handler(run_doc, tool_name)
 		result = handler(args)
 		if isinstance(result, dict):
@@ -199,6 +215,7 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, atomic: boo
 		result_summary=summary,
 		docs_touched=docs_touched,
 		error=error,
+		held_back=run_doc.flags.get(HELD_BACK_FLAG),
 	)
 
 	return {"ok": outcome == OUTCOME_SUCCESS, "result": result, "error": error}
@@ -419,6 +436,7 @@ def _log_call(
 	result_summary: str | None = None,
 	docs_touched: str | None = None,
 	error: str | None = None,
+	held_back: set[str] | None = None,
 ) -> None:
 	"""Write the one row for this call, with sensitive values held back.
 
@@ -440,6 +458,12 @@ def _log_call(
 				safe_result, result_secrets = redact(result, keys)
 				secrets |= result_secrets
 				summary = _summarise(safe_result)
+		if held_back:
+			# Values the caller knows are sensitive before any key says so: a
+			# triggered run's document. They are taken out wherever they appear,
+			# under any key, because the text they hide in came from a file.
+			secrets |= set(held_back)
+			safe_args = scrub_values(safe_args, secrets)
 
 		call = frappe.get_doc(
 			{

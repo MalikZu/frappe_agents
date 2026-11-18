@@ -262,6 +262,11 @@ def execute_run(run_name: str) -> None:
 	finally:
 		# Restore the job's original identity once the run ends.
 		frappe.set_user(original_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
+		if run is not None and run.get("trigger"):
+			# A triggered run holds its document until it ends, on every way out.
+			from frappe_agents.triggers.dispatch import release
+
+			release(run)
 
 
 def _execute(run: Any) -> None:
@@ -290,6 +295,15 @@ def _execute(run: Any) -> None:
 	# effective user, and the finally block above restores the worker's identity.
 	frappe.set_user(effective_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
+	if run.get("trigger"):
+		# A document event started this run. What it reads is the trigger's to
+		# decide, read here as the run's user — and a File Text trigger is done
+		# before any model is called.
+		from frappe_agents.triggers.execution import prepare_trigger_run
+
+		if prepare_trigger_run(run, agent):
+			return
+
 	try:
 		profile = resolve_run_profile(agent, run)
 	except (frappe.PermissionError, frappe.ValidationError) as exc:
@@ -301,7 +315,15 @@ def _execute(run: Any) -> None:
 	provider = ModelProfileProvider(profile)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
-	max_turns = cint(agent.max_steps) or DEFAULT_MAX_STEPS
+	if run.get("trigger"):
+		# A document wrote this run's input, not a person. Its stored copies keep
+		# back what the document's sensitive fields hold, wherever it appears.
+		from frappe_agents.tools.base import HELD_BACK_FLAG
+
+		events.redactor.input_from_document = True
+		events.redactor.hold_back(run.flags.get(HELD_BACK_FLAG) or set())
+	# A triggered run has no tools, so its first answer is its last.
+	max_turns = 1 if run.get("trigger") else cint(agent.max_steps) or DEFAULT_MAX_STEPS
 
 	try:
 		asyncio.run(
@@ -321,7 +343,8 @@ def _execute(run: Any) -> None:
 		_update(
 			run,
 			{
-				"tokens_in": provider.tokens_in,
+				# Plus what a triggered run spent reading a scan before the model ran.
+				"tokens_in": provider.tokens_in + cint(run.flags.get("trigger_tokens")),
 				"tokens_out": provider.tokens_out,
 				"steps_taken": events.steps,
 			},
@@ -336,6 +359,16 @@ def _execute(run: Any) -> None:
 
 	if events.final_text is None:
 		return _fail(run, events.failure(max_turns))
+
+	if run.get("trigger"):
+		# The model answered. The runtime writes that answer into the one field
+		# the trigger names, or the run fails saying why it could not.
+		from frappe_agents.triggers.execution import finish_trigger_run
+
+		problem = finish_trigger_run(run, events.final_text)
+		if problem:
+			_update(run, {"output_message": events.redactor.scrub(events.final_text)})
+			return _fail(run, problem)
 
 	_update(
 		run,
@@ -726,6 +759,10 @@ def _tools(
 	executor is new, and it does nothing but call `execute_tool`.
 	"""
 	tools = []
+	if run.get("trigger"):
+		# The model on a triggered run reads what it is handed and answers. Any
+		# tool it asks for anyway is refused, and audited, by `execute_tool`.
+		return tools
 	for schema in get_tool_schemas(agent):
 		name = schema["name"]
 		tools.append(
@@ -820,6 +857,10 @@ def _call_tool(run: Any, cancellation: RunCancellation, name: str, args: dict) -
 
 def build_system_prompt(agent: Any, run: Any) -> str:
 	"""The agent's instructions, its approved skills, the focal document, the files, the rules."""
+	if run.get("trigger"):
+		from frappe_agents.triggers.execution import trigger_system_prompt
+
+		return trigger_system_prompt(agent, run)
 	parts = (
 		(agent.instructions or "").strip(),
 		_skills_section(agent, run),

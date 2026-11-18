@@ -126,6 +126,8 @@ before every request. Redirects are never followed.
   Review Quality report is actually telling you.
 - [Document extraction](docs/extraction.md) — an attachment becomes a draft, and
   the sensitive-field gate that holds payment details back.
+- [Agent triggers](docs/triggers.md) — an agent that runs when a file is
+  attached or a field changes, and writes one field, as the person who acted.
 - [Outside clients (MCP)](docs/mcp.md) — let Claude Code or an IDE call an
   agent's tools through the same permission wall, and what changes when you do.
 
