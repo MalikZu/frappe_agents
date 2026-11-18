@@ -135,6 +135,22 @@ they moved — see [Field changes](approvals.md#field-changes). It works on a
 doctype with an active Workflow too: the approver needs the role the current
 state allows to edit, and the workflow state itself is refused.
 
+A proposal an approver rejected is not proposed again on the same version of the
+document. The tool refuses it and quotes the approver's note to the agent. For
+`propose_update`, the same proposal means the same fields set to the same
+values. A different change to the same version is a new proposal. The tool
+accepts a rejected proposal again in two cases:
+
+- the document changed since the rejection;
+- the agent sets `user_asked_again`, because the user asked.
+
+In both cases the reason starts by saying the proposal was rejected before, and
+names the earlier proposal, so the approver can open it. When the agent set
+`user_asked_again`, the reason says the agent reports that the user asked. The
+system cannot check that claim, so the reason does not state it as fact.
+
+A pending proposal past its expiry window does not block a new one.
+
 ## Reading a tool call
 
 Open any row under **Agents → Activity → Tool Calls**, or expand a call in chat.

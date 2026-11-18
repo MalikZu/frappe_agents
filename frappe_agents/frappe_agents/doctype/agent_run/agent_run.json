@@ -22,6 +22,8 @@
   "parent_run",
   "depth",
   "input_message",
+  "proposal_updates",
+  "proposal_updates_for",
   "output_message",
   "error",
   "started_at",
@@ -135,6 +137,21 @@
    "label": "Input Message"
   },
   {
+   "description": "What the agent was told, at the start of this run, about its proposals that had been decided since its last turn.",
+   "fieldname": "proposal_updates",
+   "fieldtype": "Long Text",
+   "label": "Proposal Updates",
+   "read_only": 1
+  },
+  {
+   "description": "The proposals that note covered, one per line. A proposal is announced to the agent once.",
+   "fieldname": "proposal_updates_for",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Proposal Updates For",
+   "read_only": 1
+  },
+  {
    "fieldname": "output_message",
    "fieldtype": "Long Text",
    "label": "Output Message"
@@ -191,7 +208,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-11-18 14:00:00.000000",
+ "modified": "2026-11-18 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Run",

@@ -19,3 +19,4 @@ frappe_agents.patches.v0_7_0.redact_stored_event_logs
 frappe_agents.patches.v0_7_0.add_rehearsals
 frappe_agents.patches.v0_7_0.add_trigger_sidebar_link
 frappe_agents.patches.v0_7_0.scrub_stored_master_values
+frappe_agents.patches.v0_7_0.mark_decided_proposals_told

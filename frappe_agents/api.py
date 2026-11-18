@@ -18,7 +18,13 @@ from frappe.query_builder.functions import Min, Sum
 from frappe.utils import cint, get_datetime, now_datetime, today
 
 from frappe_agents.access.preview import effective_access as access_preview
-from frappe_agents.actions import APPROVER_ROLE, separation_of_duties_block
+from frappe_agents.actions import (
+	APPROVER_ROLE,
+	proposal_state,
+	separation_of_duties_block,
+	state_fields,
+	target_readable,
+)
 from frappe_agents.context.attachments import conversation_attachments
 from frappe_agents.extraction import fill
 from frappe_agents.extraction.pipeline import (
@@ -59,6 +65,9 @@ CONVERSATION_BYTE_BUDGET = 1_000_000
 # How many extraction rows one page may carry, for the same reason. A page of
 # runs that each read a stack of documents is still one answer.
 CONVERSATION_EXTRACTION_LIMIT = 100
+# And how many proposal rows. A run proposes a handful at most; this is the cap
+# for a page of runs that each proposed several.
+CONVERSATION_ACTION_LIMIT = 100
 
 
 @frappe.whitelist()
@@ -411,9 +420,12 @@ def get_conversation(conversation: str, before: str | None = None, limit: Any = 
 
 	page = _run_page(doc.name, before, limit)
 	runs = page["runs"]
-	extractions = _run_extractions([run.name for run in runs])
+	names = [run.name for run in runs]
+	extractions = _run_extractions(names)
+	actions = _run_actions(names)
 	for run in runs:
 		run["extractions"] = extractions.get(run.name) or []
+		run["actions"] = actions.get(run.name) or []
 
 	return {
 		"name": doc.name,
@@ -524,6 +536,54 @@ def _run_extractions(runs: list[str]) -> dict[str, list[dict]]:
 			}
 		)
 	return grouped
+
+
+def _run_actions(runs: list[str]) -> dict[str, list[dict]]:
+	"""Where each run's proposals stand now, grouped by run. One query for the lot.
+
+	The card in the chat is first drawn from the run's event log, which says only
+	that a proposal was made. Whether it was applied, rejected, failed or expired
+	happened later and somewhere else, so it is read here, from the proposal.
+
+	`get_list` carries the permission on the proposal, and `proposal_state` asks
+	the one on the target: a row about a document this user can no longer read
+	comes back with its status and nothing about the document.
+	"""
+	if not runs:
+		return {}
+
+	rows = frappe.get_list(
+		"Agent Action",
+		filters={"run": ("in", runs)},
+		fields=state_fields(),
+		order_by="creation desc",
+		limit_page_length=CONVERSATION_ACTION_LIMIT,
+	)
+	rows.reverse()
+
+	grouped: dict[str, list[dict]] = {}
+	for row in rows:
+		grouped.setdefault(row.run, []).append(proposal_state(row))
+	return grouped
+
+
+@frappe.whitelist()
+def get_action_state(action: str) -> dict | None:
+	"""Where one proposal stands, as the session user may see it.
+
+	The chat calls this when it hears that a proposal was decided. The realtime
+	event carries the proposal's name and status and nothing else, so what the
+	card shows about the document is always read through this permission check.
+	"""
+	if not action or not isinstance(action, str):
+		frappe.throw(_("Which proposal? An Agent Action name is required."))
+	# `get_list` is the permission check. A proposal this user may not read, or
+	# one that does not exist, is the same empty answer: the card stays as drawn,
+	# and no dialog interrupts a person who did nothing.
+	rows = frappe.get_list(
+		"Agent Action", filters={"name": action}, fields=state_fields(), limit_page_length=1
+	)
+	return proposal_state(rows[0]) if rows else None
 
 
 def _conversation_context(doc: Any) -> dict | None:
@@ -665,7 +725,7 @@ def list_pending_actions(limit: int | None = None) -> list[dict]:
 
 
 def _pending_row(row: dict) -> dict:
-	if not _target_readable(row):
+	if not target_readable(row):
 		return _redacted_row(row)
 
 	block = separation_of_duties_block(frappe._dict(row))
@@ -701,25 +761,13 @@ def _redacted_row(row: dict) -> dict:
 	return row
 
 
-def _target_readable(row: dict) -> bool:
-	doctype, name = row.get("target_doctype"), row.get("target_name")
-	if not doctype or not name:
-		return False
-	if not frappe.db.exists(doctype, name):
-		# The target is gone, so there is no document to check against. The
-		# doctype-level right is the most that can be asked here, and the approval
-		# will fail on the missing document anyway.
-		return bool(frappe.has_permission(doctype, "read"))
-	return bool(frappe.has_permission(doctype, "read", doc=name))
-
-
 def _pending_limit(limit: Any) -> int:
 	limit = cint(limit) or DEFAULT_PENDING_LIMIT
 	return max(1, min(limit, MAX_PENDING_LIMIT))
 
 
 def _target_modified(row: dict) -> Any:
-	"""The target's timestamp, for a row `_target_readable` has already cleared."""
+	"""The target's timestamp, for a row `target_readable` has already cleared."""
 	doctype, name = row.get("target_doctype"), row.get("target_name")
 	if not doctype or not name:
 		return None

@@ -184,6 +184,13 @@ Two deliberate limits worth knowing:
 - A failed turn is replayed from its stored log, and a reopened conversation is
   drawn from it. Both show `[redacted]` where a sensitive value was.
 
+A run's **Proposal Updates** field holds what the agent was told about its
+decided proposals: the approver's note and the reason an apply failed. Either
+can quote a document's fields. Before the note is stored, the text scrub takes
+out the sensitive values of each document it names. The agent is sent the same
+scrubbed note. If a document's values cannot be read, its line keeps the
+outcome and leaves the note and the reason out.
+
 #### Logs stored before redaction
 
 Older releases stored the event log without redaction. The migrate after you

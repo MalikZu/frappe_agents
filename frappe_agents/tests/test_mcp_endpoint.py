@@ -565,6 +565,8 @@ class TestMCPEndpoint(AgentTestCase):
 		self.assertIn("propose_", text)
 		self.assertNotIn(run.TOOL_DISCIPLINE, text)
 		self.assertNotIn(run.DRAFT_DISCIPLINE, text)
+		# Chat opens a turn with proposal updates. MCP never does, so it never says so.
+		self.assertNotIn("proposal updates", text.lower())
 
 	def test_an_agent_blueprint_cannot_be_drafted_over_mcp(self):
 		session = self.open_session()

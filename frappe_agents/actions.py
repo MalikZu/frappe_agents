@@ -127,6 +127,31 @@ NOTICE_FIELDS = (
 	"update_fields",
 )
 
+# How many of a user's past rejections on one document the proposal tools look
+# through for one made on the same version of it.
+REJECTION_LOOKBACK = 5
+
+# What a proposal's state is read from, for the chat card and the agent's history.
+STATE_FIELDS = (
+	"name",
+	"run",
+	"status",
+	"action_type",
+	"workflow_action",
+	"workflow_name",
+	"from_workflow_state",
+	"update_fields",
+	"target_doctype",
+	"target_name",
+	"reason",
+	"decision_note",
+	"failure",
+	"decided_at",
+	"requested_by",
+	"agent",
+	"creation",
+)
+
 
 @frappe.whitelist(methods=["POST"])
 def approve_action(action: str, expected_modified: Any, note: str | None = None) -> dict:
@@ -290,12 +315,16 @@ def pending_action_for(
 	For a workflow transition the action is the workflow's own verb out of one
 	state: a pending Approve does not block a Reject, and a stale Approve out of an
 	earlier state does not block the Approve out of this one.
+
+	A Pending row past its window does not count either. It cannot be approved
+	any more, and the daily sweep has simply not written Expired on it yet.
 	"""
 	filters = {
 		"target_doctype": target_doctype,
 		"target_name": target_name,
 		"action_type": action_type,
 		"status": STATUS_PENDING,
+		"creation": (">=", _cutoff(_expiry_days())),
 	}
 	if workflow_action:
 		filters["workflow_action"] = workflow_action
@@ -748,6 +777,159 @@ def _never_raises(title: str):
 	except Exception:
 		frappe.db.rollback(save_point=NOTIFY_SAVEPOINT)
 		frappe.log_error(title=title)
+
+
+def state_fields() -> list[str]:
+	"""The Agent Action columns a chat card and the agent's history are built from."""
+	return list(STATE_FIELDS)
+
+
+def proposal_state(row: Any) -> dict:
+	"""One proposal as the session user may see it: where it stands, and why.
+
+	Everything about the target is taken out when the session user cannot read
+	the target today: its doctype and name, the agent's reason, the approver's
+	note and the failure text. The note and the failure are about the document,
+	and a failure is the document's own validation message, which may quote its
+	fields. What stays is what is about the proposal itself: its status, the verb,
+	the run, and when it was decided.
+	"""
+	row = frappe._dict(row)
+	state = {
+		"action": row.name,
+		"run": row.run,
+		"status": row.status,
+		"action_type": row.action_type,
+		"workflow_action": row.get("workflow_action"),
+		"workflow_name": row.get("workflow_name"),
+		"from_workflow_state": row.get("from_workflow_state"),
+		# The names of the fields a change would set. Never their values: those sit
+		# at a permlevel no role reads, and only the approval form hands them out.
+		"update_fields": row.get("update_fields"),
+		"target_doctype": row.target_doctype,
+		"target_name": row.target_name,
+		"reason": row.reason,
+		"decision_note": row.decision_note,
+		"failure": row.failure,
+		"decided_at": row.decided_at,
+		"target_visible": 1,
+		"can_decide": 0,
+	}
+	if row.status == STATUS_PENDING and is_stale(row):
+		# Past its window and refused by `approve_action` already; the daily sweep
+		# writes it down later. Until then it is shown as what it is.
+		state["status"] = STATUS_EXPIRED
+
+	# A target that is gone has nobody to ask about, so it is not shown at all:
+	# the doctype-level right says nothing about one document's User Permissions.
+	exists = bool(
+		row.target_doctype and row.target_name and frappe.db.exists(row.target_doctype, row.target_name)
+	)
+	if not exists or not target_readable(row):
+		state.update(
+			{
+				"target_visible": 0,
+				"target_doctype": None,
+				"target_name": None,
+				# A workflow's names are part of the target's process, and can say
+				# what kind of document it is.
+				"workflow_action": None,
+				"workflow_name": None,
+				"from_workflow_state": None,
+				"update_fields": None,
+				"reason": None,
+				"decision_note": None,
+				"failure": None,
+			}
+		)
+		return state
+
+	if state["status"] == STATUS_PENDING:
+		state["can_decide"] = 0 if separation_of_duties_block(row) else 1
+	return state
+
+
+def rejected_proposal_for(
+	target_doctype: str,
+	target_name: str,
+	action_type: str,
+	modified: Any,
+	workflow_action: str | None = None,
+	from_workflow_state: str | None = None,
+	proposed_values: dict | None = None,
+) -> Any:
+	"""This user's latest rejected proposal for the same action on this document, if any.
+
+	The row carries `same_version`: whether it was rejected on the document as it
+	is now. Read through `get_list` and filtered to the session user's own
+	proposals: a user who may read everyone's, an approver say, is still held
+	only to the rejections their own agent was told about. A workflow action is
+	the same action only with the same verb out of the same state. A field change
+	is the same action only with the same fields set to the same values: a
+	different change to the same version is a different question.
+	"""
+	filters = {
+		"requested_by": frappe.session.user,
+		"target_doctype": target_doctype,
+		"target_name": target_name,
+		"action_type": action_type,
+		"status": STATUS_REJECTED,
+	}
+	if workflow_action:
+		filters["workflow_action"] = workflow_action
+	if from_workflow_state:
+		filters["from_workflow_state"] = from_workflow_state
+	filters = [[key, "=", value] for key, value in filters.items()]
+	if proposed_values is not None:
+		# Narrowed in the query, so other changes to the same record do not use up
+		# the lookback before a matching one is reached. `like` is only a first cut:
+		# `_same_values` checks the exact fields and values.
+		filters += [["update_fields", "like", f"%{fieldname}%"] for fieldname in proposed_values]
+	rows = frappe.get_list(
+		"Agent Action",
+		filters=filters,
+		fields=["name", "decision_note", "proposal_modified", "update_fields"],
+		order_by="creation desc",
+		limit_page_length=REJECTION_LOOKBACK,
+	)
+	if proposed_values is not None:
+		rows = [row for row in rows if _same_values(row, proposed_values)]
+	if not rows:
+		return None
+	for row in rows:
+		if _same_timestamp(row.proposal_modified, modified):
+			row.same_version = True
+			return row
+	rows[0].same_version = False
+	return rows[0]
+
+
+def _same_values(row: Any, proposed_values: dict) -> bool:
+	"""Whether a rejected field change set exactly these fields to exactly these values.
+
+	The values sit at a permlevel no role reads, so `get_list` cannot return them.
+	The row is the session user's own proposal, read after its permission check,
+	and the values are compared here and never returned.
+	"""
+	if field_names(row.update_fields) != set(proposed_values):
+		return False
+	action = frappe.get_doc("Agent Action", row.name)
+	if not action.has_permission("read"):
+		return False
+	return (action.proposed_values or "") == dumps(proposed_values)
+
+
+def target_readable(row: Any) -> bool:
+	"""Whether the session user may read the document a proposal is about."""
+	doctype, name = row.get("target_doctype"), row.get("target_name")
+	if not doctype or not name:
+		return False
+	if not frappe.db.exists(doctype, name):
+		# The target is gone, so there is no document to check against. The
+		# doctype-level right is the most that can be asked here, and the approval
+		# will fail on the missing document anyway.
+		return bool(frappe.has_permission(doctype, "read"))
+	return bool(frappe.has_permission(doctype, "read", doc=name))
 
 
 def _check_kill_switch() -> None:

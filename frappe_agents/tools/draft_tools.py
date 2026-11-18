@@ -54,7 +54,8 @@ from frappe.model.workflow import WorkflowStateError, get_transitions, get_workf
 from frappe.utils import cint, strip_html
 
 from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_READ, VERB_UPDATE_DRAFT
-from frappe_agents.actions import pending_action_for, record_proposal
+from frappe_agents.actions import pending_action_for, record_proposal, rejected_proposal_for
+from frappe_agents.context.untrusted import wrap
 from frappe_agents.field_changes import (
 	MAX_FIELDS,
 	UnusableValue,
@@ -64,6 +65,8 @@ from frappe_agents.field_changes import (
 	normalise,
 	precision_of,
 )
+from frappe_agents.redaction import scrub
+from frappe_agents.runner.proposal_updates import defuse, document_secrets
 from frappe_agents.runner.run import publish_event
 from frappe_agents.tools.base import (
 	CAPABILITY_DRAFT,
@@ -341,6 +344,7 @@ def _propose(payload: dict, action_type: str) -> dict:
 	_check_target_state(doc, action_type)
 	_refuse_workflow(doctype)
 	_refuse_duplicate(doctype, name, action_type)
+	reason = _check_rejected(doctype, name, action_type, doc.modified, reason, payload)
 
 	action = record_proposal(run, action_type, doctype, name, reason, doc.modified)
 
@@ -406,6 +410,9 @@ def propose_transition(payload: dict) -> dict:
 		)
 
 	_refuse_duplicate(doctype, name, ACTION_TRANSITION, workflow_action, state)
+	reason = _check_rejected(
+		doctype, name, ACTION_TRANSITION, doc.modified, reason, payload, workflow_action, state
+	)
 
 	# The Workflow and the state go on the row with the verb: the same verb can mean
 	# a different step from another state, and the approval refuses anything but
@@ -499,6 +506,9 @@ def propose_update(payload: dict) -> dict:
 	_refuse_fields(meta, doc, values)
 	proposed, seen = _proposed_change(meta, doc, values)
 	_refuse_overlap(doctype, name, proposed)
+	reason = _check_rejected(
+		doctype, name, ACTION_UPDATE, doc.modified, reason, payload, proposed_values=proposed
+	)
 
 	action = record_proposal(
 		run,
@@ -682,6 +692,77 @@ def _refuse_duplicate(
 		)
 
 
+def _approver_note(note: str | None, doctype: str, name: str) -> str:
+	"""An approver's note as a refusal may quote it: without the document's held-back values.
+
+	The refusal is stored on the Agent Tool Call row, where an auditor reads it,
+	and the note can quote a field the audit trail holds back. A document whose
+	values cannot be read gives no note at all.
+	"""
+	if not note:
+		return ""
+	try:
+		secrets = document_secrets(doctype, name)
+	except Exception:
+		return "(the note cannot be shown)"
+	return defuse(scrub(note, secrets) or "")
+
+
+def _check_rejected(
+	doctype: str,
+	name: str,
+	action_type: str,
+	modified: Any,
+	reason: str,
+	payload: dict,
+	workflow_action: str | None = None,
+	from_workflow_state: str | None = None,
+	proposed_values: dict | None = None,
+) -> str:
+	"""Refuse to ask again what an approver already refused, and mark any second ask.
+
+	The history tells the agent about a rejection once, and a long conversation
+	can trim that turn away. This is the check that does not forget.
+
+	On the same version of the document it refuses, unless the user asked for it
+	again. On a version that changed since it lets the proposal through, because
+	the document is a different question now. Either way the approver is told, at
+	the top of the reason, that this was rejected before: an agent that holds
+	`update_draft` can always change the document, and the approver is the one
+	who decides whether the change answers the note.
+	"""
+	rejected = rejected_proposal_for(
+		doctype, name, action_type, modified, workflow_action, from_workflow_state, proposed_values
+	)
+	if not rejected:
+		return reason
+	# The system knows that a rejection exists and whether the document changed.
+	# It does not know what the user said: `user_asked_again` is the agent's word,
+	# and the marker says so rather than vouching for it.
+	asked = payload.get("user_asked_again") is True
+	said = " The agent says the user asked for this." if asked else ""
+	if not rejected.same_version:
+		return (
+			f"Proposed again after an earlier rejection ({rejected.name}). "
+			f"The document changed since.{said}\n\n{reason}"
+		)
+	if asked:
+		return (
+			f"Proposed again after an earlier rejection ({rejected.name}) "
+			f"of this same version of the document.{said}\n\n{reason}"
+		)
+
+	note = wrap(_approver_note(rejected.decision_note, doctype, name), "approver note")
+	what = workflow_action or ("field change" if action_type == ACTION_UPDATE else action_type.lower())
+	raise ToolDenied(
+		f"An approver already rejected this {what} proposal "
+		f"for {doctype} {name}, "
+		f"and the document has not changed since. The approver wrote: {note} "
+		"Tell the user what the approver said. Propose it again with user_asked_again set "
+		"to true only if the user asks you to."
+	)
+
+
 def _dry_run(doc: Any) -> dict:
 	"""Run the validations an insert would run, and write nothing.
 
@@ -858,6 +939,16 @@ def _text(exc: Exception) -> str:
 	return strip_html(str(exc) or "").strip() or exc.__class__.__name__
 
 
+# An approver rejected this proposal on this same version of the document, and the
+# user has asked for it again. Never set on the agent's own judgement.
+USER_ASKED_AGAIN = {
+	"type": "boolean",
+	"description": (
+		"Set to true only when an approver rejected this same proposal and the user "
+		"has asked you to propose it again. The approver is told."
+	),
+}
+
 TOOLS = [
 	{
 		"tool_name": "create_draft",
@@ -969,6 +1060,7 @@ TOOLS = [
 					"type": "string",
 					"description": "Why this should be submitted, in your own words. Required.",
 				},
+				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "reason"],
 		},
@@ -993,6 +1085,7 @@ TOOLS = [
 					"type": "string",
 					"description": "Why this should be cancelled, in your own words. Required.",
 				},
+				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "reason"],
 		},
@@ -1022,6 +1115,7 @@ TOOLS = [
 					"type": "string",
 					"description": "Why this action should be applied, in your own words. Required.",
 				},
+				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "action", "reason"],
 		},
@@ -1057,6 +1151,7 @@ TOOLS = [
 					"type": "string",
 					"description": "Why these values are right, in your own words. Required.",
 				},
+				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "values", "reason"],
 		},

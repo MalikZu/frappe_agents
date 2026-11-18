@@ -62,6 +62,10 @@ TOOL_RULES = (
 # CHANGED ON PURPOSE, 2026-11-18: one more sentence, naming propose_update for
 # records with no submit step. update_draft changes those live, and the model
 # cannot tell a live record from a draft by its docstatus alone.
+#
+# CHANGED ON PURPOSE, 2026-11-18: one sentence added on the proposal updates a
+# user message may open with, and on not proposing a rejected action again. It
+# belongs here because only an agent that can propose is ever told a decision.
 DRAFT_RULES = (
 	"You may create and update draft documents directly. A draft commits the business "
 	"to nothing, so it is your workspace — build it, correct it, correct it again.\n"
@@ -75,7 +79,10 @@ DRAFT_RULES = (
 	"The approver reads that reason next to the document, so make it specific — what the "
 	"document commits to, what you checked, and why now.\n"
 	"A proposal is not an act. Never tell the user that a document was submitted or "
-	"cancelled; tell them you proposed it and that someone else has to approve it."
+	"cancelled; tell them you proposed it and that someone else has to approve it.\n"
+	"A user message may open with proposal updates from the system: how proposals you "
+	"made were decided. If an approver rejected a proposal, tell the user what they "
+	"wrote, and do not propose the same action again unless the user asks you to."
 )
 
 FOCAL = (
