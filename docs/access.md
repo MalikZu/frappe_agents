@@ -34,7 +34,7 @@ Two more columns narrow a row:
 A doctype with no submit step — a ticket, a lead, a task — has no drafts in
 this sense: every record is live. **Draft Edit** on such a doctype changes live
 records with no approval. To route those changes through a person, clear
-**Draft Edit** and tick **Propose**. See [Field changes](approvals.md#field-changes).
+**Draft Edit**, tick **Propose**, and keep **Read** ticked. See [Field changes](approvals.md#field-changes).
 
 A rule can also name a **Report** instead of a DocType. That one grants running
 that report and nothing else.
