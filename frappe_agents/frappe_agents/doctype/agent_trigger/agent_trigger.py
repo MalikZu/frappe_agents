@@ -27,6 +27,8 @@ from frappe_agents.triggers import (
 	UNREADABLE_FIELDTYPES,
 	WRITES_ANSWER,
 	WRITES_FILE_TEXT,
+	declassifies,
+	is_masked,
 	workflow_state_field,
 )
 from frappe_agents.triggers.dispatch import clear_index_after_commit, skips_today
@@ -105,6 +107,12 @@ class AgentTrigger(Document):
 				self.document_type
 			):
 				frappe.throw(_("The field {0} cannot be the source of a trigger.").format(df.fieldname))
+			if is_masked(df):
+				frappe.throw(
+					_("The field {0} is masked, so it cannot be the source of a trigger.").format(
+						df.fieldname
+					)
+				)
 
 		if self.writes == WRITES_ANSWER and not (self.instruction or "").strip():
 			frappe.throw(_("Write an instruction: it is what the agent does with the input."))
@@ -123,8 +131,20 @@ class AgentTrigger(Document):
 			frappe.throw(
 				_("The target field {0} is marked sensitive in Agent Settings.").format(df.fieldname)
 			)
+		if is_masked(df):
+			frappe.throw(_("The target field {0} is masked.").format(df.fieldname))
 		if df.fieldname == self.source_field:
 			frappe.throw(_("The target field cannot be the source field."))
+		source = (
+			frappe.get_meta(self.document_type).get_field(self.source_field) if self.source_field else None
+		)
+		if source and declassifies(source, df):
+			frappe.throw(
+				_(
+					"The target field {0} is at a lower permission level than the source field {1}. "
+					"People who may not read {1} could read what the agent made from it."
+				).format(df.fieldname, source.fieldname)
+			)
 		if df.fieldname == workflow_state_field(self.document_type):
 			frappe.throw(_("The target field cannot be the workflow state."))
 		if df.fieldtype == "Select" and self.writes == WRITES_FILE_TEXT:

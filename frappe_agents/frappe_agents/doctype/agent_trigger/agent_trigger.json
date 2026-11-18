@@ -128,7 +128,7 @@
    "mandatory_depends_on": "eval:doc.writes=='Agent Answer'"
   },
   {
-   "description": "Fieldname the result is written to. Small Text, Text, Long Text, Text Editor, Markdown Editor or Select.",
+   "description": "Fieldname the result is written to. Small Text, Text, Long Text, Text Editor or Select.",
    "fieldname": "target_field",
    "fieldtype": "Data",
    "label": "Target Field",
@@ -182,7 +182,7 @@
  "icon": "zap",
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-11-18 00:00:00.000000",
+ "modified": "2026-11-18 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Trigger",

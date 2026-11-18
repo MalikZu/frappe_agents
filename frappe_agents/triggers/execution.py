@@ -15,8 +15,8 @@ twice:
 The file read and the write go through `execute_tool`, so each one is an audited
 Agent Tool Call with the kill switch, the grant check and the permission check
 it always has. A source field is read off the document after the same read
-checks, and the run's input message records exactly what was read. The model itself is offered no tools; `execute_tool` refuses any
-it asks for, because only the runtime may call a tool on a triggered run.
+checks, and the run's input message records exactly what was read. The model
+itself is offered no tools; `execute_tool` refuses any it asks for, because only the runtime may call a tool on a triggered run.
 """
 
 import hashlib
@@ -47,6 +47,8 @@ from frappe_agents.triggers import (
 	UNREADABLE_FIELDTYPES,
 	WRITES_FILE_TEXT,
 	TriggerRefused,
+	declassifies,
+	is_masked,
 	workflow_state_field,
 )
 
@@ -174,12 +176,20 @@ def _check_writable(run: Any, trigger: Any, agent: Any) -> Any:
 			not source
 			or source.fieldtype in UNREADABLE_FIELDTYPES
 			or source.fieldname in sensitive_fieldnames(doctype)
+			or is_masked(source)
 		):
-			# Checked again here: a field can be marked sensitive after the trigger was saved.
+			# Checked again here: a field can be marked sensitive or masked after the
+			# trigger was saved.
 			raise TriggerRefused(_("The field {0} cannot be read by a trigger.").format(trigger.source_field))
 		if cint(source.permlevel) not in meta.get_permlevel_access("read"):
 			raise TriggerRefused(
 				_("{0} may not read the field {1}.").format(run.effective_user, trigger.source_field)
+			)
+		if declassifies(source, target):
+			raise TriggerRefused(
+				_("{0} is at a lower permission level than {1}, so the trigger cannot write it.").format(
+					target.fieldname, source.fieldname
+				)
 			)
 	if cint(trigger.only_if_empty) and not is_empty(doc.get(target.fieldname)):
 		raise TriggerRefused(
@@ -199,8 +209,10 @@ def _target_field(meta: Any, trigger: Any) -> Any:
 				trigger.target_field
 			)
 		)
-	if cint(df.read_only) or df.fieldname in sensitive_fieldnames(meta.name):
-		raise TriggerRefused(_("The target field {0} is read-only or sensitive.").format(df.fieldname))
+	if cint(df.read_only) or df.fieldname in sensitive_fieldnames(meta.name) or is_masked(df):
+		raise TriggerRefused(
+			_("The target field {0} is read-only, sensitive or masked.").format(df.fieldname)
+		)
 	if df.fieldname == workflow_state_field(meta.name):
 		raise TriggerRefused(_("The target field {0} is the workflow state.").format(df.fieldname))
 	return df

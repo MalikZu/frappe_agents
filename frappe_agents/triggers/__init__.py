@@ -21,6 +21,7 @@ triggered run does inside `execute_run`: read the input, then write the answer.
 import frappe
 from frappe.model import no_value_fields, table_fields
 from frappe.model.workflow import get_workflow_name
+from frappe.utils import cint
 
 TRIGGER = "Agent Trigger"
 SURFACE = "Trigger"
@@ -36,8 +37,10 @@ WRITES_FILE_TEXT = "File Text"
 # wraps as untrusted, which matters: the value was made from a document a person
 # supplied, and an unwrapped Data field would hand it to the next chat run as if
 # it were trusted. Select is safe the other way round — the answer must be one of
-# the options exactly, or nothing is written.
-TARGET_FIELDTYPES = frozenset({"Small Text", "Text", "Long Text", "Text Editor", "Markdown Editor", "Select"})
+# the options exactly, or nothing is written. Markdown Editor is left out: the
+# desk renders a markdown image, so a hostile document could steer the answer
+# into one that calls out to another site when somebody opens the form.
+TARGET_FIELDTYPES = frozenset({"Small Text", "Text", "Long Text", "Text Editor", "Select"})
 HTML_TARGETS = frozenset({"Text Editor"})
 
 # Values a trigger may not read: they are secrets, or they are not values.
@@ -58,3 +61,23 @@ def workflow_state_field(doctype: str) -> str | None:
 	if not workflow:
 		return None
 	return frappe.get_cached_value("Workflow", workflow, "workflow_state_field")
+
+
+def is_masked(df) -> bool:
+	"""A field the framework masks for people without the mask right.
+
+	Refused as a source and as a target whoever the run is for. A run that may see
+	the value would still put what it made from it into a field everyone sees; a
+	run that may not would have its write quietly undone by the save. Version 15
+	has no masking, so nothing there is masked.
+	"""
+	return bool(cint(df.get("mask")))
+
+
+def declassifies(source, target) -> bool:
+	"""Whether an answer made from `source` would land at a lower permission level.
+
+	A summary of a level-1 field in a level-0 field hands the level-1 data to
+	everyone who may read level 0.
+	"""
+	return cint(target.permlevel) < cint(source.permlevel)
