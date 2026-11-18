@@ -325,6 +325,9 @@ approver's note out. Decisions made before the upgrade that added this
 note count as told already, so the first turn after the upgrade does not list
 them.
 
+Only a turn in chat is told. A triggered run and a rehearsal never open with the
+note. A field change is told by the fields it would set, never their values.
+
 A long conversation can trim that turn out of what the agent reads. The
 proposal tools do not forget: they refuse a proposal that was rejected on the
 same version of the document. The agent can still propose it when the document

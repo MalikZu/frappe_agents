@@ -131,8 +131,10 @@ doctype with an active Workflow too: the approver needs the role the current
 state allows to edit, and the workflow state itself is refused.
 
 A proposal an approver rejected is not proposed again on the same version of the
-document. The tool refuses it and quotes the approver's note to the agent. It
-accepts it again in two cases:
+document. The tool refuses it and quotes the approver's note to the agent. For
+`propose_update`, the same proposal means the same fields set to the same
+values. A different change to the same version is a new proposal. The tool
+accepts a rejected proposal again in two cases:
 
 - the document changed since the rejection;
 - the agent sets `user_asked_again`, because the user asked.

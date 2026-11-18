@@ -171,6 +171,13 @@ Two deliberate limits worth knowing:
 - A failed turn is replayed from its stored log, and a reopened conversation is
   drawn from it. Both show `[redacted]` where a sensitive value was.
 
+A run's **Proposal Updates** field holds what the agent was told about its
+decided proposals: the approver's note and the reason an apply failed. Either
+can quote a document's fields. Before the note is stored, the text scrub takes
+out the sensitive values of each document it names. The agent is sent the same
+scrubbed note. If a document's values cannot be read, its line keeps the
+outcome and leaves the note and the reason out.
+
 #### Logs stored before redaction
 
 Older releases stored the event log without redaction. The migrate after you
@@ -267,9 +274,5 @@ much use when you are deciding whether to trust something:
 - **A permission you granted is a permission the agent can use.** The ceiling is
   the running user's own rights. If those are broad, narrowing the agent's
   access rules is the only thing keeping the agent narrow.
-- **Proposal updates are stored as written.** A run's **Proposal Updates** field
-  holds what the agent was told about decided proposals: the approver's note and
-  the reason an apply failed. A failure reason can quote document fields. The
-  field is not redacted, so a person who can read the run reads it whole.
 - **Cost is bounded but not zero.** `Max Steps` and the daily token budget stop
   a runaway loop; they do not make a misconfigured agent free.
