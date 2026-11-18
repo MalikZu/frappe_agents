@@ -324,7 +324,8 @@ Updates**, and the history sends it again exactly as it was first sent. If the
 user can no longer read the document, the note does not name it and leaves the
 approver's note out. Decisions made before the upgrade that added this
 note count as told already, so the first turn after the upgrade does not list
-them.
+them. The exception is a conversation with no finished turn: its decisions are
+told on its next turn, ten at a time.
 
 Only a turn in chat is told. A triggered run and a rehearsal never open with the
 note. A field change is told by the fields it would set, never their values.
