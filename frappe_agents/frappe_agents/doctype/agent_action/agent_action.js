@@ -310,8 +310,8 @@ function render_target(frm) {
 		$("<div class='agent-action-note'></div>")
 			.text(
 				__(
-					"Approving applies the workflow action {0} under your own roles. The Workflow decides the next state, and may submit or cancel the document.",
-					[frm.doc.workflow_action]
+					"Approving applies the workflow action {0} out of state {1}, under your own roles. If the document is no longer in {1}, the approval fails. The Workflow decides the next state, and may submit or cancel the document.",
+					[frm.doc.workflow_action, frm.doc.from_workflow_state]
 				)
 			)
 			.appendTo($body);
@@ -393,7 +393,9 @@ function may_decide(frm) {
 }
 
 function action_verb(doc) {
-	if (doc.action_type === "Workflow Transition") return __(doc.workflow_action || "");
+	if (doc.action_type === "Workflow Transition") {
+		return __("{0} (from {1})", [__(doc.workflow_action || ""), __(doc.from_workflow_state || "")]);
+	}
 	return doc.action_type === "Cancel" ? __("Cancel") : __("Submit");
 }
 

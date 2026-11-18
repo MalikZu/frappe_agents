@@ -1692,6 +1692,7 @@ frappe_agents.ChatUI = class ChatUI {
 				action: proposal.action,
 				action_type: proposal.action_type,
 				workflow_action: proposal.workflow_action,
+				from_workflow_state: proposal.workflow_state,
 				target_doctype: proposal.target_doctype,
 				target_name: proposal.target_name,
 				reason: reasons[event.toolCallId] || "",
@@ -2332,7 +2333,10 @@ frappe_agents.ChatUI = class ChatUI {
 
 		let verb = data.action_type === "Cancel" ? __("Cancel") : __("Submit");
 		if (data.action_type === "Workflow Transition" && data.workflow_action) {
-			verb = __(data.workflow_action);
+			// The state goes with the verb: the same verb can be another step elsewhere.
+			verb = data.from_workflow_state
+				? __("{0} (from {1})", [__(data.workflow_action), __(data.from_workflow_state)])
+				: __(data.workflow_action);
 		}
 		const $card = $("<div class='agent-chat-action'></div>");
 		$("<div class='agent-chat-action-title'></div>")
