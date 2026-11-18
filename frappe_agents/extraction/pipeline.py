@@ -19,8 +19,10 @@ row says so. The runtime switch is read the same way at the same points, from
 **The rule this file exists to keep: nothing in here writes a sensitive field.**
 The draft is created from `gate.withhold`'s first return value, which cannot
 contain one. The extracted sensitive values go onto the extraction row, flagged,
-and the only code in the app that can write them into a document is
-`api.apply_extraction`, from a list of fieldnames a person named by hand.
+and the only server code that can write them into a document is
+`api.apply_extraction`, from a list of fieldnames a person named by hand. A Fill
+Form reading creates no document at all: it stops at Ready, and the person types
+or chooses each sensitive value in their own form and saves it themselves.
 
 `resolve_file` sits here too, immediately above the permission check it hands
 every answer to, and `require_provenance` immediately below it. Any tool that
