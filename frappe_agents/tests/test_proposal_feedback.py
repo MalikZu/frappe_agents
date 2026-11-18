@@ -24,11 +24,12 @@ from frappe.utils import add_to_date, now_datetime
 from frappe_agents.actions import approve_action, reject_action
 from frappe_agents.api import get_action_state, get_conversation
 from frappe_agents.patches.v0_7_0.mark_decided_proposals_told import mark_decided_proposals_told
-from frappe_agents.runner.proposal_updates import HEAD, TAIL, render
+from frappe_agents.runner.proposal_updates import HEAD, TAIL, note_for, render
 from frappe_agents.runner.stream_adapter import wire_messages
 from frappe_agents.tests.fixtures import (
 	APPROVER_USER,
 	BLIND_APPROVER,
+	CASE_DT,
 	DRAFT_AGENT,
 	DRAFT_USER,
 	DRAFTER_ROLE,
@@ -41,6 +42,7 @@ from frappe_agents.tests.fixtures import (
 	active_workflow,
 	as_user,
 	call_tool,
+	make_case,
 	make_conversation,
 	make_order_draft,
 	make_proposal,
@@ -240,6 +242,66 @@ class TestTheAgentIsTold(ProposalCase):
 		line = render([state])
 
 		self.assertIn("apply a workflow action to a document you can no longer read", line)
+		self.assertNotIn("submit", line)
+
+	def test_a_sensitive_value_quoted_in_the_note_is_scrubbed(self):
+		title = self.order.order_title
+		self.reject(f"The title {title} is wrong.")
+
+		with patch(
+			"frappe_agents.runner.proposal_updates.doctype_sensitive_keys", return_value={"order_title"}
+		):
+			told, wire = self.next_turn()
+
+		last = wire[-1]["content"]
+		self.assertIn("[redacted]", last)
+		self.assertNotIn(title, last)
+		# What is stored is what was sent.
+		self.assertNotIn(title, frappe.db.get_value("Agent Run", told.name, "proposal_updates"))
+
+	def test_a_document_whose_values_cannot_be_read_loses_the_note(self):
+		self.reject()
+
+		with patch("frappe_agents.runner.proposal_updates.doctype_sensitive_keys", side_effect=RuntimeError):
+			_run, wire = self.next_turn()
+
+		last = wire[-1]["content"]
+		self.assertIn("was rejected", last)
+		self.assertNotIn(NOTE, last)
+
+	def test_only_a_chat_turn_is_told(self):
+		self.reject()
+		run = self.turn(LATER)
+
+		with as_user(DRAFT_USER):
+			for surface in ("Trigger", "Rehearsal", "MCP"):
+				run.surface = surface
+				self.assertIsNone(note_for(run, ("Completed", "Failed")), surface)
+			run.surface = "Desk Chat"
+			self.assertIsNotNone(note_for(run, ("Completed", "Failed")))
+
+	def test_a_field_change_is_told_by_its_fields(self):
+		state = {
+			"action": self.action,
+			"status": "Rejected",
+			"action_type": "Update",
+			"update_fields": "status, priority",
+			"target_visible": 1,
+			"target_doctype": CASE_DT,
+			"target_name": "FA-CASE-1",
+		}
+
+		line = render([state])
+
+		self.assertIn('change the fields "status, priority" on', line)
+		self.assertNotIn("submit", line)
+
+	def test_a_redacted_field_change_is_not_called_a_submit(self):
+		state = {"action": self.action, "status": "Rejected", "action_type": "Update", "target_visible": 0}
+
+		line = render([state])
+
+		self.assertIn("change fields on a document you can no longer read", line)
 		self.assertNotIn("submit", line)
 
 
@@ -511,3 +573,71 @@ class TestAWorkflowTransition(AgentTestCase):
 		payload, _ = self.propose(user_asked_again=True)
 
 		self.assertTrue(payload["ok"], payload.get("error"))
+
+
+class TestAFieldChange(AgentTestCase):
+	"""A rejected field change is the same proposal only with the same values."""
+
+	def setUp(self) -> None:
+		super().setUp()
+		# A crashed workflow test leaves its cached name behind for this doctype.
+		frappe.cache.hdel("workflow", CASE_DT)
+		frappe.clear_cache(doctype=CASE_DT)
+		self.case = make_case()
+
+	def propose(self, values: dict, **extra) -> dict:
+		payload, _run = call_tool(
+			DRAFT_USER,
+			"propose_update",
+			{"doctype": CASE_DT, "name": self.case.name, "values": values, "reason": "Asked for.", **extra},
+		)
+		return payload
+
+	def proposed(self, values: dict) -> str:
+		payload = self.propose(values)
+		self.assertTrue(payload["ok"], payload.get("error"))
+		return payload["result"]["action"]
+
+	def rejected(self, values: dict) -> str:
+		action = self.proposed(values)
+		with as_user(APPROVER_USER):
+			reject_action(action, note=NOTE)
+		return action
+
+	def test_the_same_change_is_refused(self):
+		self.rejected({"notes": "Called back."})
+
+		payload = self.propose({"notes": "Called back."})
+
+		self.assertFalse(payload["ok"])
+		self.assertIn("already rejected this field change", payload["error"])
+		self.assertIn(f'<untrusted source="approver note">{NOTE}</untrusted>', payload["error"])
+
+	def test_a_different_change_to_the_same_version_is_a_new_proposal(self):
+		self.rejected({"notes": "Called back."})
+
+		payload = self.propose({"notes": "Called back twice."})
+
+		self.assertTrue(payload["ok"], payload.get("error"))
+		reason = frappe.db.get_value("Agent Action", payload["result"]["action"], "reason")
+		self.assertNotIn("earlier rejection", reason)
+
+	def test_the_user_asking_again_lets_it_through(self):
+		earlier = self.rejected({"notes": "Called back."})
+
+		payload = self.propose({"notes": "Called back."}, user_asked_again=True)
+
+		self.assertTrue(payload["ok"], payload.get("error"))
+		reason = frappe.db.get_value("Agent Action", payload["result"]["action"], "reason")
+		self.assertTrue(reason.startswith(f"Proposed again after an earlier rejection ({earlier})"))
+		self.assertIn("The agent says the user asked for this.", reason)
+
+	def test_the_card_names_the_fields_and_never_their_values(self):
+		action = self.rejected({"notes": "Called back."})
+
+		with as_user(DRAFT_USER):
+			state = get_action_state(action)
+
+		self.assertEqual(state["action_type"], "Update")
+		self.assertEqual(state["update_fields"], "notes")
+		self.assertNotIn("Called back.", frappe.as_json(state))
