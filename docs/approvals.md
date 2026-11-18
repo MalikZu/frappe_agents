@@ -215,8 +215,8 @@ approver's note out.
 A long conversation can trim that turn out of what the agent reads. The
 proposal tools do not forget: they refuse a proposal that was rejected on the
 same version of the document. The agent can still propose it when the document
-has changed, or when the user asks again. In that case the reason says so, and
-you see it before you decide.
+has changed, or when the user asks again. Either way the reason starts by saying
+it was rejected before, so you can check that the change answers your note.
 
 ## What the person who asked sees
 

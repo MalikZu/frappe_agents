@@ -491,25 +491,32 @@ def _refuse_duplicate(
 def _check_rejected(
 	doctype: str, name: str, action_type: str, modified: Any, reason: str, payload: dict
 ) -> str:
-	"""Refuse to ask again what an approver already refused, on the same document.
+	"""Refuse to ask again what an approver already refused, and mark any second ask.
 
 	The history tells the agent about a rejection once, and a long conversation
-	can trim that turn away. This is the check that does not forget. A document
-	that changed since is a new question, so it passes. So does a proposal the
-	user asked for again, and the approver is told that it is one.
+	can trim that turn away. This is the check that does not forget.
+
+	On the same version of the document it refuses, unless the user asked for it
+	again. On a version that changed since it lets the proposal through, because
+	the document is a different question now. Either way the approver is told, at
+	the top of the reason, that this was rejected before: an agent that holds
+	`update_draft` can always change the document, and the approver is the one
+	who decides whether the change answers the note.
 	"""
 	rejected = rejected_proposal_for(doctype, name, action_type, modified)
 	if not rejected:
 		return reason
 	if payload.get("user_asked_again") is True:
 		return f"Proposed again at the user's request, after an earlier rejection.\n\n{reason}"
+	if not rejected.same_version:
+		return f"Proposed again after an earlier rejection. The document changed since.\n\n{reason}"
 
 	note = wrap(rejected.decision_note or "", "approver note")
 	raise ToolDenied(
 		f"An approver already rejected this {action_type.lower()} proposal for {doctype} {name}, "
 		f"and the document has not changed since. The approver wrote: {note} "
-		"Change the document first, or tell the user what the approver said. Propose it "
-		"again with user_asked_again set to true only if the user asks you to."
+		"Tell the user what the approver said. Propose it again with user_asked_again set "
+		"to true only if the user asks you to."
 	)
 
 

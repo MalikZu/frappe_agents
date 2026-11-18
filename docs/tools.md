@@ -72,11 +72,17 @@ The three `propose_*` tools are the only route to a submitted document, and they
 produce a row, not a change. On a doctype with an active Workflow, only
 `propose_transition` works — see [Workflow actions](approvals.md#workflow-actions).
 
-A proposal an approver rejected is not proposed again on the same document. The
-tool refuses it and quotes the approver's note to the agent. It accepts it again
-when the document has changed since the rejection, or when the agent sets
-`user_asked_again` because the user asked. The approver then sees, at the top of
-the reason, that it was proposed again after a rejection.
+A proposal an approver rejected is not proposed again on the same version of the
+document. The tool refuses it and quotes the approver's note to the agent. It
+accepts it again in two cases:
+
+- the document changed since the rejection;
+- the agent sets `user_asked_again`, because the user asked.
+
+In both cases the reason starts by saying the proposal was rejected before, so
+the approver knows.
+
+A pending proposal past its expiry window does not block a new one.
 
 ## Reading a tool call
 

@@ -269,12 +269,16 @@ def pending_action_for(
 	For a workflow transition the action is the workflow's own verb out of one
 	state: a pending Approve does not block a Reject, and a stale Approve out of an
 	earlier state does not block the Approve out of this one.
+
+	A Pending row past its window does not count either. It cannot be approved
+	any more, and the daily sweep has simply not written Expired on it yet.
 	"""
 	filters = {
 		"target_doctype": target_doctype,
 		"target_name": target_name,
 		"action_type": action_type,
 		"status": STATUS_PENDING,
+		"creation": (">=", _cutoff(_expiry_days())),
 	}
 	if workflow_action:
 		filters["workflow_action"] = workflow_action
@@ -722,11 +726,11 @@ def proposal_state(row: Any) -> dict:
 
 
 def rejected_proposal_for(target_doctype: str, target_name: str, action_type: str, modified: Any) -> Any:
-	"""This user's rejected proposal for the same thing on the document as it is now, if any.
+	"""This user's latest rejected proposal for the same action on this document, if any.
 
-	Read through `get_list`, so it finds the session user's own proposals and
-	nobody else's. A rejection of the same action on a document that has changed
-	since is not this one: the document is a different question now.
+	The row carries `same_version`: whether it was rejected on the document as it
+	is now. Read through `get_list`, so it finds the session user's own proposals
+	and nobody else's.
 	"""
 	rows = frappe.get_list(
 		"Agent Action",
@@ -740,10 +744,14 @@ def rejected_proposal_for(target_doctype: str, target_name: str, action_type: st
 		order_by="creation desc",
 		limit_page_length=REJECTION_LOOKBACK,
 	)
+	if not rows:
+		return None
 	for row in rows:
 		if _same_timestamp(row.proposal_modified, modified):
+			row.same_version = True
 			return row
-	return None
+	rows[0].same_version = False
+	return rows[0]
 
 
 def target_readable(row: Any) -> bool:
