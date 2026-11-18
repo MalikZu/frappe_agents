@@ -116,18 +116,23 @@ too long for the model is cut short, and is redacted before it is cut.
 
 What the text scrub takes out, exactly:
 
-- **Text values** of 4 characters or more, wherever they appear.
+- **Text values** of 4 characters or more, wherever they appear. Dates, times
+  and durations count as text, in the form they are stored in: a held-back
+  birth date is taken out of `1990-05-17`.
 - **Number values** of 4 significant digits or more, in any form that has the
   same value. A held-back amount of 98765 is taken out of `98765`, `98765.00`,
   `98,765.00`, `AED98765`, `98765AED`, `98765/month`, `amount:98765` and
-  `98765-99000`.
+  `98765-99000`. A unit or a label next to a number never keeps it:
+  `98765/month/employee`, `AED-98765/month` and `net-pay-98765` lose it too.
 
 What it keeps:
 
 - A number that is part of a longer number: a held-back 2025 stays in `12025`
   and `2025.5`.
-- A number that is one part of three or more joined by hyphens or slashes: a
-  held-back 2025 stays in `2025-01-02`, `02/01/2025` and `ORD-2025-0001`.
+- A number that is one part of a date or a reference joined by hyphens or
+  slashes. A date is three number parts with the year first or last:
+  `2025-01-02`, `02/01/2025`. A reference is one or more word parts, then two
+  or more number parts: `ORD-2025-0001`. A held-back 2025 stays in all three.
 - Shorter values, numbers written in words, and number formats other than the
   ones above, such as `98 765` or `98.765,00`.
 
