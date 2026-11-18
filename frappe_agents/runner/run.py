@@ -280,11 +280,15 @@ def execute_run(run_name: str) -> None:
 
 
 def _execute(run: Any) -> None:
-	# Only a Queued run is started. Anything else was stopped before a worker
-	# reached it, or was already picked up by another one, and neither is a run
-	# this job may call the model for.
-	if run.status != "Queued":
-		frappe.logger("frappe_agents").info(f"run {run.name} is {run.status}, not Queued: not started")
+	# The claim. Only a Queued run is started: anything else was stopped before a
+	# worker reached it, or another worker has it, and neither is a run this job
+	# may call the model for. A locking read, because it has to see a Stop that
+	# committed after this job's first read — and because the lock it takes is
+	# held to the end of the job, it is how `stop_run` knows a worker owns the
+	# row and must not write to it.
+	status = frappe.db.get_value("Agent Run", run.name, "status", for_update=True)
+	if status != "Queued":
+		frappe.logger("frappe_agents").info(f"run {run.name} is {status}, not Queued: not started")
 		return
 
 	agent = frappe.get_doc("Agent", run.agent)
@@ -765,23 +769,41 @@ def _payload(event: Any) -> dict:
 
 
 def _check_kill_switch(cancellation: RunCancellation, run_name: str | None = None) -> None:
+	reason = _stop_reason(run_name)
+	if reason:
+		cancellation.cancel(reason)
+
+
+def _stop_reason(run_name: str | None) -> str | None:
+	"""Why this run should stop now — the kill switch or its person's Stop — or None."""
 	if not runtime_enabled():
-		cancellation.cancel(KILL_SWITCH_MESSAGE)
-		return
-	stopped = stop_requested(run_name)
-	if stopped:
-		cancellation.cancel(stopped)
+		return KILL_SWITCH_MESSAGE
+	return stop_requested(run_name)
 
 
 def cancel_queued_run(run_name: str, reason: str) -> str:
-	"""Cancel a run no worker has started yet. Returns the status it ends in.
+	"""Cancel a run no worker has started yet. Returns the status it is in.
 
-	A run a worker has already taken is left to that worker: it reads the stop
-	flag before its first model call and at every turn after it.
+	The row is claimed without waiting. A worker that has started the run holds
+	its row lock until the job ends — it never commits mid-run — so a write here
+	would wait on that lock and then land on top of whatever the run became:
+	a Completed run overwritten as Cancelled, its log replaced. So a row that is
+	locked belongs to a worker, and is answered as Running: the stop flag that
+	the caller already published is how that worker hears about it.
+
+	Status and log are written from the row as read under the lock, never from
+	a copy read before it.
 	"""
+	try:
+		status = frappe.db.get_value("Agent Run", run_name, "status", for_update=True, wait=False)
+	except frappe.QueryTimeoutError:
+		# NOWAIT on a locked row: MariaDB's lock-wait error and Postgres's
+		# LockNotAvailable both arrive as this.
+		return "Running"
+	if status != "Queued":
+		return status
 	run = frappe.get_doc("Agent Run", run_name)
-	if run.status != "Queued":
-		return run.status
+	run.flags.ignore_permissions = True
 	_fail(run, reason, status="Cancelled")
 	return "Cancelled"
 
