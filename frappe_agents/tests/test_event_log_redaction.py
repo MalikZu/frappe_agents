@@ -467,7 +467,14 @@ class TestNumbersStayInTheirPlace(AgentTestCase):
 	def test_a_wider_reference_or_a_date_range_keeps_its_number(self):
 		_, secrets = redact({"amount": 2025}, {"amount"})
 
-		for written in ("A1-2025-0001", "PO2-2025-0001", "ORD-2025-0001-A", "2025-01-02/2025-02-01"):
+		for written in (
+			"A1-2025-0001",
+			"PO2-2025-0001",
+			"ORD-2025-0001-A",
+			"ORD-2025-0001-1",
+			"SINV-25-00012",
+			"2025-01-02/2025-02-01",
+		):
 			with self.subTest(written=written):
 				self.assertEqual(scrub(written, secrets), written)
 
@@ -477,6 +484,60 @@ class TestNumbersStayInTheirPlace(AgentTestCase):
 		for written in ("AED-98765-99000/year", "98765-01-02", "net-pay-98765-A"):
 			with self.subTest(written=written):
 				self.assertNotIn("98765", scrub(written, secrets))
+
+	def test_a_unit_or_currency_suffix_never_keeps_a_number(self):
+		"""Only a single letter may follow a reference. pm, yr and AED are units."""
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in (
+			"AED-98765-99000-pm",
+			"AED-98765-99000-pa",
+			"USD-98765-99000-yr",
+			"AED-98765-99000-year",
+			"pay-98765-00-AED",
+			"salary/98765/12-mo",
+			"net-pay-98765-00-A",
+			"EMP-98765-1-A",
+		):
+			with self.subTest(written=written):
+				self.assertNotIn("98765", scrub(written, secrets))
+
+	def test_a_longer_suffix_breaks_a_reference(self):
+		_, secrets = redact({"amount": 2025}, {"amount"})
+
+		for written in ("EMP-2025-0001-ABCD", "ORD-2025-0001-AB"):
+			with self.subTest(written=written):
+				self.assertNotIn("2025", scrub(written, secrets))
+
+	def test_a_label_in_front_of_a_range_never_keeps_a_number(self):
+		"""A quarter, a fiscal year or a grade before a salary range is not a reference."""
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in (
+			"Q1-98765-99000",
+			"FY25-98765-99000",
+			"grade-B2-98765-99000",
+			"B2/98765/12",
+			"H1/98765/0",
+			"T1-2-98765",
+			"x1-98765-1",
+			"Q1-98765-0001",
+			"AED-98765-99000",
+		):
+			with self.subTest(written=written):
+				self.assertNotIn("98765", scrub(written, secrets))
+
+	def test_a_year_and_a_round_number_are_not_a_reference(self):
+		_, secrets = redact({"amount": 2025}, {"amount"})
+
+		self.assertNotIn("2025", scrub("AED-2025-3000", secrets))
+
+	def test_a_number_that_runs_past_a_date_or_reference_is_held_back(self):
+		_, secrets = redact({"amount": AMOUNT}, {"amount"})
+
+		for written in ("2025-01-02T98,765", "ORD-2025-98,765"):
+			with self.subTest(written=written):
+				self.assertNotIn("98,765", scrub(written, secrets))
 
 	def test_a_duration_is_collected_as_it_is_stored(self):
 		# as_json writes a timedelta with format_timedelta, not str(): they differ
