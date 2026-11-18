@@ -22,6 +22,8 @@ from frappe_agents.tests.fixtures import (
 	ORDER_DT,
 	RESTRICTED_USER,
 	SECOND_DRAFTER,
+	SKILL_AUTHOR,
+	SKILL_WRITER,
 	AgentTestCase,
 	as_user,
 	make_matrix_agent,
@@ -41,6 +43,7 @@ from frappe_agents.tests.test_document_reading import text_pdf
 from frappe_agents.tools.base import RUN_FLAG
 from frappe_agents.triggers import TRIGGER, TriggerRefused
 from frappe_agents.triggers.dispatch import (
+	SKIP_BUDGET,
 	SKIP_NO_USER,
 	SKIP_RATE,
 	SKIP_ROLE,
@@ -50,8 +53,10 @@ from frappe_agents.triggers.dispatch import (
 	on_update,
 	release,
 	release_lock,
+	run_now,
 	run_trigger,
 	skips_today,
+	take_dirty,
 	take_lock,
 )
 from frappe_agents.triggers.execution import target_value
@@ -131,6 +136,58 @@ class TriggerCase(AgentTestCase):
 	def notes(self, order) -> str | None:
 		return frappe.db.get_value(ORDER_DT, order.name, "notes")
 
+	def after_rollback(self, cleanup, *args, **kwargs) -> None:
+		"""Run `cleanup` once this test's writes are rolled back.
+
+		A cache cleared before the rollback can be filled again from rows that are
+		about to vanish, and then outlives them.
+		"""
+
+		def undo():
+			frappe.db.rollback()
+			cleanup(*args, **kwargs)
+
+		self.addCleanup(undo)
+
+	def set_order_field(self, fieldname: str, prop: str, value, property_type: str) -> None:
+		"""Change one field of the test order the way Customize Form does."""
+		frappe.make_property_setter(
+			{
+				"doctype": ORDER_DT,
+				"fieldname": fieldname,
+				"property": prop,
+				"value": value,
+				"property_type": property_type,
+			},
+			validate_fields_for_doctype=False,
+		)
+		frappe.clear_cache(doctype=ORDER_DT)
+		self.after_rollback(self._forget_order_meta)
+
+	def _forget_order_meta(self) -> None:
+		frappe.clear_cache(doctype=ORDER_DT)
+		# Each person's masked fields are cached apart from the doctype.
+		frappe.cache.delete_keys(f"masked_fields::{ORDER_DT}::")
+
+	def mask(self, fieldname: str) -> None:
+		if not frappe.get_meta("DocField").has_field("mask"):
+			self.skipTest("this Frappe has no field masking")
+		self.set_order_field(fieldname, "mask", 1, "Check")
+
+	def mark_sensitive(self, fieldname: str) -> None:
+		settings = frappe.get_doc("Agent Settings")
+		settings.append("sensitive_fields", {"document_type": ORDER_DT, "fieldname": fieldname})
+		settings.flags.ignore_permissions = True
+		settings.save(ignore_permissions=True)
+		frappe.clear_document_cache("Agent Settings", "Agent Settings")
+		self.after_rollback(frappe.clear_document_cache, "Agent Settings", "Agent Settings")
+
+	def assert_refused_before_the_model(self, run, provider, says: str | None = None) -> None:
+		self.assertEqual(provider.call_count, 0)
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "status"), "Failed")
+		if says:
+			self.assertIn(says, frappe.db.get_value("Agent Run", run, "error") or "")
+
 
 class TestSavingATrigger(TriggerCase):
 	def test_a_service_user_agent_is_refused(self):
@@ -171,6 +228,29 @@ class TestSavingATrigger(TriggerCase):
 
 		with self.assertRaises(frappe.ValidationError):
 			self.make_trigger()
+
+	def test_a_summary_cannot_land_below_the_level_of_its_source(self):
+		"""Internal Rate is permlevel 1. Notes is permlevel 0, which more people read."""
+		with self.assertRaises(frappe.ValidationError):
+			self.make_trigger(source_field="internal_rate")
+
+	def test_a_masked_source_is_refused(self):
+		self.mask("order_title")
+
+		with self.assertRaises(frappe.ValidationError):
+			self.make_trigger()
+
+	def test_a_masked_target_is_refused(self):
+		self.mask("notes")
+
+		with self.assertRaises(frappe.ValidationError):
+			self.make_trigger(source_field="amount")
+
+	def test_markdown_is_not_a_target(self):
+		"""A rendered markdown image calls out to wherever the answer points it."""
+		from frappe_agents.triggers import TARGET_FIELDTYPES
+
+		self.assertNotIn("Markdown Editor", TARGET_FIELDTYPES)
 
 
 class TestWhichSavesFire(TriggerCase):
@@ -272,6 +352,35 @@ class TestWhichSavesFire(TriggerCase):
 				frappe.flags.in_import = False
 
 		self.assertEqual(self.dispatched(calls), [])
+
+	def test_an_import_fires_when_suppress_on_import_is_off(self):
+		self.make_trigger()
+		frappe.db.set_single_value("Agent Settings", "suppress_on_import", 0)
+		frappe.clear_document_cache("Agent Settings", "Agent Settings")
+		self.after_rollback(frappe.clear_document_cache, "Agent Settings", "Agent Settings")
+
+		with self.queue() as calls:
+			frappe.flags.in_import = True
+			try:
+				make_order_draft()
+			finally:
+				frappe.flags.in_import = False
+
+		self.assertEqual(len(self.dispatched(calls)), 1)
+
+	def test_a_failing_dispatch_never_breaks_the_save(self):
+		self.make_trigger()
+
+		def broken(doc):
+			# What a frappe.throw inside the dispatcher would leave behind.
+			frappe.local.message_log.append({"message": "FA trigger trouble"})
+			raise RuntimeError("the dispatcher broke")
+
+		with patch("frappe_agents.triggers.dispatch._on_update", side_effect=broken):
+			order = make_order_draft()
+
+		self.assertTrue(frappe.db.exists(ORDER_DT, order.name))
+		self.assertFalse(any("FA trigger trouble" in str(m) for m in frappe.local.message_log or []))
 
 	def test_a_save_inside_an_agent_tool_call_does_not_fire(self):
 		"""What stops a trigger's own write, and an agent's forty drafts, re-firing."""
@@ -444,9 +553,135 @@ class TestStartingARun(TriggerCase):
 		self.assertEqual(read, ["fa-file-one", "fa-file-two"])
 
 
+class TestWaitingFiles(TriggerCase):
+	"""Each waiting file is read as the person who attached it, in either order."""
+
+	def attachment_trigger(self):
+		return self.make_trigger(event="Attachment Added", source_field=None, instruction="Read it.")
+
+	def test_each_waiting_file_runs_as_the_person_who_attached_it(self):
+		for first, second in ((DRAFT_USER, SECOND_DRAFTER), (SECOND_DRAFTER, DRAFT_USER)):
+			with self.subTest(first=first, second=second):
+				trigger = self.attachment_trigger()
+				order = make_order_draft()
+				mark_dirty(trigger.name, ORDER_DT, order.name, first, "fa-file-one")
+				mark_dirty(trigger.name, ORDER_DT, order.name, second, "fa-file-two")
+				finished = frappe._dict(
+					name="fa-finished",
+					trigger=trigger.name,
+					context_doctype=ORDER_DT,
+					context_name=order.name,
+				)
+
+				read = []
+				for _ in range(3):
+					with self.queue() as calls:
+						release(finished)
+					read += [(kwargs["file"], kwargs["fired_by"]) for kwargs in self.dispatched(calls)]
+
+				self.assertEqual(read, [("fa-file-one", first), ("fa-file-two", second)])
+
+	def test_a_run_that_ends_between_two_asks_leaves_the_others_their_own_person(self):
+		"""The lock was busy, then free: this file runs now, the waiting one keeps its sender."""
+		trigger = self.attachment_trigger()
+		order = make_order_draft()
+		mark_dirty(trigger.name, ORDER_DT, order.name, DRAFT_USER, "fa-file-one")
+		self.addCleanup(release_lock, trigger.name, ORDER_DT, order.name)
+
+		with patch("frappe_agents.triggers.dispatch.take_lock", side_effect=[False, True]):
+			run = self.start(trigger, order, user=SECOND_DRAFTER, file="fa-file-two")
+
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "effective_user"), SECOND_DRAFTER)
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "trigger_file"), "fa-file-two")
+		waiting = take_dirty(trigger.name, ORDER_DT, order.name)
+		self.assertEqual(waiting["files"], [{"file": "fa-file-one", "user": DRAFT_USER}])
+
+
+class TestBudgets(TriggerCase):
+	def test_the_trigger_s_own_budget_stops_it_for_the_day(self):
+		trigger = self.make_trigger(daily_token_budget=100)
+		run_with_model(self.start(trigger, make_order_draft()), model_says("Spent", tokens_in=400))
+
+		self.assertIsNone(self.start(trigger, make_order_draft()))
+		self.assertEqual(skips_today(trigger.name).get(SKIP_BUDGET), 1)
+		self.assertEqual(len(self.runs_for(trigger)), 1)
+
+	def test_the_agent_s_budget_stops_its_triggers_too(self):
+		trigger = self.make_trigger()
+		run_with_model(self.start(trigger, make_order_draft()), model_says("Spent", tokens_in=400))
+		frappe.db.set_value("Agent", TRIGGER_AGENT, "daily_token_budget", 100, update_modified=False)
+		frappe.clear_document_cache("Agent", TRIGGER_AGENT)
+		self.after_rollback(frappe.clear_document_cache, "Agent", TRIGGER_AGENT)
+
+		self.assertIsNone(self.start(trigger, make_order_draft()))
+		self.assertEqual(skips_today(trigger.name).get(SKIP_BUDGET), 1)
+
+
+class TestRunNow(TriggerCase):
+	"""Run on a Document: the same job, as the person asking, never as anyone else."""
+
+	def ask(self, trigger, order, user: str) -> list[dict]:
+		with self.queue() as calls, as_user(user):
+			run_now(trigger.name, order.name)
+		return self.dispatched(calls)
+
+	def test_it_queues_the_job_as_the_person_asking(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+
+		queued = self.ask(trigger, order, SKILL_WRITER)
+
+		self.assertEqual(
+			[(kwargs["docname"], kwargs["fired_by"]) for kwargs in queued], [(order.name, SKILL_WRITER)]
+		)
+
+	def test_a_person_who_may_not_change_the_trigger_is_refused(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+
+		with self.assertRaises(frappe.PermissionError):
+			self.ask(trigger, order, DRAFT_USER)
+
+	def test_a_person_who_may_not_change_the_document_is_refused(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+
+		with self.assertRaises(frappe.PermissionError):
+			self.ask(trigger, order, SKILL_AUTHOR)
+
+	def test_administrator_is_refused(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+
+		with self.assertRaises(frappe.ValidationError):
+			self.ask(trigger, order, "Administrator")
+
+	def test_it_counts_against_the_hourly_cap(self):
+		trigger = self.make_trigger(max_runs_per_user_per_hour=1)
+		order = make_order_draft()
+		self.ask(trigger, order, SKILL_WRITER)
+
+		with self.assertRaises(frappe.ValidationError):
+			self.ask(trigger, order, SKILL_WRITER)
+
+	def test_a_document_outside_the_conditions_is_refused(self):
+		trigger = self.make_trigger(conditions=[{"fieldname": "amount", "condition": ">", "value": "500"}])
+		order = make_order_draft(amount=100)
+
+		with self.assertRaises(frappe.ValidationError):
+			self.ask(trigger, order, SKILL_WRITER)
+		# And the job asks again, whoever queued it.
+		self.assertIsNone(self.start(trigger, order))
+
+
 class TestTheRun(TriggerCase):
 	def test_the_answer_is_written_into_the_target_field(self):
 		trigger = self.make_trigger()
+		# Watches the field the first one writes. If the write fired triggers, this
+		# one would be queued.
+		self.make_trigger(
+			source_field="notes", target_field="payment_terms", instruction="Pick the payment terms."
+		)
 		order = make_order_draft(title="FA order for twelve office chairs")
 		run = self.start(trigger, order)
 
@@ -535,6 +770,103 @@ class TestTheRun(TriggerCase):
 		self.assertEqual(provider.call_count, 0)
 		self.assertEqual(self.notes(order), "Written by a person")
 
+	def test_the_document_is_let_go_when_the_run_ends(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+		run = self.start(trigger, order)
+
+		run_with_model(run, model_says("Done"))
+
+		self.assertTrue(take_lock(trigger.name, ORDER_DT, order.name))
+		self.addCleanup(release_lock, trigger.name, ORDER_DT, order.name)
+
+	def test_an_answer_made_from_a_source_that_changed_is_dropped(self):
+		trigger = self.make_trigger(source_field="amount")
+		order = make_order_draft()
+		run = self.start(trigger, order)
+
+		def edited_meanwhile():
+			frappe.db.set_value(ORDER_DT, order.name, "amount", 999)
+			return model_says("One hundred")
+
+		run_with_model(run, [edited_meanwhile])
+
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "status"), "Failed")
+		self.assertIn("changed while", frappe.db.get_value("Agent Run", run, "error"))
+		self.assertFalse(self.notes(order))
+
+	def test_a_field_filled_in_while_the_model_worked_is_left_alone(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+		run = self.start(trigger, order)
+
+		def filled_meanwhile():
+			frappe.db.set_value(ORDER_DT, order.name, "notes", "Written by a person")
+			return model_says("Written by the agent")
+
+		provider = run_with_model(run, [filled_meanwhile])
+
+		self.assertEqual(provider.call_count, 1)
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "status"), "Failed")
+		self.assertEqual(self.notes(order), "Written by a person")
+
+	def test_a_document_submitted_while_the_model_worked_is_not_written(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+		run = self.start(trigger, order)
+
+		def submitted_meanwhile():
+			frappe.db.set_value(ORDER_DT, order.name, "docstatus", 1)
+			return model_says("Too late")
+
+		provider = run_with_model(run, [submitted_meanwhile])
+
+		self.assertEqual(provider.call_count, 1)
+		self.assertIn("submitted", frappe.db.get_value("Agent Run", run, "error"))
+		self.assertFalse(self.notes(order))
+
+	def test_a_target_the_person_may_not_write_costs_no_model_call(self):
+		trigger = self.make_trigger()
+		order = make_order_draft()
+		self.set_order_field("notes", "permlevel", 1, "Int")
+		run = self.start(trigger, order)
+
+		provider = run_with_model(run, model_says("never"))
+
+		self.assert_refused_before_the_model(run, provider, "may not write")
+		self.assertFalse(self.notes(order))
+
+	def test_a_source_the_person_may_not_read_costs_no_model_call(self):
+		trigger = self.make_trigger(source_field="amount")
+		order = make_order_draft()
+		self.set_order_field("amount", "permlevel", 1, "Int")
+		run = self.start(trigger, order)
+
+		provider = run_with_model(run, model_says("never"))
+
+		self.assert_refused_before_the_model(run, provider, "may not read")
+
+	def test_a_source_marked_sensitive_after_the_trigger_was_saved_is_not_read(self):
+		trigger = self.make_trigger(source_field="amount")
+		order = make_order_draft()
+		self.mark_sensitive("amount")
+		run = self.start(trigger, order)
+
+		provider = run_with_model(run, model_says("never"))
+
+		self.assert_refused_before_the_model(run, provider, "cannot be read")
+
+	def test_a_source_masked_after_the_trigger_was_saved_is_not_read(self):
+		"""The drafter has no mask right: the desk shows them XXXXXXXX, and so does the agent."""
+		trigger = self.make_trigger(source_field="amount")
+		order = make_order_draft()
+		self.mask("amount")
+		run = self.start(trigger, order)
+
+		provider = run_with_model(run, model_says("never"))
+
+		self.assert_refused_before_the_model(run, provider, "cannot be read")
+
 
 class TestAttachments(TriggerCase):
 	def attachment_trigger(self, **values):
@@ -571,6 +903,20 @@ class TestAttachments(TriggerCase):
 
 		self.assertIn("INVOICE 77", self.notes(order))
 		self.assertEqual(frappe.db.get_value("Agent Run", run, "tokens_in"), 1000)
+
+	def test_a_scan_read_for_the_model_is_counted_with_the_model_s_tokens(self):
+		trigger = self.attachment_trigger()
+		order = make_order_draft()
+		with as_user(DRAFT_USER):
+			file = make_pdf_attachment(name=order.name, content=make_pdf("fa scan"))
+		run = self.start(trigger, order, file=file.name)
+
+		reply = {"data": {"text": "INVOICE 78"}, "tokens_in": 900, "tokens_out": 100}
+		with patch("frappe_agents.documents.reader.call_model_extract", return_value=reply):
+			run_with_model(run, model_says("Invoice 78", tokens_in=5))
+
+		self.assertEqual(self.notes(order), "Invoice 78")
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "tokens_in"), 1005)
 
 	def test_the_agent_answers_from_the_file_and_the_answer_is_written(self):
 		trigger = self.attachment_trigger()
