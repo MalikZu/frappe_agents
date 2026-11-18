@@ -56,6 +56,7 @@ from frappe_agents.access.exclusions import (
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
 	CAPABILITY_DRAFT,
+	SURFACE_MCP,
 	ToolDenied,
 	current_run,
 )
@@ -120,6 +121,39 @@ FILE_TOOLS = frozenset({"read_document"})
 # Every tool whose exposure the matrix decides. Anything else an agent holds —
 # a tool another app registered — keeps riding the selection table.
 GENERIC_TOOLS = frozenset(DOCTYPE_TOOL_VERBS) | REPORT_TOOLS | FILE_TOOLS | BUILDER_TOOLS
+
+# What an outside MCP client may be offered. An allowlist, not what is left after
+# a denylist: a tool added to the matrix later is offered to a model the site did
+# not choose only once someone has decided it should be. Every generic tool must
+# be named in exactly one of the two sets; a test fails until it is.
+#
+# Offered: the reads, the draft writes, and the proposals — a proposal is a row a
+# different person decides, which is the wall MCP leans on. Some names belong to
+# tools that arrive with other changes; naming them here is the decision.
+MCP_TOOLS = frozenset(
+	{
+		"search_documents",
+		"summarize_documents",
+		"get_doctype_meta",
+		"get_document_context",
+		"get_document_slice",
+		"find_doctypes",
+		"run_report",
+		"create_draft",
+		"create_drafts",
+		"update_draft",
+		"propose_submit",
+		"propose_cancel",
+		"propose_transition",
+		"propose_update",
+	}
+)
+# Withheld. Extraction and file reading can spend this site's model tokens — a
+# scan is read by the agent's own vision model — for a client that brings its own
+# model, and an MCP run records no tokens for the budget to count. The builder
+# tools are the configuration of the runtime, not work inside it. Tools other
+# apps registered are in neither set, so they are withheld too.
+MCP_HIDDEN_TOOLS = frozenset({"extract_document"}) | FILE_TOOLS | BUILDER_TOOLS
 
 
 def compiled_grants(agent: Any) -> dict:
@@ -196,6 +230,10 @@ def require_grant(target: str, verb: str, target_type: str = TARGET_DOCTYPE) -> 
 		raise ToolDenied(exclusion_reason(target))
 	if target_type == TARGET_REPORT and report_is_excluded(target):
 		raise ToolDenied(report_exclusion_reason(target))
+	if target_type == TARGET_DOCTYPE and target == BLUEPRINT and _on_mcp():
+		# The builder tools are hidden from MCP; drafting the blueprint they feed
+		# is the same configuration work by another route.
+		raise ToolDenied(f"An MCP client may not work on {BLUEPRINT} records.")
 
 	agent = current_agent()
 	if agent is None or in_legacy_mode(agent):
@@ -331,6 +369,11 @@ def proposals_allowed(agent: Any) -> bool:
 	"""Whether this agent's autonomy reaches the proposal tools at all."""
 	agent = _agent_doc(agent)
 	return CAPABILITY_DRAFT in AUTONOMY_CAPABILITIES.get(agent.get("autonomy"), set())
+
+
+def _on_mcp() -> bool:
+	run = current_run()
+	return run is not None and run.get("surface") == SURFACE_MCP
 
 
 def current_agent() -> Any:

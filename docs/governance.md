@@ -26,6 +26,11 @@ So the ceiling is: **the agent can never see or do more than the person it runs
 for could do by hand.** Not usually — ever. If they cannot open a document,
 neither can the agent, whatever else is configured.
 
+The tool chokepoint checks this itself. A tool call made by anyone other than
+the run's user is refused and audited, whoever made it. That matters once a
+second door exists: [outside MCP clients](mcp.md) reach the same tools, bound to
+the user whose API key they hold, and never past Draft.
+
 ## Rules narrow that ceiling, they never raise it
 
 Access rules are the second half. Effective access is:
