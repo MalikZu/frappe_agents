@@ -863,11 +863,34 @@ class TestFillRecordedBySave(FillTestCase):
 		extraction = self.read(extraction_reply(self.fields()))
 		order = self.save_order()
 
-		with patch("frappe.has_permission", side_effect=_without_write_on_orders()):
+		with patch("frappe.has_permission", side_effect=_denying_on_orders("write")):
 			done = self.record(extraction, order.name)
 
 		self.assertEqual(done["status"], ACCEPTED)
 		self.assertEqual(done["created_doc"], order.name)
+		# Attaching a file would change the document, which they may not do.
+		self.assertFalse(done["source_attached"])
+		self.assertFalse(
+			frappe.db.exists(
+				"File",
+				{
+					"file_url": self.file.file_url,
+					"attached_to_doctype": ORDER_DT,
+					"attached_to_name": order.name,
+				},
+			)
+		)
+
+	def test_an_owner_who_may_not_read_the_document_cannot_record_it(self):
+		extraction = self.read(extraction_reply(self.fields()))
+		order = self.save_order()
+
+		with (
+			patch("frappe.has_permission", side_effect=_denying_on_orders("read")),
+			self.assertRaises(frappe.PermissionError),
+		):
+			self.record(extraction, order.name)
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "status"), READY)
 
 	def test_a_saved_draft_still_needs_write_to_be_recorded(self):
 		"""The control: the exception is for a new form's own document only."""
@@ -876,18 +899,18 @@ class TestFillRecordedBySave(FillTestCase):
 		run_extraction_with(started["extraction"], extraction_reply(self.fields()))
 
 		with (
-			patch("frappe.has_permission", side_effect=_without_write_on_orders()),
+			patch("frappe.has_permission", side_effect=_denying_on_orders("write")),
 			self.assertRaises(frappe.PermissionError),
 		):
 			self.record(started["extraction"], order.name)
 
 
-def _without_write_on_orders():
-	"""`frappe.has_permission`, except that nobody may write an order."""
+def _denying_on_orders(denied: str):
+	"""`frappe.has_permission`, except that nobody has `denied` on an order."""
 	real = frappe.has_permission
 
 	def check(doctype=None, ptype="read", doc=None, *args, **kwargs):
-		if doctype == ORDER_DT and ptype == "write":
+		if doctype == ORDER_DT and ptype == denied:
 			return False
 		return real(doctype, ptype, doc, *args, **kwargs)
 

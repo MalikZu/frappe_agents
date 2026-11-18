@@ -226,7 +226,10 @@ def record_filled(doc: Any, docname: str, saved: Any = None) -> dict:
 	doc.status = STATUS_ACCEPTED
 	doc.created_doc = docname
 	doc.sensitive_flags = frappe.as_json(flags)
-	_attach_source(doc, doctype, docname)
+	# Attaching a file changes the document, so it needs write. A person who may
+	# create the doctype but not change it gets the record without the attachment.
+	if frappe.has_permission(doctype, "write", doc=docname):
+		_attach_source(doc, doctype, docname)
 	publish_extraction(doc, status=STATUS_ACCEPTED, created_doc=docname)
 	return _recorded(doc, docname)
 
@@ -235,19 +238,16 @@ def _may_record_against(doctype: str, docname: str, target: str | None) -> bool:
 	"""Whether this user may tie a reading to this document.
 
 	A saved draft that was filled needs write on it, which the fill needed too. A
-	new form's document needs no more than having been created by this person:
-	a role may create a doctype without being allowed to change it afterwards,
-	and recording what they just created is not changing it. Anything else they
-	did not create must at least be readable, so that "not yours" is not a way to
-	learn that a record exists.
+	new form's document needs read and no more: a role may create a doctype
+	without being allowed to change it afterwards, and recording what they just
+	created is not changing it. Whether they created it is checked after this,
+	and a document they may not read answers like one that does not exist, so
+	"not yours" is not a way to learn that a record exists.
 	"""
 	if not docname or not frappe.db.exists(doctype, docname):
 		return False
-	if target:
-		return bool(frappe.has_permission(doctype, "write", doc=docname))
-	if frappe.db.get_value(doctype, docname, "owner") == frappe.session.user:
-		return True
-	return bool(frappe.has_permission(doctype, "read", doc=docname))
+	ptype = "write" if target else "read"
+	return bool(frappe.has_permission(doctype, ptype, doc=docname))
 
 
 def stamp_on_save(doc: Any, method: str | None = None) -> None:
@@ -571,9 +571,9 @@ def _saved_value(saved: Any, key: str, printed: Any) -> Any:
 def _attach_source(doc: Any, doctype: str, docname: str) -> bool:
 	"""Attach the file the form was filled from to the saved document.
 
-	Under the person's own permission and nothing else: `record_filled` has
-	already required write on the document, and the File insert makes its own
-	checks. A failure is a missing attachment, not a failed save, so it is logged
+	Under the person's own permission and nothing else: `record_filled` calls
+	this only when they may write the document, and the File insert makes its
+	own checks. A failure is a missing attachment, not a failed save, so it is logged
 	and reported, never raised.
 	"""
 	savepoint = "fa_fill_attach"

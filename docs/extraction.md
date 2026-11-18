@@ -94,8 +94,10 @@ Two details of the comparison are not optional, and explain behaviour you might
 otherwise find odd. The master value is read as a document rather than through a
 query, because v16 masks fields per user in the query layer and a masked value
 would make every extraction mismatch forever — alert fatigue on the one alert
-that must never be ignored. And a master value you are not permitted to see
-unmasked is never written into the flags: you get the boolean, not the value.
+that must never be ignored. And a master value you are not permitted to see —
+masked for you, or above your permission level — is never written into the
+flags: you get the boolean, not the value. Upgrading blanks such values on
+readings stored before this rule.
 
 ## Reviewing
 
@@ -215,7 +217,8 @@ To read a file that is not attached to the draft, click **Upload a new file**
 instead of steps 4 and 5. Then select the PDF or image.
 
 When you save, the save records the reading against the document and attaches
-the file to it.
+the file to it. If you may create the document type but not change a
+document, the file is not attached.
 
 ### What the panel shows
 
@@ -257,7 +260,8 @@ a data import, or a change made straight in the database. The reading then
 stays **Ready**.
 
 A reading that no saved document is tied to within 24 hours is closed as
-**Discarded** by the daily job. Click **Cancel** in the panel while it reads to close it sooner.
+**Discarded** by the daily job. To close it sooner, click **Cancel** in the
+panel while the file is read or the form is filled.
 Click **Hide** to hide the panel after the fill; saving the form still records
 the reading. Reload the form to throw away values you do not want.
 
