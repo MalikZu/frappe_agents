@@ -172,12 +172,14 @@ class TestSavingATrigger(TriggerCase):
 
 class TestWhichSavesFire(TriggerCase):
 	def test_a_change_to_the_watched_field_fires(self):
-		trigger = self.make_trigger()
+		# Not the title: it names the order, and frappe keeps a name field in step
+		# with the name, so a change to it is undone before the save lands.
+		trigger = self.make_trigger(source_field="amount")
 		order = make_order_draft()
 
 		with self.queue() as calls, as_user(DRAFT_USER):
 			order.reload()
-			order.order_title = "FA retitled order"
+			order.amount = 250
 			order.save()
 
 		fired = self.dispatched(calls)
@@ -219,7 +221,7 @@ class TestWhichSavesFire(TriggerCase):
 
 		with self.queue() as calls, as_user(DRAFT_USER):
 			order.reload()
-			order.order_title = "FA renamed"
+			order.amount = 250
 			order.save()
 		self.assertEqual(self.dispatched(calls), [])
 
@@ -245,12 +247,12 @@ class TestWhichSavesFire(TriggerCase):
 		self.assertEqual(self.dispatched(calls), [])
 
 	def test_administrator_never_fires_a_trigger_and_it_is_counted(self):
-		trigger = self.make_trigger()
+		trigger = self.make_trigger(source_field="amount")
 		order = make_order_draft()
 
 		with self.queue() as calls:
 			order.reload()
-			order.order_title = "FA changed by Administrator"
+			order.amount = 250
 			order.save()
 
 		self.assertEqual(self.dispatched(calls), [])
