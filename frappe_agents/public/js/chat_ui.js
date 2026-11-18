@@ -334,6 +334,7 @@ frappe_agents.EXTRACTION_UPDATE_EVENT = "frappe_agents:extraction_update";
 // the document: the card reads the rest through `get_action_state`.
 frappe_agents.ACTION_DECIDED_EVENT = "agent_action_decided";
 const ACTION_STATE_METHOD = "frappe_agents.api.get_action_state";
+const WAITING_REFRESH_MS = 500;
 
 // Tools whose result is a proposal waiting for a person. Their finished event is
 // what a reopened conversation redraws its approval cards from.
@@ -822,11 +823,14 @@ frappe_agents.ChatUI = class ChatUI {
 		this.action_decided_handler = (data) => this.on_action_decided(data);
 		on_realtime(frappe_agents.ACTION_DECIDED_EVENT, this.action_decided_handler, alive);
 		// The event is sent once. A tab that was asleep, or a socket that dropped,
-		// missed it, so the waiting cards ask again when the tab comes back.
+		// missed it, so the waiting cards ask again when the tab comes back and
+		// when the socket reconnects.
 		this.visibility_handler = () => {
 			if (document.visibilityState === "visible") this.refresh_waiting_actions();
 		};
 		document.addEventListener("visibilitychange", this.visibility_handler);
+		this.reconnect_handler = () => this.refresh_waiting_actions();
+		on_realtime("connect", this.reconnect_handler, alive);
 	}
 
 	destroy() {
@@ -848,6 +852,11 @@ frappe_agents.ChatUI = class ChatUI {
 			document.removeEventListener("visibilitychange", this.visibility_handler);
 			this.visibility_handler = null;
 		}
+		if (this.reconnect_handler) {
+			frappe.realtime.off("connect", this.reconnect_handler);
+			this.reconnect_handler = null;
+		}
+		clearTimeout(this.waiting_timer);
 		if (this.pop_dismiss_handler) {
 			$(document).off("click", this.pop_dismiss_handler);
 			$(document).off("keydown", this.pop_escape_handler);
@@ -2423,7 +2432,14 @@ frappe_agents.ChatUI = class ChatUI {
 	render_action_proposed(data) {
 		if (!data || !data.action) return;
 		const known = this.actions[data.action];
-		const state = Object.assign({}, known ? known.state : {}, defined_keys(data));
+		const incoming = defined_keys(data);
+		// A decision is final. A reply read before it was committed, or a log replayed
+		// after it arrived, may still say Pending; it does not take the card back.
+		const was = known && known.state.status;
+		if (was && was !== "Pending" && (!incoming.status || incoming.status === "Pending")) {
+			delete incoming.status;
+		}
+		const state = Object.assign({}, known ? known.state : {}, incoming);
 		this.clear_empty();
 
 		const $card = this.make_action_card(state);
@@ -2509,20 +2525,33 @@ frappe_agents.ChatUI = class ChatUI {
 		this.refresh_action(data.action);
 	}
 
-	/** Ask again about every card still waiting. Few, and only on a tab coming back. */
+	/**
+	 * Ask again about every card still waiting. Held for a moment, so a tab that
+	 * comes back and a socket that reconnects in the same breath ask once.
+	 */
 	refresh_waiting_actions() {
-		Object.keys(this.actions).forEach((action) => {
-			const status = this.actions[action].state.status;
-			if (!status || status === "Pending") this.refresh_action(action);
-		});
+		clearTimeout(this.waiting_timer);
+		this.waiting_timer = setTimeout(() => {
+			if (this.destroyed) return;
+			Object.keys(this.actions).forEach((action) => {
+				const status = this.actions[action].state.status;
+				if (!status || status === "Pending") this.refresh_action(action);
+			});
+		}, WAITING_REFRESH_MS);
 	}
 
 	/** Read one proposal's state from the server and redraw its card. */
 	refresh_action(action) {
 		if (!action) return;
+		// Only the newest question about a card is answered: an older reply that
+		// arrives late knows less than the one before it.
+		this.action_asks = this.action_asks || {};
+		const ask = (this.action_asks[action] || 0) + 1;
+		this.action_asks[action] = ask;
 		frappe
 			.xcall(ACTION_STATE_METHOD, { action: action })
 			.then((state) => {
+				if (this.action_asks[action] !== ask) return;
 				if (this.destroyed || !state || !this.actions[action]) return;
 				const following = this.at_bottom();
 				this.render_action_proposed(state);
