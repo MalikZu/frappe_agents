@@ -338,7 +338,9 @@ def _execute(run: Any) -> None:
 		run,
 		{
 			"status": "Completed",
-			"output_message": events.final_text,
+			# Stored by the log's rule, so the answer column and the answer in the
+			# log say the same thing. The live frame is the raw text, as streamed.
+			"output_message": events.redactor.scrub(events.final_text),
 			"ended_at": now_datetime(),
 		},
 	)
@@ -655,7 +657,8 @@ class RunEvents:
 		else that stopped the loop reports the loop's own words.
 		"""
 		if self.error and self.steps < max_turns:
-			return self.error
+			# Stored on the row and in the log, so held back like the log.
+			return self.redactor.scrub(self.error)
 		return f"Stopped after {self.steps} steps without a final answer."
 
 	def _stream(self, event: Any) -> None:

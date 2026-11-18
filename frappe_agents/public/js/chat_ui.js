@@ -1598,7 +1598,8 @@ frappe_agents.ChatUI = class ChatUI {
 
 		if (run.output_message) {
 			// Already on screen when the log carried it, which it does for every
-			// run that recorded one.
+			// run that recorded one. Both are stored with the same values held
+			// back, so the answer in the log and the column match.
 			if (run.output_message !== replayed.said) {
 				this.$log.append(this.make_bubble(run.output_message, "", true));
 			}
