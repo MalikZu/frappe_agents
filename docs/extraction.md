@@ -138,7 +138,7 @@ cannot open would be an existence oracle wearing a helpful label.
 | **Needs Review** | A draft exists and is waiting for a person |
 | **Ready** | Fill from file only: the values wait for the form that asked |
 | **Accepted** | A reviewer accepted it, or the filled form was saved |
-| **Discarded** | A person threw it away |
+| **Discarded** | A person threw it away, or a Fill from file reading waited more than 24 hours |
 | **Failed** | It could not be done — reason on the row |
 
 The job never raises. A failure is recorded on the Document Extraction row where
@@ -187,20 +187,32 @@ draft they need write permission on that draft.
 An agent with no access rules yet, on the old tool selection, does not offer the
 button anywhere.
 
-### Fill a form
+### Fill a new form
 
-1. Open a new form, or a saved draft.
+1. Open a new form.
 2. Click **Fill from file**.
-3. Pick an attached file, or click **Upload a new file**.
-4. Wait for the panel at the top of the form to say the form is filled. You can
-   keep working while it reads.
-5. Check each highlighted field against the file. Click **Open the file** to see
-   it.
-6. Type each sensitive field yourself, or click **Use the printed value**.
-7. Save the form.
+3. If the dialog shows **Agent**, select the agent.
+4. Click **Upload a file**.
+5. Select the PDF or image.
+6. Wait until the panel at the top of the form says "Filled". You can keep
+   working while the file is read.
+7. Click **Open the file**.
+8. Compare each highlighted field with the file.
+9. Type each field listed under **Check these by hand. They were left empty on
+   purpose.**
+10. Save the form.
 
-When you save, the file is attached to the document, and the Document
-Extraction row records which document it became.
+### Fill a saved draft
+
+1. Open the draft.
+2. Click **Fill from file**.
+3. If the dialog shows **Agent**, select the agent.
+4. Select the file in **Attached file**, then click **Read this file**. To use
+   a different file, click **Upload a new file** instead.
+5. Do steps 6 to 10 of [Fill a new form](#fill-a-new-form).
+
+When you save, the save records the reading against the document and attaches
+the file to it.
 
 ### What the panel shows
 
@@ -229,13 +241,15 @@ Every fill is a Document Extraction row with **Purpose** set to Fill Form, the
 agent it used, and the person who clicked. Its tokens, file and model are
 recorded like any other extraction.
 
-When the form is saved, each sensitive flag records whether the saved value was
-left empty, is the printed value, or was typed. The saved value is compared
-with the record the document now links to. The value itself stays on the
-document and is not copied onto the row.
+The save records the reading itself, on the server. Closing the tab, losing the
+connection, or looking at another record before you save does not lose the
+record. When the form is saved, each sensitive flag records whether the saved
+value was left empty, is the printed value, or was typed. The saved value is
+compared with the record the document now links to. The value itself stays on
+the document and is not copied onto the row.
 
-A reading that no form collects within 24 hours is closed as **Discarded** by
-the daily job. Click **Cancel** in the panel while it reads to close it sooner.
+A reading that no saved document is tied to within 24 hours is closed as
+**Discarded** by the daily job. Click **Cancel** in the panel while it reads to close it sooner.
 Click **Hide** to hide the panel after the fill; saving the form still records
 the reading. Reload the form to throw away values you do not want.
 

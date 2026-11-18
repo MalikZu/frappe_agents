@@ -76,12 +76,14 @@ call *did* stays readable — the tool, the doctype, the field names, the outcom
 
 ## Scheduled work
 
-One daily job: **expire stale actions**. It moves proposals nobody decided to
-Expired after the number of days in Agent Settings.
+Two daily jobs. Both are safe to run by hand and safe to run twice.
 
-The job is safe to run by hand and safe to run twice. Expiry is the clock, not a
-decision — nobody is recorded as having decided, and the agent may propose the
-same thing again.
+- **Expire stale actions** moves proposals nobody decided to Expired after the
+  number of days in Agent Settings. Expiry is the clock, not a decision — nobody
+  is recorded as having decided, and the agent may propose the same thing again.
+- **Close stale Fill from file readings** moves a reading that is still
+  **Ready** after 24 hours to Discarded. No saved document was tied to it. See
+  [Fill from file](extraction.md#fill-from-file).
 
 ## Upgrading
 
