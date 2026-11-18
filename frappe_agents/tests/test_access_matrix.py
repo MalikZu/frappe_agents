@@ -93,6 +93,7 @@ class TestToolExposure(AgentTestCase):
 				"propose_submit",
 				"propose_cancel",
 				"propose_transition",
+				"propose_update",
 				"extract_document",
 			},
 		)
@@ -102,7 +103,8 @@ class TestToolExposure(AgentTestCase):
 		agent = make_matrix_agent([rule(ORDER_DT, can_propose=1)], autonomy="Suggest")
 
 		self.assertFalse(
-			{"propose_submit", "propose_cancel", "propose_transition"} & exposed_tool_names(agent)
+			{"propose_submit", "propose_cancel", "propose_transition", "propose_update"}
+			& exposed_tool_names(agent)
 		)
 
 	def test_a_report_rule_is_what_offers_run_report(self):
