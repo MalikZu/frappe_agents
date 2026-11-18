@@ -53,7 +53,9 @@ _CHAIN = re.compile(r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)+")
 # chain as 2025-01-02T10 — the rest of its time is joined by colons.
 _ISO_DATE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}(?:[Tt]\d{1,2})?")
 _DATE = re.compile(r"\d{4}([-/])\d{1,2}\1\d{1,2}(?:[Tt]\d{1,2})?|\d{1,2}([-/])\d{1,2}\2\d{4}")
-_REFERENCE = re.compile(r"(?:[A-Za-z][A-Za-z0-9]*[-/])+\d+(?:[-/]\d+)+(?:-[A-Za-z][A-Za-z0-9]{0,2})?")
+# Word parts, then the number parts, then at most one single-letter suffix. The
+# number parts are checked by `_numbers_look_like_a_reference` as well.
+_REFERENCE = re.compile(r"(?:[A-Za-z][A-Za-z0-9]*[-/])+(\d+(?:[-/]\d+)+)(?:-[A-Za-z])?")
 # A number below this many significant digits is not taken out of prose. 100 or
 # 12 is in every sentence; replacing each one would corrupt what an auditor reads.
 NUMBER_MIN_DIGITS = 4
@@ -268,12 +270,16 @@ def _in_chain(text: str, span: tuple[int, int], chains: list[tuple[int, int]]) -
 	* a date: three number parts, the year first or last — 2025-01-02,
 	  02/01/2025 — and an ISO date with its time, 2025-01-02T10:00:00;
 	* a date range: dates joined by a slash — 2025-01-02/2025-02-01;
-	* a reference: one or more word parts, then two or more number parts, then
-	  at most one short word part — ORD-2025-0001, PO2-2025-0001, ORD-2025-0001-A.
+	* a reference: one or more word parts, then number parts that read as a
+	  naming series — a 2- or 4-digit year first, and a zero-padded counter of 3
+	  digits or more after it — then at most one single-letter suffix:
+	  ORD-2025-0001, SINV-25-00012, PO2-2025-0001, ORD-2025-0001-A.
 
-	Anything else is how a value is written: a range (98765-99000-1), an amount
-	with its unit (98765/month/employee, AED-98765/month), a label
-	(net-pay-98765). Those are held back. A unit word never protects a number.
+	Anything else is how a value is written, and is held back: a range
+	(98765-99000-1, AED-98765-99000), an amount with its unit or currency
+	(98765/month/employee, AED-98765/month, AED-98765-99000-pm), a label in front
+	of a range (Q1-98765-99000, net-pay-98765). No word protects a number except
+	a reference's own prefix and its single-letter suffix.
 	"""
 	start, end = span
 	for chain_start, chain_end in chains:
@@ -283,10 +289,23 @@ def _in_chain(text: str, span: tuple[int, int], chains: list[tuple[int, int]]) -
 
 
 def _is_kept_shape(chain: str) -> bool:
-	if _DATE.fullmatch(chain) or _REFERENCE.fullmatch(chain):
+	if _DATE.fullmatch(chain):
+		return True
+	reference = _REFERENCE.fullmatch(chain)
+	if reference and _numbers_look_like_a_reference(reference.group(1)):
 		return True
 	dates = chain.split("/")
 	return len(dates) >= 2 and all(_ISO_DATE.fullmatch(date) for date in dates)
+
+
+def _numbers_look_like_a_reference(numbers: str) -> bool:
+	"""A year first (2025, 25), then a zero-padded counter (0001, 00012).
+
+	That is the shape a naming series writes. A salary range does not have it:
+	98765-99000 starts with no year, and 2050-3000 has no zero-padded counter.
+	"""
+	parts = re.split(r"[-/]", numbers)
+	return len(parts[0]) in (2, 4) and any(len(part) >= 3 and part.startswith("0") for part in parts[1:])
 
 
 def scrub_values(value: Any, secrets: set[str]) -> Any:
