@@ -574,7 +574,12 @@ function action_verb(state) {
 			? __("{0} (from {1})", [__(state.workflow_action), __(state.from_workflow_state)])
 			: __(state.workflow_action);
 	}
-	return state.action_type === "Cancel" ? __("Cancel") : __("Submit");
+	if (state.action_type === "Submit") return __("Submit");
+	if (state.action_type === "Cancel") return __("Cancel");
+	// A redacted transition has no action name, and an unknown type has no verb
+	// of its own. Neither is a submit.
+	if (state.action_type === "Workflow Transition") return __("Workflow action");
+	return __("Proposal");
 }
 
 /** Where a proposal stands, as the title of its card. */

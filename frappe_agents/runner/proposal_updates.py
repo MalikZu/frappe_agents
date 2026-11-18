@@ -29,6 +29,8 @@ import frappe
 
 from frappe_agents.actions import (
 	ACTION_CANCEL,
+	ACTION_SUBMIT,
+	ACTION_TRANSITION,
 	STATUS_APPLIED,
 	STATUS_EXPIRED,
 	STATUS_FAILED,
@@ -161,7 +163,17 @@ def _verb(state: dict) -> str:
 		if state.get("from_workflow_state"):
 			verb += f' from the state "{plain(state["from_workflow_state"])}"'
 		return f"{verb} to"
-	return "cancel" if state.get("action_type") == ACTION_CANCEL else "submit"
+	action_type = state.get("action_type")
+	if action_type == ACTION_SUBMIT:
+		return "submit"
+	if action_type == ACTION_CANCEL:
+		return "cancel"
+	# A transition whose target the user can no longer read has its action held
+	# back, and any type this module does not know yet gets the same plain verb.
+	# Neither may be called a submit.
+	if action_type == ACTION_TRANSITION:
+		return "apply a workflow action to"
+	return "act on"
 
 
 def _cut(text: str) -> str:
