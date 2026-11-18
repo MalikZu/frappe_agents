@@ -48,7 +48,8 @@ from frappe.model.workflow import WorkflowStateError, get_transitions, get_workf
 from frappe.utils import cint, strip_html
 
 from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_UPDATE_DRAFT
-from frappe_agents.actions import pending_action_for, record_proposal
+from frappe_agents.actions import pending_action_for, record_proposal, rejected_proposal_for
+from frappe_agents.context.untrusted import wrap
 from frappe_agents.runner.run import publish_event
 from frappe_agents.tools.base import (
 	CAPABILITY_DRAFT,
@@ -315,6 +316,7 @@ def _propose(payload: dict, action_type: str) -> dict:
 	_check_target_state(doc, action_type)
 	_refuse_workflow(doctype)
 	_refuse_duplicate(doctype, name, action_type)
+	reason = _check_rejected(doctype, name, action_type, doc.modified, reason, payload)
 
 	action = record_proposal(run, action_type, doctype, name, reason, doc.modified)
 
@@ -484,6 +486,31 @@ def _refuse_duplicate(
 			f"There is already a pending {what} proposal for {doctype} {name} "
 			f"({existing}). Wait for that decision instead of proposing again."
 		)
+
+
+def _check_rejected(
+	doctype: str, name: str, action_type: str, modified: Any, reason: str, payload: dict
+) -> str:
+	"""Refuse to ask again what an approver already refused, on the same document.
+
+	The history tells the agent about a rejection once, and a long conversation
+	can trim that turn away. This is the check that does not forget. A document
+	that changed since is a new question, so it passes. So does a proposal the
+	user asked for again, and the approver is told that it is one.
+	"""
+	rejected = rejected_proposal_for(doctype, name, action_type, modified)
+	if not rejected:
+		return reason
+	if payload.get("user_asked_again") is True:
+		return f"Proposed again at the user's request, after an earlier rejection.\n\n{reason}"
+
+	note = wrap(rejected.decision_note or "", "approver note")
+	raise ToolDenied(
+		f"An approver already rejected this {action_type.lower()} proposal for {doctype} {name}, "
+		f"and the document has not changed since. The approver wrote: {note} "
+		"Change the document first, or tell the user what the approver said. Propose it "
+		"again with user_asked_again set to true only if the user asks you to."
+	)
 
 
 def _dry_run(doc: Any) -> dict:
@@ -662,6 +689,16 @@ def _text(exc: Exception) -> str:
 	return strip_html(str(exc) or "").strip() or exc.__class__.__name__
 
 
+# An approver rejected this proposal on this same version of the document, and the
+# user has asked for it again. Never set on the agent's own judgement.
+USER_ASKED_AGAIN = {
+	"type": "boolean",
+	"description": (
+		"Set to true only when an approver rejected this same proposal and the user "
+		"has asked you to propose it again. The approver is told."
+	),
+}
+
 TOOLS = [
 	{
 		"tool_name": "create_draft",
@@ -771,6 +808,7 @@ TOOLS = [
 					"type": "string",
 					"description": "Why this should be submitted, in your own words. Required.",
 				},
+				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "reason"],
 		},
@@ -795,6 +833,7 @@ TOOLS = [
 					"type": "string",
 					"description": "Why this should be cancelled, in your own words. Required.",
 				},
+				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "reason"],
 		},
