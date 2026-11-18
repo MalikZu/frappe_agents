@@ -167,7 +167,7 @@
   },
   {
    "default": "0",
-   "description": "Let MCP clients such as Claude, ChatGPT or an IDE call this agent's tools as the user whose API key they hold. Document text then goes to whichever model that client uses. Agent Settings must also allow MCP. See docs/mcp.md.",
+   "description": "Let MCP clients such as Claude Code or an IDE call this agent's tools as the user whose API key they hold. Document text then goes to whichever model that client uses. Agent Settings must also allow MCP. See docs/mcp.md.",
    "fieldname": "allow_mcp",
    "fieldtype": "Check",
    "label": "Allow MCP"

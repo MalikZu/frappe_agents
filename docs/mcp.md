@@ -1,8 +1,9 @@
 # Outside clients (MCP)
 
-An MCP client is an AI assistant that runs outside your site: Claude, ChatGPT,
-an IDE. The Model Context Protocol lets it call tools on a server. This app can
-be that server.
+An MCP client is an AI assistant that runs outside your site: Claude Code, an
+IDE, a desktop assistant. The Model Context Protocol lets it call tools on a
+server. This app can be that server, for any client that can send an API key in
+a header. Hosted connectors that only sign in with OAuth cannot connect yet.
 
 The client calls the same tools the in-app agent calls, through the same door.
 Every call runs as a real user, is checked against that user's permissions and
@@ -29,10 +30,12 @@ permissions, the agent's rules, the Draft cap below, and the human who approves.
 **The wall is the same, and a little narrower.** Over MCP an agent:
 
 - never goes past Draft, whatever its Autonomy says;
-- is not offered `extract_document`, because it spends your model tokens for a
-  client that brings its own model;
-- is not offered the Agents Builder tools, because designing agents is
-  configuration, not work;
+- is not offered `extract_document` or `read_document`, because both can spend
+  your model tokens for a client that brings its own model, and a session does
+  not count tokens against the budget;
+- is not offered the Agents Builder tools, and may not draft an Agent Blueprint
+  even when a rule allows it, because designing agents is configuration, not
+  work;
 - is not offered tools other apps registered.
 
 These limits live in the tool chokepoint, not only in the tool list. A client
@@ -124,14 +127,17 @@ A session ends when:
 - nobody uses it for 30 minutes;
 - it is 8 hours old;
 - it reaches **MCP Tool Calls per Session**;
+- the same user opens a sixth session on the same agent. The oldest ends;
 - the kill switch is cleared. The run is then **Cancelled**.
 
-The client then gets a 404 and opens a new session on its own. An hourly job
+The client then gets a 404. A client that follows the protocol opens a new
+session by itself. If yours shows an error instead, reconnect it. An hourly job
 ends sessions a client abandoned.
 
 Each user may send **MCP Requests per User per Minute** requests. Past that the
 client gets a 429. The agent's **Daily Token Budget** is checked before every
-tool call.
+tool call. Nothing offered over MCP calls your model, so MCP sessions add no
+tokens to that budget.
 
 ## Reading what a client did
 

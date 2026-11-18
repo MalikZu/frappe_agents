@@ -42,9 +42,9 @@ broad rights. This app is built the other way around:
 - **Any model provider** over three wire formats (OpenAI-compatible, OpenAI
   Responses and Anthropic) — OpenRouter, Ollama and friends included. The
   provider is a config field, not a dependency.
-- **A governed MCP endpoint**, off by default: outside assistants call the same
-  tools as the same user, capped at drafts, with every call audited. See
-  [Outside clients](docs/mcp.md).
+- **A governed MCP endpoint**, off by default: outside assistants that can send
+  an API key call the same tools as the same user, capped at drafts, with every
+  call audited. See [Outside clients](docs/mcp.md).
 - **Zero pip dependencies.** The agent loop is a vendored, tested harness;
   nothing new enters your bench's shared environment.
 
@@ -122,7 +122,7 @@ before every request. Redirects are never followed.
   Review Quality report is actually telling you.
 - [Document extraction](docs/extraction.md) — an attachment becomes a draft, and
   the sensitive-field gate that holds payment details back.
-- [Outside clients (MCP)](docs/mcp.md) — let Claude, ChatGPT or an IDE call an
+- [Outside clients (MCP)](docs/mcp.md) — let Claude Code or an IDE call an
   agent's tools through the same permission wall, and what changes when you do.
 
 **Running it**
