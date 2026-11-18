@@ -228,6 +228,41 @@ class TestEventLogRedaction(AgentTestCase):
 		text = "".join(block.get("text") or "" for block in last["content"] if block.get("type") == "text")
 		self.assertEqual(text, reopened["output_message"])
 
+	def test_an_answer_that_repeats_a_currency_value_is_stored_without_it(self):
+		order = self.order_with_iban(amount=AMOUNT)
+		answer = (
+			"Salary is 98765. Written 98,765.00, 98765.00, AED98765, 98765AED, 98765/month, "
+			"amount:98765 and 98765-99000. Dated 2025-01-02, ref ORD-2025-0001, not 1987650."
+		)
+
+		with amount_is_sensitive():
+			run, _ = self.turn(self.read_script(order, model_says(answer)))
+
+		stored = frappe.db.get_value("Agent Run", run, "output_message")
+		self.assertNotIn("98765", stored)
+		self.assertNotIn("98,765", stored)
+		for kept in ("2025-01-02", "ORD-2025-0001", "1987650", "-99000"):
+			self.assertIn(kept, stored)
+		last = [
+			event["message"]
+			for event in run_events(run)
+			if event["type"] == "message_end" and event["message"].get("role") == "assistant"
+		][-1]
+		self.assertEqual(last["content"][0]["text"], stored)
+
+	def test_an_answer_after_a_withheld_result_is_withheld_too(self):
+		"""A result that could not be redacted taught the log nothing. Fail closed."""
+		order = self.order_with_iban()
+
+		with patch("frappe_agents.redaction.EventRedactor.record_result", side_effect=RuntimeError("broken")):
+			run, frames = self.turn(self.read_script(order, model_says(f"It pays into {IBAN}.")))
+
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "output_message"), REDACTED)
+		self.assertNotIn(IBAN, stored_log(run))
+		# Live, the person who ran the turn still reads the answer.
+		said = [frame for frame in frames if frame.get("type") == "message"]
+		self.assertEqual(said[-1]["message"], f"It pays into {IBAN}.")
+
 	def test_a_reopened_conversation_shows_the_marker(self):
 		order = self.order_with_iban()
 		self.turn(self.read_script(order, model_says("Read it.")))
@@ -390,13 +425,36 @@ class TestNumbersStayInTheirPlace(AgentTestCase):
 		for key, value in NUMBER_KEPT.items():
 			self.assertEqual(result["result"][key], value)
 
-	def test_prose_loses_a_number_only_where_it_stands_alone(self):
-		text = "2025 on 2025-01-02, ORD-2025-0001, 12025, 2025.5, v2025 and 15000; then 2025."
+	def test_prose_keeps_a_number_inside_a_date_a_reference_or_a_longer_number(self):
+		text = "2025 on 2025-01-02, 02/01/2025, ORD-2025-0001, 12025, 2025.5 and 15000; then 2025."
 
 		self.assertEqual(
 			scrub(text, {"2025", "1500"}),
-			f"{REDACTED} on 2025-01-02, ORD-2025-0001, 12025, 2025.5, v2025 and 15000; then {REDACTED}.",
+			f"{REDACTED} on 2025-01-02, 02/01/2025, ORD-2025-0001, 12025, 2025.5 and 15000; then {REDACTED}.",
 		)
+
+	def test_prose_loses_a_currency_value_in_every_form_it_is_written(self):
+		# A Currency field reaches the redactor as a float, so the value held back
+		# is 98765.0 and the prose writes it however it likes.
+		_, secrets = redact({"amount": float(AMOUNT)}, {"amount"})
+		self.assertEqual(secrets, {"98765.0"})
+
+		for written in (
+			"Salary is 98765.",
+			"98,765.00",
+			"98765.00",
+			"AED98765",
+			"98765AED",
+			"98765/month",
+			"amount:98765",
+			'{"amount":98765}',
+			"98765-99000",
+		):
+			with self.subTest(written=written):
+				scrubbed = scrub(written, secrets)
+				self.assertNotIn("98765", scrubbed)
+				self.assertNotIn("98,765", scrubbed)
+				self.assertIn(REDACTED, scrubbed)
 
 	def test_update_events_hold_back_their_arguments_too(self):
 		stored = EventRedactor().event(
