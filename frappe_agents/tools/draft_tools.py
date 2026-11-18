@@ -65,6 +65,8 @@ from frappe_agents.field_changes import (
 	normalise,
 	precision_of,
 )
+from frappe_agents.redaction import scrub
+from frappe_agents.runner.proposal_updates import defuse, document_secrets
 from frappe_agents.runner.run import publish_event
 from frappe_agents.tools.base import (
 	CAPABILITY_DRAFT,
@@ -690,6 +692,22 @@ def _refuse_duplicate(
 		)
 
 
+def _approver_note(note: str | None, doctype: str, name: str) -> str:
+	"""An approver's note as a refusal may quote it: without the document's held-back values.
+
+	The refusal is stored on the Agent Tool Call row, where an auditor reads it,
+	and the note can quote a field the audit trail holds back. A document whose
+	values cannot be read gives no note at all.
+	"""
+	if not note:
+		return ""
+	try:
+		secrets = document_secrets(doctype, name)
+	except Exception:
+		return "(the note cannot be shown)"
+	return defuse(scrub(note, secrets) or "")
+
+
 def _check_rejected(
 	doctype: str,
 	name: str,
@@ -721,19 +739,20 @@ def _check_rejected(
 	# The system knows that a rejection exists and whether the document changed.
 	# It does not know what the user said: `user_asked_again` is the agent's word,
 	# and the marker says so rather than vouching for it.
-	asked = " The agent says the user asked for this." if payload.get("user_asked_again") is True else ""
+	asked = payload.get("user_asked_again") is True
+	said = " The agent says the user asked for this." if asked else ""
 	if not rejected.same_version:
 		return (
 			f"Proposed again after an earlier rejection ({rejected.name}). "
-			f"The document changed since.{asked}\n\n{reason}"
+			f"The document changed since.{said}\n\n{reason}"
 		)
 	if asked:
 		return (
 			f"Proposed again after an earlier rejection ({rejected.name}) "
-			f"of this same version of the document.{asked}\n\n{reason}"
+			f"of this same version of the document.{said}\n\n{reason}"
 		)
 
-	note = wrap(rejected.decision_note or "", "approver note")
+	note = wrap(_approver_note(rejected.decision_note, doctype, name), "approver note")
 	what = workflow_action or ("field change" if action_type == ACTION_UPDATE else action_type.lower())
 	raise ToolDenied(
 		f"An approver already rejected this {what} proposal "
