@@ -157,7 +157,10 @@ def _line(state: dict) -> str:
 
 def _verb(state: dict) -> str:
 	if state.get("workflow_action"):
-		return f'apply the workflow action "{plain(state["workflow_action"])}" to'
+		verb = f'apply the workflow action "{plain(state["workflow_action"])}"'
+		if state.get("from_workflow_state"):
+			verb += f' from the state "{plain(state["from_workflow_state"])}"'
+		return f"{verb} to"
 	return "cancel" if state.get("action_type") == ACTION_CANCEL else "submit"
 
 

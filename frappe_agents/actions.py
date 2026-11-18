@@ -725,21 +725,34 @@ def proposal_state(row: Any) -> dict:
 	return state
 
 
-def rejected_proposal_for(target_doctype: str, target_name: str, action_type: str, modified: Any) -> Any:
+def rejected_proposal_for(
+	target_doctype: str,
+	target_name: str,
+	action_type: str,
+	modified: Any,
+	workflow_action: str | None = None,
+	from_workflow_state: str | None = None,
+) -> Any:
 	"""This user's latest rejected proposal for the same action on this document, if any.
 
 	The row carries `same_version`: whether it was rejected on the document as it
 	is now. Read through `get_list`, so it finds the session user's own proposals
-	and nobody else's.
+	and nobody else's. A workflow action is the same action only with the same verb
+	out of the same state.
 	"""
+	filters = {
+		"target_doctype": target_doctype,
+		"target_name": target_name,
+		"action_type": action_type,
+		"status": STATUS_REJECTED,
+	}
+	if workflow_action:
+		filters["workflow_action"] = workflow_action
+	if from_workflow_state:
+		filters["from_workflow_state"] = from_workflow_state
 	rows = frappe.get_list(
 		"Agent Action",
-		filters={
-			"target_doctype": target_doctype,
-			"target_name": target_name,
-			"action_type": action_type,
-			"status": STATUS_REJECTED,
-		},
+		filters=filters,
 		fields=["name", "decision_note", "proposal_modified"],
 		order_by="creation desc",
 		limit_page_length=REJECTION_LOOKBACK,

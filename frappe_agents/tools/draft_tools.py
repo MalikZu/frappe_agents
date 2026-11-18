@@ -382,6 +382,9 @@ def propose_transition(payload: dict) -> dict:
 		)
 
 	_refuse_duplicate(doctype, name, ACTION_TRANSITION, workflow_action, state)
+	reason = _check_rejected(
+		doctype, name, ACTION_TRANSITION, doc.modified, reason, payload, workflow_action, state
+	)
 
 	# The Workflow and the state go on the row with the verb: the same verb can mean
 	# a different step from another state, and the approval refuses anything but
@@ -489,7 +492,14 @@ def _refuse_duplicate(
 
 
 def _check_rejected(
-	doctype: str, name: str, action_type: str, modified: Any, reason: str, payload: dict
+	doctype: str,
+	name: str,
+	action_type: str,
+	modified: Any,
+	reason: str,
+	payload: dict,
+	workflow_action: str | None = None,
+	from_workflow_state: str | None = None,
 ) -> str:
 	"""Refuse to ask again what an approver already refused, and mark any second ask.
 
@@ -503,7 +513,9 @@ def _check_rejected(
 	`update_draft` can always change the document, and the approver is the one
 	who decides whether the change answers the note.
 	"""
-	rejected = rejected_proposal_for(doctype, name, action_type, modified)
+	rejected = rejected_proposal_for(
+		doctype, name, action_type, modified, workflow_action, from_workflow_state
+	)
 	if not rejected:
 		return reason
 	if payload.get("user_asked_again") is True:
@@ -513,7 +525,8 @@ def _check_rejected(
 
 	note = wrap(rejected.decision_note or "", "approver note")
 	raise ToolDenied(
-		f"An approver already rejected this {action_type.lower()} proposal for {doctype} {name}, "
+		f"An approver already rejected this {(workflow_action or action_type).lower()} proposal "
+		f"for {doctype} {name}, "
 		f"and the document has not changed since. The approver wrote: {note} "
 		"Tell the user what the approver said. Propose it again with user_asked_again set "
 		"to true only if the user asks you to."
@@ -870,6 +883,7 @@ TOOLS = [
 					"type": "string",
 					"description": "Why this action should be applied, in your own words. Required.",
 				},
+				"user_asked_again": USER_ASKED_AGAIN,
 			},
 			"required": ["doctype", "name", "action", "reason"],
 		},
