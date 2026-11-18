@@ -51,7 +51,7 @@ from frappe_agents.harness.provider_events import (
 )
 from frappe_agents.harness.tools import AgentTool, AgentToolResult
 from frappe_agents.model_profiles import check_profile
-from frappe_agents.redaction import EventRedactor
+from frappe_agents.redaction import EventRedactor, body_withheld
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
@@ -647,8 +647,7 @@ class RunEvents:
 			frappe.logger("frappe_agents").error(
 				f"could not redact event {payload.get('seq')} of run {self.run.name}", exc_info=True
 			)
-			kept = ("type", "seq", "toolCallId", "toolName")
-			return {key: payload[key] for key in kept if key in payload}
+			return body_withheld(payload)
 
 	def failure(self, max_turns: int) -> str:
 		"""Why a run ended without an answer.

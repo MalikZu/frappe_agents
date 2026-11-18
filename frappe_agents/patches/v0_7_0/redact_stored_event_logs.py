@@ -29,7 +29,7 @@ behind it, not tool code.
 
 import frappe
 
-from frappe_agents.redaction import EventRedactor
+from frappe_agents.redaction import EventRedactor, body_withheld
 
 BATCH = 200
 
@@ -65,11 +65,7 @@ def redact_row(name: str, raw: str | None, output: str | None = None, error: str
 		return False
 
 	redactor = EventRedactor()
-	try:
-		redacted = [redactor.event(event) if isinstance(event, dict) else event for event in events]
-	except Exception:
-		frappe.logger("frappe_agents").error(f"could not redact the event log of run {name}", exc_info=True)
-		return False
+	redacted = [_redacted(redactor, name, event) if isinstance(event, dict) else event for event in events]
 
 	values = {}
 	if redacted != events:
@@ -83,3 +79,18 @@ def redact_row(name: str, raw: str | None, output: str | None = None, error: str
 
 	frappe.db.set_value("Agent Run", name, values, update_modified=False)
 	return True
+
+
+def _redacted(redactor: EventRedactor, name: str, event: dict) -> dict:
+	"""One stored event, redacted.
+
+	Fails closed, like the live path: an event the redactor cannot read keeps
+	what it was and when, and loses its body.
+	"""
+	try:
+		return redactor.event(event)
+	except Exception:
+		frappe.logger("frappe_agents").error(
+			f"could not redact event {event.get('seq')} of run {name}", exc_info=True
+		)
+		return body_withheld(event)
