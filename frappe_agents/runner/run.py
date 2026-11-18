@@ -255,6 +255,11 @@ def execute_run(run_name: str) -> None:
 		run = frappe.get_doc("Agent Run", run_name)
 		run.flags.ignore_permissions = True
 		_execute(run)
+	except KillSwitchActive as exc:
+		# Thrown out of a tool call the runtime made itself — a triggered run's
+		# read or write. The switch stopped the run; nothing went wrong in it.
+		if run is not None:
+			_fail(run, str(exc), status="Cancelled")
 	except Exception as exc:
 		frappe.logger("frappe_agents").error(f"run {run_name} failed", exc_info=True)
 		if run is not None:
