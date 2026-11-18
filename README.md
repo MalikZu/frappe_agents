@@ -119,6 +119,8 @@ before every request. Redirects are never followed.
   Review Quality report is actually telling you.
 - [Document extraction](docs/extraction.md) — an attachment becomes a draft, and
   the sensitive-field gate that holds payment details back.
+- [Agent triggers](docs/triggers.md) — an agent that runs when a file is
+  attached or a field changes, and writes one field, as the person who acted.
 
 **Running it**
 

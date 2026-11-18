@@ -18,6 +18,10 @@ An agent runs one of two ways, set by **Run As** on the Agent:
   yourself. It is still a real user with real permissions; there is no mode in
   which a run is unbound.
 
+A run that a [trigger](triggers.md) starts is bound the same way, to the person
+whose save or upload fired it. Its model holds no tools, and the runtime writes
+its answer into one field.
+
 A run refuses to start as nobody, as Administrator or Guest, or as a user who is
 disabled or missing. It fails on the Agent Run rather than falling back to
 anything wider.
