@@ -54,6 +54,18 @@ agent_tools = [
 	"frappe_agents.tools.builder_tools",
 ]
 
+# Document events
+# ---------------
+
+# Agent Triggers. One hook on every doctype: it looks the doctype up in a cached
+# index and returns at once when no trigger watches it. Inserts arrive here too,
+# with `flags.in_insert` set, and so do attachments, as File saves.
+doc_events = {
+	"*": {
+		"on_update": "frappe_agents.triggers.dispatch.on_update",
+	},
+}
+
 # Scheduled jobs
 # --------------
 

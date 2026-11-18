@@ -1,0 +1,217 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:trigger_name",
+ "creation": "2026-11-18 00:00:00.000000",
+ "description": "Runs an agent when a document event happens, and writes its result into one field of that document.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "trigger_name",
+  "enabled",
+  "agent",
+  "column_break_main",
+  "document_type",
+  "event",
+  "section_input",
+  "source_field",
+  "file_extensions",
+  "conditions",
+  "section_output",
+  "writes",
+  "instruction",
+  "target_field",
+  "only_if_empty",
+  "section_limits",
+  "max_runs_per_hour",
+  "max_runs_per_user_per_hour",
+  "column_break_limits",
+  "daily_token_budget",
+  "activity"
+ ],
+ "fields": [
+  {
+   "fieldname": "trigger_name",
+   "fieldtype": "Data",
+   "label": "Trigger Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
+  {
+   "description": "The agent that runs. It must run as Session User and have Draft autonomy.",
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Agent",
+   "options": "Agent",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "document_type",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Document Type",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "default": "Attachment Added",
+   "fieldname": "event",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Event",
+   "options": "Attachment Added\nField Changed\nDocument Inserted",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_input",
+   "fieldtype": "Section Break",
+   "label": "What the Agent Reads"
+  },
+  {
+   "depends_on": "eval:doc.event!='Attachment Added'",
+   "description": "Fieldname the agent reads. For Field Changed, a change to this field fires the trigger.",
+   "fieldname": "source_field",
+   "fieldtype": "Data",
+   "label": "Source Field",
+   "mandatory_depends_on": "eval:doc.event!='Attachment Added'"
+  },
+  {
+   "depends_on": "eval:doc.event=='Attachment Added'",
+   "description": "Comma-separated, for example: pdf, png, jpg. Empty means any file the agent can read.",
+   "fieldname": "file_extensions",
+   "fieldtype": "Data",
+   "label": "File Extensions"
+  },
+  {
+   "description": "Every condition must hold on the document, or the trigger does not fire.",
+   "fieldname": "conditions",
+   "fieldtype": "Table",
+   "label": "Conditions",
+   "options": "Agent Trigger Condition"
+  },
+  {
+   "fieldname": "section_output",
+   "fieldtype": "Section Break",
+   "label": "What the Trigger Writes"
+  },
+  {
+   "default": "Agent Answer",
+   "description": "Agent Answer: the model reads the input and answers. File Text: the file's text is copied as read, with no model call for a PDF that has a text layer.",
+   "fieldname": "writes",
+   "fieldtype": "Select",
+   "label": "Writes",
+   "options": "Agent Answer\nFile Text",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.writes=='Agent Answer'",
+   "description": "What the agent does with the input. The answer is written into the target field as it is.",
+   "fieldname": "instruction",
+   "fieldtype": "Long Text",
+   "label": "Instruction",
+   "mandatory_depends_on": "eval:doc.writes=='Agent Answer'"
+  },
+  {
+   "description": "Fieldname the result is written to. Small Text, Text, Long Text, Text Editor, Markdown Editor or Select.",
+   "fieldname": "target_field",
+   "fieldtype": "Data",
+   "label": "Target Field",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "description": "Write only when the target field is empty, so a person's edit is never overwritten.",
+   "fieldname": "only_if_empty",
+   "fieldtype": "Check",
+   "label": "Only If Empty"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_limits",
+   "fieldtype": "Section Break",
+   "label": "Limits"
+  },
+  {
+   "default": "30",
+   "description": "Across all users. Events past the limit are skipped and counted.",
+   "fieldname": "max_runs_per_hour",
+   "fieldtype": "Int",
+   "label": "Max Runs Per Hour",
+   "non_negative": 1
+  },
+  {
+   "default": "10",
+   "fieldname": "max_runs_per_user_per_hour",
+   "fieldtype": "Int",
+   "label": "Max Runs Per User Per Hour",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_limits",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Tokens this trigger may spend per day. Empty means only the agent's own budget applies.",
+   "fieldname": "daily_token_budget",
+   "fieldtype": "Int",
+   "label": "Daily Token Budget",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "activity",
+   "fieldtype": "HTML",
+   "label": "Activity"
+  }
+ ],
+ "icon": "zap",
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-18 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Trigger",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Agent Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Agent Auditor"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
