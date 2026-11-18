@@ -13,9 +13,12 @@ tests' rows ride implicit DDL commits and survive rollback, so an unscoped count
 would depend on which tests ran first.
 """
 
+from unittest.mock import patch
+
 import frappe
 
 from frappe_agents.access.grants import exposed_tool_names
+from frappe_agents.context.slices import has_row_permission_hook
 from frappe_agents.tests.fixtures import (
 	DRAFT_USER,
 	IBAN_FIELD,
@@ -26,6 +29,7 @@ from frappe_agents.tests.fixtures import (
 	PROJECT_BETA,
 	RESTRICTED_USER,
 	SECOND_DRAFTER,
+	SECRET_SCORE_FIELD,
 	TICKET_DT,
 	VENDOR_DT,
 	AgentTestCase,
@@ -97,6 +101,28 @@ class TestSearchPaging(CountTestCase):
 		self.assertFalse(first_names & second_names)
 		self.assertEqual(first_names | second_names, created)
 
+	def test_paging_through_ties_skips_and_repeats_nothing(self):
+		"""Every row sorts the same. Only the name tiebreak keeps the pages apart."""
+		created = {self.order(DRAFT_USER, 50) for _ in range(5)}
+		args = {
+			"doctype": ORDER_DT,
+			"fields": ["name"],
+			"filters": self.scope,
+			"order_by": "amount asc",
+			"limit": 2,
+		}
+
+		seen: list[str] = []
+		start = 0
+		with as_user(OPEN_USER):
+			while start is not None:
+				page = search_documents(dict(args, start=start))
+				seen += [row["name"] for row in page["rows"]]
+				start = page["next_start"]
+
+		self.assertEqual(len(seen), len(created), seen)
+		self.assertEqual(set(seen), created)
+
 	def test_a_page_no_longer_calls_itself_a_count(self):
 		"""'count' read as a total and was the page size. It is gone."""
 		self.order(DRAFT_USER, 10)
@@ -144,13 +170,19 @@ class TestCounts(CountTestCase):
 		self.assertEqual(result["total"]["count"], 5)
 
 	def test_sum_on_a_number_field(self):
-		result = self.summarize(OPEN_USER, group_by=["owner"], aggregates=[{"fn": "sum", "field": "amount"}])
+		result = self.summarize(
+			OPEN_USER,
+			group_by=["owner"],
+			aggregates=[{"fn": "sum", "field": "amount"}],
+			filters={"owner": ["in", [DRAFT_USER, "Administrator"]]},
+		)
 
 		rows = self.by(result, "owner")
 		self.assertEqual(rows[DRAFT_USER]["sum_amount"], 100)
 		self.assertEqual(rows["Administrator"]["sum_amount"], 600)
 		self.assertEqual(rows[DRAFT_USER]["count"], 4)
-		self.assertEqual(result["total"]["sum_amount"], 1700)
+		self.assertEqual(result["total"]["sum_amount"], 700)
+		self.assertFalse(result["total"]["suppressed"])
 		self.assertEqual(result["columns"], ["owner", "sum_amount", "count"])
 		self.assertEqual(result["rows"][0]["owner"], "Administrator", "ordered by the first aggregate")
 
@@ -171,6 +203,32 @@ class TestCounts(CountTestCase):
 		self.assertEqual(rows[DRAFT_USER]["max_amount"], 40)
 		self.assertFalse(rows[DRAFT_USER]["suppressed"])
 		self.assertEqual(result["suppressed_groups"], 1)
+
+	def test_a_suppressed_group_withholds_the_totals_values_too(self):
+		"""Total less the groups on show is the held-back group. So the total goes quiet."""
+		result = self.summarize(
+			OPEN_USER,
+			group_by=["owner"],
+			aggregates=[{"fn": "sum", "field": "amount"}, {"fn": "max", "field": "amount"}],
+		)
+
+		self.assertEqual(result["total"]["count"], 8)
+		self.assertIsNone(result["total"]["sum_amount"])
+		self.assertIsNone(result["total"]["max_amount"])
+		self.assertTrue(result["total"]["suppressed"])
+
+	def test_a_small_set_with_no_group_is_suppressed(self):
+		result = self.summarize(
+			OPEN_USER,
+			aggregates=[{"fn": "sum", "field": "amount"}],
+			filters={"owner": SECOND_DRAFTER},
+		)
+
+		self.assertEqual(result["rows"][0]["count"], 1)
+		self.assertIsNone(result["rows"][0]["sum_amount"])
+		self.assertTrue(result["rows"][0]["suppressed"])
+		self.assertIsNone(result["total"]["sum_amount"])
+		self.assertTrue(result["total"]["suppressed"])
 
 	def test_a_small_group_does_not_keep_its_rank(self):
 		"""The one 1000 order would sort first by sum. Its place would give it away."""
@@ -236,6 +294,27 @@ class TestRefusals(CountTestCase):
 		"""Counting under a filter asks 'how many have this value' — one guess at a time."""
 		self.assertRefused(OPEN_USER, filters={IBAN_FIELD: ["like", "AE07%"]})
 
+	def test_a_total_over_a_number_above_the_permlevel_is_refused(self):
+		for fn in ("sum", "max"):
+			with self.subTest(fn=fn), as_user(RESTRICTED_USER), self.assertRaises(ToolDenied):
+				summarize_documents(
+					{"doctype": TICKET_DT, "aggregates": [{"fn": fn, "field": SECRET_SCORE_FIELD}]}
+				)
+		# The same total, for a user who may read the field, is a total like any other.
+		with as_user(OPEN_USER):
+			summarize_documents(
+				{"doctype": TICKET_DT, "aggregates": [{"fn": "sum", "field": SECRET_SCORE_FIELD}]}
+			)
+
+	def test_a_filter_on_a_password_field_is_refused(self):
+		self.assertRefused(OPEN_USER, filters={PASSWORD_FIELD: "hunter2"})
+
+	def test_a_filter_on_a_masked_field_is_refused(self):
+		if not masking_supported():
+			self.skipTest("this Frappe version does not mask fields")
+		with as_user(DRAFT_USER), self.assertRaises(ToolDenied):
+			summarize_documents({"doctype": VENDOR_DT, "filters": {IBAN_FIELD: ["like", "AE07%"]}})
+
 	def test_a_masked_field_is_not_a_group(self):
 		if not masking_supported():
 			self.skipTest("this Frappe version does not mask fields")
@@ -247,6 +326,31 @@ class TestRefusals(CountTestCase):
 		with self.assertRaises(ToolDenied) as caught:
 			summarize_documents({"doctype": "ToDo", "group_by": ["allocated_to"]})
 		self.assertIn("search_documents", str(caught.exception))
+
+	def test_a_wildcard_row_hook_counts_as_a_row_hook(self):
+		"""A has_permission hook on '*' runs for every doctype, so every doctype has one."""
+		real = frappe.get_hooks
+
+		def hooks(hook=None, *args, **kwargs):
+			if hook == "has_permission":
+				return {"*": ["some_app.permissions.has_permission"]}
+			return real(hook, *args, **kwargs)
+
+		with patch("frappe.get_hooks", side_effect=hooks):
+			self.assertTrue(has_row_permission_hook(ORDER_DT))
+			self.assertRefused(OPEN_USER)
+
+	def test_a_hook_lookup_that_fails_refuses(self):
+		real = frappe.get_hooks
+
+		def hooks(hook=None, *args, **kwargs):
+			if hook == "has_permission":
+				raise RuntimeError("hooks unavailable")
+			return real(hook, *args, **kwargs)
+
+		with patch("frappe.get_hooks", side_effect=hooks):
+			self.assertTrue(has_row_permission_hook(ORDER_DT))
+			self.assertRefused(OPEN_USER)
 
 	def test_too_many_groups_are_refused(self):
 		self.assertRefused(OPEN_USER, ValueError, group_by=["owner", "project", "docstatus"])
@@ -267,6 +371,24 @@ class TestGrant(CountTestCase):
 		payload, _ = call_tool(OPEN_USER, "summarize_documents", {"doctype": ORDER_DT}, agent=agent.name)
 		self.assertFalse(payload["ok"])
 		self.assertIn("no access rule", payload["error"])
+
+	def test_a_rule_cap_narrows_the_groups(self):
+		for user in (DRAFT_USER, SECOND_DRAFTER):
+			self.order(user, 10)
+		agent = make_matrix_agent([rule(ORDER_DT, can_read=1, max_rows_per_call=1)], autonomy="Suggest")
+
+		payload, _ = call_tool(
+			OPEN_USER,
+			"summarize_documents",
+			{"doctype": ORDER_DT, "filters": self.scope, "group_by": ["owner"], "limit": 50},
+			agent=agent.name,
+		)
+
+		self.assertTrue(payload["ok"], payload["error"])
+		self.assertEqual(payload["result"]["limit"], 1)
+		self.assertEqual(payload["result"]["returned"], 1)
+		self.assertTrue(payload["result"]["truncated"])
+		self.assertEqual(payload["result"]["total"]["count"], 2)
 
 	def test_a_read_rule_allows_it(self):
 		self.order(DRAFT_USER, 10)

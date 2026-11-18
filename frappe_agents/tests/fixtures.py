@@ -137,6 +137,8 @@ IBAN_FIELD = "iban"
 # A Password field, sensitive because of its fieldtype rather than because
 # anybody configured it. Nothing marks it in Agent Settings.
 PASSWORD_FIELD = "portal_password"
+# A number only the permlevel role may read: what a total must not reach around.
+SECRET_SCORE_FIELD = "secret_score"
 # What the master record says, and what a redirected invoice would print instead.
 # They differ in the account digits alone — the difference a reviewer cannot see
 # by reading and a comparison catches every time.
@@ -309,6 +311,7 @@ def ensure_fixtures() -> None:
 	_ensure_read_only_roles()
 	_ensure_order_permissions()
 	_ensure_extraction_fields()
+	_ensure_summary_fields()
 	_ensure_report()
 	_ensure_users()
 	_ensure_records()
@@ -1403,6 +1406,18 @@ def _ensure_extraction_fields() -> None:
 				"options": VENDOR_DT,
 			},
 		],
+	)
+
+
+def _ensure_summary_fields() -> None:
+	"""A number above permlevel 0, so a total over it can be refused.
+
+	The only permlevel 1 fields elsewhere are text, and a sum over text is refused
+	for being text before the permlevel is ever asked.
+	"""
+	_append_fields(
+		TICKET_DT,
+		[{"fieldname": SECRET_SCORE_FIELD, "fieldtype": "Int", "label": "Secret Score", "permlevel": 1}],
 	)
 
 
