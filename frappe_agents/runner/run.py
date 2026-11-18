@@ -360,7 +360,7 @@ async def _drive(
 	# What a tool call turned out to be, keyed by call id. The event models forbid
 	# extra fields, so an outcome cannot travel on the event itself.
 	outcomes: dict[str, bool] = {}
-	tools = _tools(run, cancellation, agent, outcomes)
+	tools = _tools(run, cancellation, agent, outcomes, events.redactor)
 	names = {tool.name for tool in tools}
 
 	async def before_tool_call(call: Any) -> tuple[bool, str | None]:
@@ -708,7 +708,13 @@ def _check_kill_switch(cancellation: RunCancellation) -> None:
 		cancellation.cancel(KILL_SWITCH_MESSAGE)
 
 
-def _tools(run: Any, cancellation: RunCancellation, agent: Any, outcomes: dict[str, bool]) -> list[AgentTool]:
+def _tools(
+	run: Any,
+	cancellation: RunCancellation,
+	agent: Any,
+	outcomes: dict[str, bool],
+	redactor: EventRedactor | None = None,
+) -> list[AgentTool]:
 	"""The agent's tools, in the shape the loop holds them.
 
 	The schemas are the same ones the model has always been sent. Only the
@@ -723,13 +729,19 @@ def _tools(run: Any, cancellation: RunCancellation, agent: Any, outcomes: dict[s
 				label=name,
 				description=schema.get("description") or "",
 				parameters=schema.get("args_schema") or {},
-				execute_fn=_executor(run, cancellation, name, outcomes),
+				execute_fn=_executor(run, cancellation, name, outcomes, redactor),
 			)
 		)
 	return tools
 
 
-def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict[str, bool]) -> Any:
+def _executor(
+	run: Any,
+	cancellation: RunCancellation,
+	name: str,
+	outcomes: dict[str, bool],
+	redactor: EventRedactor | None = None,
+) -> Any:
 	"""One tool's executor: `execute_tool` and nothing else.
 
 	`execute_tool` stays the only thing that runs a tool, so the capability gate,
@@ -743,6 +755,7 @@ def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict
 		try:
 			result, content = _call_tool(run, cancellation, name, args)
 			outcomes[tool_call_id] = bool(result.get("ok"))
+			_record_result(redactor, tool_call_id, args, result, content)
 			return AgentToolResult(content=[TextContent(text=content)])
 		except asyncio.CancelledError:
 			# The one path `execute_tool` cannot write its own row on: the call is
@@ -754,6 +767,24 @@ def _executor(run: Any, cancellation: RunCancellation, name: str, outcomes: dict
 			raise
 
 	return execute
+
+
+def _record_result(redactor: Any, tool_call_id: str, args: dict, result: dict, content: str) -> None:
+	"""Hand the log's redactor the result while it is still a structure.
+
+	`content` may be cut at the model's limit, and a cut JSON string cannot be
+	redacted by key with certainty. If this fails, the log keeps the marker in
+	place of the result rather than the result.
+	"""
+	if redactor is None:
+		return
+	try:
+		redactor.record_result(tool_call_id, args, result, content, _tool_content)
+	except Exception:
+		frappe.logger("frappe_agents").error(
+			f"could not redact the result of tool call {tool_call_id}", exc_info=True
+		)
+		redactor.hold_back_result(tool_call_id, content)
 
 
 def _call_tool(run: Any, cancellation: RunCancellation, name: str, args: dict) -> tuple[dict, str]:

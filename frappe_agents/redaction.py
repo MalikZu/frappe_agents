@@ -31,6 +31,18 @@ FALLBACK_SENSITIVE_KEYS = frozenset({"password", "api_key", "token", "secret"})
 # corrupt the sentence that tells an auditor what happened.
 SCRUB_MIN_LENGTH = 4
 
+# The keys of one version change, whose values belong to the field it names.
+CHANGE_VALUE_KEYS = ("from", "to")
+
+# Authored text as the read tools hand it over. See `frappe_agents.context.untrusted`.
+_UNTRUSTED = re.compile(r'<untrusted source="[^"]*">(.*)</untrusted>', re.DOTALL)
+
+# What a stored result says when its value was cut at a sensitive key.
+CUT_NOTE = "\n... (truncated)"
+
+# A doctype named anywhere in a result's JSON text, for a result whose call is unknown.
+_DOCTYPE = re.compile(r'"doctype"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
 
 def sensitive_keys(payload: Any) -> set[str]:
 	"""Argument keys whose values must not become audit content, lowercased.
@@ -121,9 +133,10 @@ def redact(value: Any, keys: set[str]) -> tuple[Any, set[str]]:
 
 def _walk(value: Any, keys: set[str], secrets: set[str]) -> Any:
 	if isinstance(value, dict):
+		changed = _changed_field_is_sensitive(value, keys)
 		clean = {}
 		for key, item in value.items():
-			if isinstance(key, str) and key.lower() in keys:
+			if isinstance(key, str) and (key.lower() in keys or (changed and key in CHANGE_VALUE_KEYS)):
 				_collect(item, secrets)
 				clean[key] = REDACTED
 				continue
@@ -134,10 +147,35 @@ def _walk(value: Any, keys: set[str], secrets: set[str]) -> Any:
 	return value
 
 
+def _changed_field_is_sensitive(value: dict, keys: set[str]) -> bool:
+	"""Whether this is a version change of a sensitive field.
+
+	A version names the field as a value — `{"field": "iban", "from": ..., "to":
+	...}` — so a walk by key alone never sees it. A child-row change is named
+	`items[0].iban`; the field is the part after the last dot.
+	"""
+	field = value.get("field")
+	if not isinstance(field, str) or not any(key in value for key in CHANGE_VALUE_KEYS):
+		return False
+	return field.rsplit(".", 1)[-1].lower() in keys
+
+
 def _collect(value: Any, secrets: set[str]) -> None:
-	"""Every string under a redacted key, so prose can be scrubbed of it later."""
+	"""Every value under a redacted key, as text, so prose can be scrubbed of it later.
+
+	Numbers count: a salary is a secret whatever its type. A value wrapped as
+	untrusted text is also kept without its wrapper, because that is the form a
+	model repeats it in.
+	"""
+	if isinstance(value, bool) or value is None:
+		return
 	if isinstance(value, str):
 		secrets.add(value)
+		unwrapped = _UNTRUSTED.fullmatch(value)
+		if unwrapped:
+			secrets.add(unwrapped.group(1))
+	elif isinstance(value, (int, float)):
+		secrets.add(str(value))
 	elif isinstance(value, dict):
 		for item in value.values():
 			_collect(item, secrets)
@@ -180,6 +218,29 @@ class EventRedactor:
 		self.calls: dict[str, tuple[set[str], set[str]]] = {}
 		# Every value held back so far, for the prose the model writes later.
 		self.secrets: set[str] = set()
+		# Tool-call id -> (the text the model was handed, the text the log keeps).
+		self.results: dict[str, tuple[str, str]] = {}
+
+	def record_result(self, call_id: str, args: Any, result: Any, raw_text: str, serialise: Any) -> None:
+		"""Redact a tool's result while it is still a structure.
+
+		The text the model is handed is cut at its limit, and a cut JSON string can
+		no longer be redacted by key with certainty. So the executor hands the result
+		over before it is serialised: it is redacted here and serialised the same
+		way, and the log keeps that text wherever the model's text appears.
+		"""
+		keys = sensitive_keys(args)
+		clean, secrets = redact(result, keys)
+		self._remember(call_id, keys, secrets)
+		self.results[call_id] = (raw_text, serialise(clean))
+
+	def hold_back_result(self, call_id: str, raw_text: str) -> None:
+		"""A result that could not be redacted is stored as the marker alone."""
+		self.results[call_id] = (raw_text, REDACTED)
+
+	def scrub(self, text: str | None) -> str | None:
+		"""Prose with every value held back in this run taken out of it."""
+		return scrub(text, self.secrets)
 
 	def event(self, payload: dict) -> dict:
 		"""One event as it may be stored."""
@@ -219,7 +280,8 @@ class EventRedactor:
 		"""A tool result: its text blocks and its details."""
 		if not isinstance(result, dict):
 			return result
-		keys, _ = self._call(call_id)
+		keys = self._result_keys(call_id, result)
+		raw_text, stored_text = self.results.get(call_id) or (None, None)
 		found: set[str] = set()
 		if "details" in result:
 			result["details"], details_secrets = redact(result["details"], keys)
@@ -227,13 +289,34 @@ class EventRedactor:
 		blocks = result.get("content")
 		if isinstance(blocks, list):
 			for block in blocks:
-				if isinstance(block, dict) and isinstance(block.get("text"), str):
-					block["text"], text_secrets = redact_json_text(block["text"], keys)
-					found |= text_secrets
+				if not isinstance(block, dict) or not isinstance(block.get("text"), str):
+					continue
+				if raw_text is not None and block["text"] == raw_text:
+					block["text"] = stored_text
+					continue
+				block["text"], text_secrets = redact_json_text(block["text"], keys)
+				found |= text_secrets
 		self._remember(call_id, keys, found)
 		_, secrets = self._call(call_id)
 		self._scrub_blocks(blocks, secrets)
 		return result
+
+	def _result_keys(self, call_id: Any, result: dict) -> set[str]:
+		"""The keys to redact a result by.
+
+		Known from the call's arguments when the log still holds them. When it does
+		not — the call was dropped from the middle of a long log — the doctype the
+		result itself names is the next best answer, and the fallback names the last.
+		"""
+		if call_id in self.calls:
+			return self.calls[call_id][0]
+		keys = set(FALLBACK_SENSITIVE_KEYS)
+		for block in result.get("content") or []:
+			text = block.get("text") if isinstance(block, dict) else None
+			found = _DOCTYPE.search(text) if isinstance(text, str) else None
+			if found:
+				keys |= sensitive_keys({"doctype": json.loads(f'"{found.group(1)}"')})
+		return keys
 
 	def _message(self, message: Any) -> Any:
 		if not isinstance(message, dict):
@@ -269,24 +352,18 @@ class EventRedactor:
 					block[field] = scrub(block[field], secrets)
 
 
-def redact_events(events: list) -> list:
-	"""A whole stored log's events, redacted in order — for logs written before this."""
-	redactor = EventRedactor()
-	return [redactor.event(event) if isinstance(event, dict) else event for event in events]
-
-
 def redact_json_text(text: str, keys: set[str]) -> tuple[str, set[str]]:
 	"""Text that holds a tool's JSON result, with sensitive values held back.
 
 	A tool result reaches the model as JSON text, so it is redacted by key like
 	any other result. Text that is left unchanged keeps every byte it had. Text
-	that does not parse — a result cut short at the model's limit — is redacted
-	by pattern instead, which finds the same keys with string values.
+	that does not parse — a result cut short at the model's limit — is scanned
+	instead, see `_redact_json_scan`.
 	"""
 	try:
 		parsed = json.loads(text)
 	except ValueError:
-		return _redact_json_pattern(text, keys)
+		return _redact_json_scan(text, keys)
 	if not isinstance(parsed, (dict, list)):
 		return text, set()
 	clean, secrets = redact(parsed, keys)
@@ -295,18 +372,48 @@ def redact_json_text(text: str, keys: set[str]) -> tuple[str, set[str]]:
 	return frappe.as_json(clean), secrets
 
 
-def _redact_json_pattern(text: str, keys: set[str]) -> tuple[str, set[str]]:
+def _redact_json_scan(text: str, keys: set[str]) -> tuple[str, set[str]]:
+	"""JSON text that does not parse, with the value of every sensitive key held back.
+
+	It reads the text string by string, so a key is only ever a key and never a
+	piece of some other value. A value under a sensitive key is held back whatever
+	its type — string, number, object. A value the cut lands inside runs to the
+	end of the text, so everything from its start is held back: fail closed.
+	"""
 	if not keys:
 		return text, set()
-	names = "|".join(re.escape(key) for key in sorted(keys))
-	pattern = re.compile(rf'("(?:{names})"\s*:\s*)"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
+	decoder = json.JSONDecoder()
 	secrets: set[str] = set()
-
-	def hold_back(match: re.Match) -> str:
+	out: list[str] = []
+	copied = at = 0
+	while True:
+		at = text.find('"', at)
+		if at < 0:
+			break
 		try:
-			secrets.add(json.loads(f'"{match.group(2)}"'))
+			name, end = json.decoder.scanstring(text, at + 1)
 		except ValueError:
-			secrets.add(match.group(2))
-		return f'{match.group(1)}"{REDACTED}"'
-
-	return pattern.sub(hold_back, text), secrets
+			# The cut is inside a string. If it was a value, its key was handled.
+			break
+		colon = end
+		while colon < len(text) and text[colon] in " \t\r\n":
+			colon += 1
+		if colon >= len(text) or text[colon] != ":" or name.lower() not in keys:
+			at = end
+			continue
+		start = colon + 1
+		while start < len(text) and text[start] in " \t\r\n":
+			start += 1
+		out.append(text[copied:start])
+		try:
+			value, stop = decoder.raw_decode(text, start)
+		except ValueError:
+			# The value runs into the cut. None of it is kept.
+			secrets.add(text[start:].strip().strip('"'))
+			out.append(f'"{REDACTED}"{CUT_NOTE}')
+			return "".join(out), secrets - {""}
+		_collect(value, secrets)
+		out.append(f'"{REDACTED}"')
+		copied = at = stop
+	out.append(text[copied:])
+	return "".join(out), secrets
