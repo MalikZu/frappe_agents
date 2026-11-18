@@ -354,7 +354,7 @@ function $diff_cell(row, value, extra_class) {
 	return $cell.text(text);
 }
 
-function $diff_table(diff) {
+function $diff_table(diff, pending) {
 	const $table = $("<table class='agent-action-diff'></table>");
 	const $head = $("<tr></tr>").appendTo($("<thead></thead>").appendTo($table));
 	[__("Field"), __("When proposed"), __("Now"), __("Proposed")].forEach((title) =>
@@ -374,7 +374,8 @@ function $diff_table(diff) {
 		$row.append($diff_cell(row, row.before));
 		$row.append($diff_cell(row, row.now));
 		$row.append($diff_cell(row, row.proposed, "is-proposed"));
-		if (row.changed_since) $row.addClass("is-changed");
+		// Only a pending proposal can still fail on it; afterwards "now" is history.
+		if (pending && row.changed_since) $row.addClass("is-changed");
 	});
 	return $table;
 }
@@ -388,7 +389,17 @@ function render_update(frm, $body) {
 			.appendTo($body);
 		return;
 	}
-	if (diff.changed_since) {
+	const pending = frm.doc.status === "Pending";
+	if (pending && diff.unreadable) {
+		$("<div class='agent-action-note is-warning'></div>")
+			.text(
+				__(
+					"You are not allowed to read every field in this change, so you cannot approve it. Another approver has to decide it."
+				)
+			)
+			.appendTo($body);
+	}
+	if (pending && diff.changed_since) {
 		$("<div class='agent-action-note is-danger'></div>")
 			.text(
 				__(
@@ -404,7 +415,7 @@ function render_update(frm, $body) {
 			)
 		)
 		.appendTo($body);
-	$body.append($diff_table(diff));
+	$body.append($diff_table(diff, pending));
 }
 
 function fetch_diff(frm) {
@@ -536,8 +547,19 @@ function send_approval(frm, expected_modified, note) {
 		args: args,
 		freeze: true,
 		freeze_message: __("Applying the action…"),
-		callback: () => {
-			frappe.show_alert({ message: __("Action applied"), indicator: "green" });
+		callback: (r) => {
+			const result = (r && r.message) || {};
+			if (result.status === "Failed") {
+				// A refusal by the document's own rules is recorded without its detail,
+				// which may quote values. The approver, who may read them, sees it here.
+				frappe.msgprint({
+					title: __("The action failed"),
+					message: frappe.utils.escape_html(result.detail || result.failure || ""),
+					indicator: "red",
+				});
+			} else {
+				frappe.show_alert({ message: __("Action applied"), indicator: "green" });
+			}
 			frm.reload_doc();
 		},
 		error: () => reload_after_refusal(frm, expected_modified),
@@ -608,7 +630,8 @@ function set_actions(frm) {
 	// A field that moved since the proposal makes the approval fail on the server.
 	// Offering the button anyway would only invite a click that cannot succeed.
 	const diff = frm.__fa.diff;
-	const blocked = frm.doc.action_type === "Update" && (!diff || diff.changed_since);
+	// Nor to an approver who cannot read every field: they would be approving blind.
+	const blocked = frm.doc.action_type === "Update" && (!diff || diff.changed_since || diff.unreadable);
 	if (!blocked) frm.page.set_primary_action(__("Approve"), () => approve(frm));
 	frm.add_custom_button(__("Reject"), () => reject(frm));
 }
