@@ -126,7 +126,7 @@ before every request. Redirects are never followed.
   and upgrading.
 - [Troubleshooting](docs/troubleshooting.md) — what to check when an agent is
   silent, denied, or refusing a file.
-- [Built-in tools](docs/tools.md) — the sixteen tools, their capability
+- [Built-in tools](docs/tools.md) — the seventeen tools, their capability
   classes, and how to read a tool call.
 - [The agent harness](docs/harness.md) — the vendored run loop.
 
