@@ -458,13 +458,48 @@ class TestFillFromFile(FillTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self.record(started["extraction"], second.name)
 
-	def test_a_recorded_reading_cannot_be_recorded_again(self):
+	def test_recording_the_same_document_again_only_reports(self):
+		"""The save records the reading; the form's call after it asks how it went.
+
+		So a second record of the same reading against the same document answers
+		with what was recorded and changes nothing, stamps included.
+		"""
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+		order = self.save_order(**{IBAN_FIELD: ALTERED_IBAN})
+		first = self.record(extraction, order.name)
+		stored = frappe.db.get_value(
+			EXTRACTION, extraction, ["created_doc", "sensitive_flags", "modified"], as_dict=True
+		)
+
+		again = self.record(extraction, order.name)
+
+		self.assertEqual(again, first)
+		after = frappe.db.get_value(
+			EXTRACTION, extraction, ["created_doc", "sensitive_flags", "modified"], as_dict=True
+		)
+		self.assertEqual(after, stored)
+
+	def test_a_recorded_reading_cannot_be_tied_to_a_second_document(self):
+		"""One reading, one document. Anything else would let a reading vouch twice."""
 		extraction = self.read(extraction_reply(self.fields()))
-		order = self.save_order()
-		self.record(extraction, order.name)
+		first = self.save_order()
+		second = self.save_order()
+		self.record(extraction, first.name)
 
 		with self.assertRaises(frappe.ValidationError):
-			self.record(extraction, order.name)
+			self.record(extraction, second.name)
+
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "created_doc"), first.name)
+		self.assertFalse(
+			frappe.db.exists(
+				"File",
+				{
+					"file_url": self.file.file_url,
+					"attached_to_doctype": ORDER_DT,
+					"attached_to_name": second.name,
+				},
+			)
+		)
 
 	# --- housekeeping -------------------------------------------------------------
 
