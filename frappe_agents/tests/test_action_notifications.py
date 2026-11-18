@@ -16,6 +16,7 @@ Notifications ride beside the decision, never inside it. A failure to notify is
 an Error Log, and the decision stands.
 """
 
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import frappe
@@ -55,13 +56,28 @@ def notices(action: str, user: str | None = None) -> list[dict]:
 	return frappe.get_all(
 		"Notification Log",
 		filters=filters,
-		fields=["for_user", "from_user", "subject", "email_content", "type"],
+		fields=["for_user", "from_user", "subject", "type"],
 		order_by="creation asc",
 	)
 
 
 def recipients(action: str) -> set[str]:
 	return {row.for_user for row in notices(action)}
+
+
+@contextmanager
+def deny(user: str, right: str):
+	"""Take one right on every document away from one user, and nothing else."""
+	real = frappe.has_permission
+
+	def check(doctype=None, ptype="read", doc=None, user_=None, *args, **kwargs):
+		user_ = kwargs.pop("user", user_)
+		if user_ == user and ptype == right:
+			return False
+		return real(doctype, ptype, doc, user_, *args, **kwargs)
+
+	with patch("frappe.has_permission", side_effect=check):
+		yield
 
 
 class TestApproverNotifications(AgentTestCase):
@@ -76,32 +92,73 @@ class TestApproverNotifications(AgentTestCase):
 		self.assertEqual(rows[0].from_user, DRAFT_USER)
 		self.assertIn(order.name, rows[0].subject)
 
-	def test_the_requester_is_not_told(self):
+	# Each wall below is tested with a control: the same proposal, with only that
+	# wall lifted, does reach the approver. Without the control, a test that the
+	# approver was not told would pass just as well if nobody were ever told.
+
+	def pending(self, **values) -> str:
+		"""A Pending proposal APPROVER_USER could decide, written without notifying."""
+		order = make_order_draft(user=DRAFT_USER)
+		values.setdefault("requested_by", DRAFT_USER)
+		return make_action(target_name=order.name, **values).name
+
+	def told(self, action: str, user: str = APPROVER_USER) -> bool:
+		frappe.db.delete("Notification Log", {"document_type": "Agent Action", "document_name": action})
+		notify_approvers(action)
+		return user in recipients(action)
+
+	def test_the_control_proposal_reaches_the_approver(self):
+		self.assertTrue(self.told(self.pending()))
+
+	def test_an_approver_who_requested_it_is_not_told(self):
+		action = self.pending(requested_by=APPROVER_USER, run=make_run(effective_user=DRAFT_USER))
+
+		self.assertFalse(self.told(action))
+		with patch("frappe_agents.actions.separation_of_duties_block", return_value=None):
+			self.assertTrue(self.told(action))
+
+	def test_the_runs_effective_user_is_not_told(self):
+		action = self.pending(run=make_run(effective_user=APPROVER_USER))
+
+		self.assertFalse(self.told(action))
+		with patch("frappe_agents.actions.separation_of_duties_block", return_value=None):
+			self.assertTrue(self.told(action))
+
+	def test_the_agent_owner_is_not_told(self):
+		action = self.pending(agent=OWNED_AGENT)
+
+		self.assertFalse(self.told(action))
+		with patch("frappe_agents.actions.separation_of_duties_block", return_value=None):
+			self.assertTrue(self.told(action))
+
+	def test_an_approver_without_read_on_the_target_is_not_told(self):
+		action = self.pending()
+
+		with deny(APPROVER_USER, "read"):
+			self.assertFalse(self.told(action))
+
+	def test_an_approver_without_submit_is_not_told_about_a_submit(self):
+		action = self.pending()
+
+		with deny(APPROVER_USER, "submit"):
+			self.assertFalse(self.told(action))
+		with deny(APPROVER_USER, "cancel"):
+			self.assertTrue(self.told(action))
+
+	def test_an_approver_without_cancel_is_not_told_about_a_cancel(self):
+		action = self.pending(action_type="Cancel")
+
+		with deny(APPROVER_USER, "cancel"):
+			self.assertFalse(self.told(action))
+		with deny(APPROVER_USER, "submit"):
+			self.assertTrue(self.told(action))
+
+	def test_the_proposal_tool_tells_the_approver_and_not_the_requester(self):
 		order = make_order_draft(user=DRAFT_USER)
 		action = make_proposal(order.name, user=DRAFT_USER)
 
+		self.assertIn(APPROVER_USER, recipients(action))
 		self.assertNotIn(DRAFT_USER, recipients(action))
-
-	def test_an_approver_who_requested_it_is_not_told(self):
-		order = make_order_draft(user=APPROVER_USER)
-		action = make_proposal(order.name, user=APPROVER_USER)
-
-		self.assertNotIn(APPROVER_USER, recipients(action))
-
-	def test_the_agent_owner_is_not_told(self):
-		order = make_order_draft(user=DRAFT_USER)
-		action = make_proposal(order.name, user=DRAFT_USER, agent=OWNED_AGENT)
-
-		self.assertNotIn(APPROVER_USER, recipients(action))
-
-	def test_the_runs_effective_user_is_not_told(self):
-		order = make_order_draft(user=DRAFT_USER)
-		run = make_run(effective_user=APPROVER_USER)
-		action = make_action(run=run, requested_by=DRAFT_USER, target_name=order.name)
-
-		notify_approvers(action.name)
-
-		self.assertNotIn(APPROVER_USER, recipients(action.name))
 
 	def test_an_approver_who_cannot_read_the_target_is_not_told(self):
 		order = make_order_draft(user=DRAFT_USER)
@@ -121,7 +178,7 @@ class TestApproverNotifications(AgentTestCase):
 
 		rows = notices(action, APPROVER_USER)
 		self.assertEqual(len(rows), 1)
-		text = f"{rows[0].subject} {rows[0].email_content or ''}"
+		text = rows[0].subject
 		self.assertNotIn(REASON_MARKER, text)
 		self.assertNotIn(str(AMOUNT_MARKER), text)
 		self.assertNotIn("FA Widget", text)
@@ -192,7 +249,23 @@ class TestRequesterNotifications(AgentTestCase):
 		rows = self.requester_notices()
 		self.assertEqual(len(rows), 1)
 		self.assertIn("rejected", rows[0].subject)
-		self.assertIn("The quotation is not signed yet.", rows[0].email_content)
+		# The subject is all the bell shows, so the note has to be in it.
+		self.assertIn("The quotation is not signed yet.", rows[0].subject)
+
+	def test_a_long_note_is_cut_short_in_the_subject(self):
+		note = "word " * 150 + "TAIL-MARKER"
+		with as_user(APPROVER_USER):
+			reject_action(self.action, note=note)
+
+		subject = self.requester_notices()[0].subject
+		self.assertNotIn("TAIL-MARKER", subject)
+		self.assertIn("…", subject)
+
+	def test_the_note_is_escaped(self):
+		with as_user(APPROVER_USER):
+			reject_action(self.action, note="<img src=x onerror=alert(1)>")
+
+		self.assertNotIn("<img", self.requester_notices()[0].subject)
 
 	def test_a_failed_approval_tells_the_requester(self):
 		# Submitted behind the proposal's back, so the apply finds no draft.
@@ -208,11 +281,20 @@ class TestRequesterNotifications(AgentTestCase):
 		self.assertIn("failed", rows[0].subject)
 
 	def test_the_decider_is_not_told(self):
-		with as_user(APPROVER_USER):
-			reject_action(self.action, note="No.")
+		"""Alert is a type frappe delivers even to its own sender, so this filter is ours.
 
-		# The approver's notice is the one from the proposal; the decision adds none.
-		self.assertEqual(len(notices(self.action, APPROVER_USER)), 1)
+		Separation of duties keeps the decider and the requester apart in real use,
+		so it is lifted here: the requester decides their own proposal, and the only
+		thing that keeps a notice from reaching them is the decider filter.
+		"""
+		with (
+			patch("frappe_agents.actions.separation_of_duties_block", return_value=None),
+			as_user(DRAFT_USER),
+		):
+			reject_action(self.action, note="Withdrawn.")
+
+		self.assertEqual(frappe.db.get_value("Agent Action", self.action, "status"), "Rejected")
+		self.assertEqual(self.requester_notices(), [])
 
 	def test_a_separate_effective_user_is_told_too(self):
 		run = make_run(effective_user=WEAK_APPROVER)
@@ -274,6 +356,13 @@ class TestExpiryNotifications(AgentTestCase):
 		self.assertEqual(len(rows), 1)
 		self.assertIn("expired", rows[0].subject)
 		self.assertFalse(rows[0].from_user)
+
+	def test_a_row_the_write_did_not_expire_is_not_announced(self):
+		"""Decided between the sweep's read and its write: the write misses it."""
+		with patch.object(frappe.db, "set_value"):
+			self.assertEqual(expire_stale_actions(), 0)
+
+		self.assertEqual(notices(self.action, DRAFT_USER), [])
 
 	def test_a_second_sweep_tells_nobody_again(self):
 		expire_stale_actions()
