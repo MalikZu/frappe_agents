@@ -119,16 +119,38 @@ FILE_TOOLS = frozenset({"read_document"})
 # a tool another app registered — keeps riding the selection table.
 GENERIC_TOOLS = frozenset(DOCTYPE_TOOL_VERBS) | REPORT_TOOLS | FILE_TOOLS | BUILDER_TOOLS
 
-# What an outside MCP client may be offered, out of what the matrix exposes.
-# Extraction and file reading are left out because both can spend this site's
-# model tokens — a scan is read by the agent's own vision model — for a client
-# that brings its own model, and an MCP run records no tokens for the budget to
-# count. The builder tools are left out because designing agents is the
-# configuration of the runtime, not work inside it, and tools other apps
-# registered because nobody has said they are safe to hand to a model the site
-# did not pick.
+# What an outside MCP client may be offered. An allowlist, not what is left after
+# a denylist: a tool added to the matrix later is offered to a model the site did
+# not choose only once someone has decided it should be. Every generic tool must
+# be named in exactly one of the two sets; a test fails until it is.
+#
+# Offered: the reads, the draft writes, and the proposals — a proposal is a row a
+# different person decides, which is the wall MCP leans on. Some names belong to
+# tools that arrive with other changes; naming them here is the decision.
+MCP_TOOLS = frozenset(
+	{
+		"search_documents",
+		"summarize_documents",
+		"get_doctype_meta",
+		"get_document_context",
+		"get_document_slice",
+		"find_doctypes",
+		"run_report",
+		"create_draft",
+		"create_drafts",
+		"update_draft",
+		"propose_submit",
+		"propose_cancel",
+		"propose_transition",
+		"propose_update",
+	}
+)
+# Withheld. Extraction and file reading can spend this site's model tokens — a
+# scan is read by the agent's own vision model — for a client that brings its own
+# model, and an MCP run records no tokens for the budget to count. The builder
+# tools are the configuration of the runtime, not work inside it. Tools other
+# apps registered are in neither set, so they are withheld too.
 MCP_HIDDEN_TOOLS = frozenset({"extract_document"}) | FILE_TOOLS | BUILDER_TOOLS
-MCP_TOOLS = GENERIC_TOOLS - MCP_HIDDEN_TOOLS
 
 
 def compiled_grants(agent: Any) -> dict:
