@@ -360,17 +360,25 @@ def _build_index() -> dict:
 def run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: str | None = None) -> None:
 	"""RQ job: decide whether one event becomes a run, and queue it. Never raises."""
 	original = frappe.session.user
+	queued = False
 	try:
-		if not _run_trigger(trigger, doctype, docname, fired_by, file):
-			# This event did not become a run. If it was the waiting one a finished
-			# run handed on, the events behind it would wait for a run that never
-			# comes. Hand them on in turn; each is skipped or run on its own merits.
-			_pass_on(trigger, doctype, docname)
+		queued = _run_trigger(trigger, doctype, docname, fired_by, file)
 	except Exception:
 		frappe.logger("frappe_agents").error(
 			f"trigger {trigger} could not start on {doctype} {docname}", exc_info=True
 		)
 	finally:
+		if not queued:
+			# This event did not become a run, skipped or broken. If it was the
+			# waiting one a finished run handed on, the events behind it would wait
+			# for a run that never comes. Hand them on in turn; each is skipped or
+			# run on its own merits.
+			try:
+				_pass_on(trigger, doctype, docname)
+			except Exception:
+				frappe.logger("frappe_agents").error(
+					f"trigger {trigger} could not hand on what waits on {doctype} {docname}", exc_info=True
+				)
 		frappe.set_user(original)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 
