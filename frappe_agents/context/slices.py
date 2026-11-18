@@ -615,11 +615,16 @@ def has_row_permission_hook(doctype: str) -> bool:
 	`get_list` never runs those hooks, so on these doctypes — File, Communication,
 	ToDo, Note, Event, Contact, Address, User and a dozen more — a listed row is
 	not proof the user may read it. Whoever lists them re-checks them.
+
+	A hook registered on `*` runs for every doctype, the way frappe's own
+	permission check merges it in. A lookup that fails answers yes: the caller
+	then re-checks or refuses, which costs time, not a leak.
 	"""
 	try:
-		return bool((frappe.get_hooks("has_permission") or {}).get(doctype))
+		hooks = frappe.get_hooks("has_permission") or {}
+		return bool(hooks.get(doctype) or hooks.get("*"))
 	except Exception:
-		return False
+		return True
 
 
 def _document_summary(doctype: str, name: Any) -> dict | None:
@@ -787,11 +792,17 @@ def project_fields(
 	return values, restricted
 
 
-def field_value(df: Any, value: Any, source: str, text_chars: int = MAX_TEXT_CHARS) -> Any:
-	"""One field value, with authored text wrapped as untrusted."""
+def field_value(
+	df: Any, value: Any, source: str, text_chars: int = MAX_TEXT_CHARS, authored: bool = False
+) -> Any:
+	"""One field value, with authored text wrapped as untrusted.
+
+	`authored` wraps a field whatever its type, for a value a person named
+	freely, such as a document's title.
+	"""
 	if value is None or value == "":
 		return value
-	if is_untrusted_fieldtype(df.fieldtype):
+	if authored or is_untrusted_fieldtype(df.fieldtype):
 		return wrap(_truncate(value, text_chars), f"{source} {df.fieldname}")
 	return value
 

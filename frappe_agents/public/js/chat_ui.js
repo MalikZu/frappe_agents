@@ -328,7 +328,7 @@ frappe_agents.EXTRACTION_UPDATE_EVENT = "frappe_agents:extraction_update";
 
 // Tools whose result is a proposal waiting for a person. Their finished event is
 // what a reopened conversation redraws its approval cards from.
-const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel"];
+const PROPOSAL_TOOLS = ["propose_submit", "propose_cancel", "propose_transition", "propose_update"];
 
 // How much of a conversation is kept in memory, and how many conversations.
 // Oldest events go first: a run that is still going will write its own log the
@@ -1598,7 +1598,8 @@ frappe_agents.ChatUI = class ChatUI {
 
 		if (run.output_message) {
 			// Already on screen when the log carried it, which it does for every
-			// run that recorded one.
+			// run that recorded one. Both are stored with the same values held
+			// back, so the answer in the log and the column match.
 			if (run.output_message !== replayed.said) {
 				this.$log.append(this.make_bubble(run.output_message, "", true));
 			}
@@ -1691,6 +1692,9 @@ frappe_agents.ChatUI = class ChatUI {
 				run: run,
 				action: proposal.action,
 				action_type: proposal.action_type,
+				workflow_action: proposal.workflow_action,
+				from_workflow_state: proposal.workflow_state,
+				changes: proposal.changes,
 				target_doctype: proposal.target_doctype,
 				target_name: proposal.target_name,
 				reason: reasons[event.toolCallId] || "",
@@ -2329,10 +2333,17 @@ frappe_agents.ChatUI = class ChatUI {
 		if (this.actions[data.action]) return;
 		this.clear_empty();
 
-		const verb = data.action_type === "Cancel" ? __("Cancel") : __("Submit");
+		let verb = data.action_type === "Cancel" ? __("Cancel") : __("Submit");
+		if (data.action_type === "Workflow Transition" && data.workflow_action) {
+			// The state goes with the verb: the same verb can be another step elsewhere.
+			verb = data.from_workflow_state
+				? __("{0} (from {1})", [__(data.workflow_action), __(data.from_workflow_state)])
+				: __(data.workflow_action);
+		}
+		if (data.action_type === "Update") verb = __("Change fields");
 		const $card = $("<div class='agent-chat-action'></div>");
 		$("<div class='agent-chat-action-title'></div>")
-			.text(__("Waiting for your approval: {0}", [verb]))
+			.text(__("Waiting for an approver: {0}", [verb]))
 			.appendTo($card);
 
 		if (data.target_doctype && data.target_name) {
@@ -2340,6 +2351,14 @@ frappe_agents.ChatUI = class ChatUI {
 				.text(`${__(data.target_doctype)}: ${data.target_name}`)
 				.appendTo($card);
 		}
+		// The new values only, as text. What the fields hold now is on the
+		// approval form, for the people allowed to read it there.
+		(Array.isArray(data.changes) ? data.changes : []).forEach((change) => {
+			const value = change.value === null || change.value === "" ? __("empty") : String(change.value);
+			$("<div class='agent-chat-action-line'></div>")
+				.text(__("{0}: {1}", [__(change.label || change.fieldname || ""), value]))
+				.appendTo($card);
+		});
 		if (data.reason) {
 			$("<div class='agent-chat-action-reason'></div>").text(data.reason).appendTo($card);
 		}

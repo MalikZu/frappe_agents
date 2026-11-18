@@ -75,7 +75,7 @@ VERBS = {
 	VERB_READ: ("can_read", "read"),
 	VERB_CREATE_DRAFT: ("can_create_draft", "create drafts of"),
 	VERB_UPDATE_DRAFT: ("can_update_draft", "edit drafts of"),
-	VERB_PROPOSE: ("can_propose", "propose submit or cancel on"),
+	VERB_PROPOSE: ("can_propose", "propose submit, cancel, a workflow action or a field change on"),
 	VERB_EXTRACT: ("can_extract", "extract into"),
 }
 
@@ -91,6 +91,7 @@ LOCAL_SOURCE = "This agent"
 # offered tool is a promise, and one that always refuses is a broken one.
 DOCTYPE_TOOL_VERBS = {
 	"search_documents": VERB_READ,
+	"summarize_documents": VERB_READ,
 	"get_doctype_meta": VERB_READ,
 	"get_document_context": VERB_READ,
 	"get_document_slice": VERB_READ,
@@ -100,10 +101,12 @@ DOCTYPE_TOOL_VERBS = {
 	"update_draft": VERB_UPDATE_DRAFT,
 	"propose_submit": VERB_PROPOSE,
 	"propose_cancel": VERB_PROPOSE,
+	"propose_transition": VERB_PROPOSE,
+	"propose_update": VERB_PROPOSE,
 	"extract_document": VERB_EXTRACT,
 }
 
-PROPOSE_TOOLS = frozenset({"propose_submit", "propose_cancel"})
+PROPOSE_TOOLS = frozenset({"propose_submit", "propose_cancel", "propose_transition", "propose_update"})
 REPORT_TOOLS = frozenset({"run_report"})
 # The Agents Builder's meta tools. They answer with the shape of the site and
 # never with a document, so they ride the one grant that says the agent is here

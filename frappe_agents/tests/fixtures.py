@@ -104,6 +104,11 @@ PERMLEVEL_ROLE = "FA Test Permlevel Reader"
 DRAFTER_ROLE = "FA Test Drafter"
 SUBMITTER_ROLE = "FA Test Submitter"
 VENDOR_ROLE = "FA Test Vendor Reader"
+# Roles that reach FA Test Case and nothing else, so the approvers who hold them
+# never become eligible for, or count in, the order tests.
+CASE_EDITOR_ROLE = "FA Test Case Editor"
+RATE_READER_ROLE = "FA Test Rate Reader"
+RATE_WRITER_ROLE = "FA Test Rate Writer"
 
 PROJECT_DT = "FA Test Project"
 TICKET_DT = "FA Test Ticket"
@@ -112,6 +117,11 @@ ORDER_DT = "FA Test Order"
 ORDER_ITEM_DT = "FA Test Order Item"
 BUNDLE_DT = "FA Test Bundle"
 VENDOR_DT = "FA Test Vendor"
+# A live record: no submit step, so it sits at docstatus 0 for its whole life the
+# way a ticket or a lead does. Changes to it are proposed with propose_update.
+CASE_DT = "FA Test Case"
+CASE_STATUSES = ("Open", "Working", "Closed")
+CASE_PRIORITIES = ("Low", "Medium", "High")
 
 PROJECT_ALPHA = "FA Alpha"
 PROJECT_BETA = "FA Beta"
@@ -137,12 +147,14 @@ IBAN_FIELD = "iban"
 # A Password field, sensitive because of its fieldtype rather than because
 # anybody configured it. Nothing marks it in Agent Settings.
 PASSWORD_FIELD = "portal_password"
+# A number only the permlevel role may read: what a total must not reach around.
+SECRET_SCORE_FIELD = "secret_score"
 # What the master record says, and what a redirected invoice would print instead.
 # They differ in the account digits alone — the difference a reviewer cannot see
 # by reading and a comparison catches every time.
 VENDOR_IBAN = "AE07 0331 2345 6789 0123 456"
 ALTERED_IBAN = "AE07 0331 9999 8888 7777 666"
-SENSITIVE_FIELDS = ((ORDER_DT, IBAN_FIELD), (ORDER_ITEM_DT, IBAN_FIELD))
+SENSITIVE_FIELDS = ((ORDER_DT, IBAN_FIELD), (ORDER_ITEM_DT, IBAN_FIELD), (CASE_DT, IBAN_FIELD))
 
 # Text that tries to talk to the model, and to close the wrapper it arrives in.
 INJECTION = (
@@ -163,6 +175,10 @@ WEAK_APPROVER = "fa-weak-approver@example.com"
 BLIND_APPROVER = "fa-blind-approver@example.com"
 AUDITOR_USER = "fa-auditor@example.com"
 BLIND_DRAFTER = "fa-blind-drafter@example.com"
+# Approvers of field changes on FA Test Case. Both edit its level-0 fields; one
+# reads the permlevel-1 rate and the other may also change it.
+RATE_READING_APPROVER = "fa-rate-reader@example.com"
+RATE_APPROVER = "fa-rate-approver@example.com"
 
 # A report a rule may actually grant. The app's own report reads Agent Action,
 # which is a doctype no agent may be granted — so it cannot stand in for the
@@ -212,6 +228,8 @@ DRAFT_TOOL_NAMES = (
 	"update_draft",
 	"propose_submit",
 	"propose_cancel",
+	"propose_transition",
+	"propose_update",
 	"extract_document",
 )
 # Every agent fixture is granted every tool: what a Suggest agent may actually
@@ -224,6 +242,7 @@ TOOL_NAMES = READ_TOOL_NAMES + DRAFT_TOOL_NAMES
 # rows before a test can call one, so the registry sweep below watches for them.
 MATRIX_TOOL_NAMES = (
 	"find_doctypes",
+	"summarize_documents",
 	"list_site_doctypes",
 	"list_site_reports",
 	"describe_site_doctype",
@@ -252,6 +271,9 @@ _ENABLEMENT_CHANGES: list[tuple[str, str]] = []
 WORKFLOW_NAME = "FA Test Order Workflow"
 WORKFLOW_DRAFT_STATE = "FA Workflow Draft"
 WORKFLOW_APPROVED_STATE = "FA Workflow Approved"
+# The middle state of the two-level Workflow. The action out of it has the same
+# name as the action into it, the way real approval chains reuse "Approve".
+WORKFLOW_MIDDLE_STATE = "FA Workflow Manager Approved"
 WORKFLOW_ACTION = "FA Workflow Approve"
 WORKFLOW_ROLE = "System Manager"
 
@@ -304,6 +326,7 @@ def ensure_fixtures() -> None:
 	_ensure_read_only_roles()
 	_ensure_order_permissions()
 	_ensure_extraction_fields()
+	_ensure_summary_fields()
 	_ensure_report()
 	_ensure_users()
 	_ensure_records()
@@ -1043,8 +1066,20 @@ def actions_for(target_name: str, doctype: str = ORDER_DT) -> list[dict]:
 
 
 @contextmanager
-def active_workflow(doctype: str = ORDER_DT):
+def active_workflow(
+	doctype: str = ORDER_DT,
+	roles: tuple[str, ...] = (WORKFLOW_ROLE,),
+	allow_self_approval: int = 1,
+	two_level: bool = False,
+):
 	"""Put a minimal active Workflow on `doctype` for the duration of the block.
+
+	Two states and one action between them. `roles` are the roles the action is
+	open to, one transition row each — the way a Workflow says "either of these".
+	The approved state is submitted, so applying the action submits the document.
+
+	`two_level` puts a draft middle state in between, reached and left by the same
+	action: Draft -Approve-> Manager Approved -Approve-> Approved.
 
 	Teardown deletes the Workflow *and* drops the cached answer:
 	`get_workflow_name` caches an empty string as readily as a name, so a Workflow
@@ -1056,6 +1091,15 @@ def active_workflow(doctype: str = ORDER_DT):
 	# test had written so far — so a crash inside the block can leave the row
 	# behind for the next run to trip over.
 	_drop_workflow(doctype)
+
+	steps = [(WORKFLOW_DRAFT_STATE, WORKFLOW_APPROVED_STATE)]
+	middle = []
+	if two_level:
+		steps = [
+			(WORKFLOW_DRAFT_STATE, WORKFLOW_MIDDLE_STATE),
+			(WORKFLOW_MIDDLE_STATE, WORKFLOW_APPROVED_STATE),
+		]
+		middle = [{"state": WORKFLOW_MIDDLE_STATE, "doc_status": "0", "allow_edit": WORKFLOW_ROLE}]
 
 	workflow = frappe.get_doc(
 		{
@@ -1070,6 +1114,7 @@ def active_workflow(doctype: str = ORDER_DT):
 					"doc_status": "0",
 					"allow_edit": WORKFLOW_ROLE,
 				},
+				*middle,
 				{
 					"state": WORKFLOW_APPROVED_STATE,
 					"doc_status": "1",
@@ -1078,17 +1123,23 @@ def active_workflow(doctype: str = ORDER_DT):
 			],
 			"transitions": [
 				{
-					"state": WORKFLOW_DRAFT_STATE,
+					"state": state,
 					"action": WORKFLOW_ACTION,
-					"next_state": WORKFLOW_APPROVED_STATE,
-					"allowed": WORKFLOW_ROLE,
+					"next_state": next_state,
+					"allowed": role,
+					"allow_self_approval": allow_self_approval,
 				}
+				for state, next_state in steps
+				for role in roles
 			],
 		}
 	)
 	workflow.flags.ignore_permissions = True
 	workflow.insert(ignore_permissions=True)
 	frappe.cache.hdel("workflow", doctype)
+	# Every test builds the Workflow under the same name with different rows, and
+	# `get_workflow` reads it through the document cache.
+	frappe.clear_document_cache("Workflow", WORKFLOW_NAME)
 	try:
 		yield workflow
 	finally:
@@ -1122,7 +1173,7 @@ def _drop_workflow(doctype: str, commit: bool = False) -> None:
 
 def _ensure_workflow_masters() -> None:
 	"""The Workflow's states and action are Links to master records of their own."""
-	for state in (WORKFLOW_DRAFT_STATE, WORKFLOW_APPROVED_STATE):
+	for state in (WORKFLOW_DRAFT_STATE, WORKFLOW_MIDDLE_STATE, WORKFLOW_APPROVED_STATE):
 		if not frappe.db.exists("Workflow State", state):
 			frappe.get_doc({"doctype": "Workflow State", "workflow_state_name": state}).insert(
 				ignore_permissions=True
@@ -1138,7 +1189,16 @@ def _ensure_roles() -> None:
 	from frappe_agents.install import create_roles
 
 	create_roles()
-	for role_name in (READER_ROLE, PERMLEVEL_ROLE, DRAFTER_ROLE, SUBMITTER_ROLE, VENDOR_ROLE):
+	for role_name in (
+		READER_ROLE,
+		PERMLEVEL_ROLE,
+		DRAFTER_ROLE,
+		SUBMITTER_ROLE,
+		VENDOR_ROLE,
+		CASE_EDITOR_ROLE,
+		RATE_READER_ROLE,
+		RATE_WRITER_ROLE,
+	):
 		if frappe.db.exists("Role", role_name):
 			continue
 		role = frappe.new_doc("Role")
@@ -1264,6 +1324,7 @@ def _ensure_doctypes() -> None:
 
 	_ensure_order_doctypes()
 	_ensure_vendor_doctype()
+	_ensure_case_doctype()
 
 
 def _ensure_vendor_doctype() -> None:
@@ -1370,6 +1431,18 @@ def _ensure_extraction_fields() -> None:
 				"options": VENDOR_DT,
 			},
 		],
+	)
+
+
+def _ensure_summary_fields() -> None:
+	"""A number above permlevel 0, so a total over it can be refused.
+
+	The only permlevel 1 fields elsewhere are text, and a sum over text is refused
+	for being text before the permlevel is ever asked.
+	"""
+	_append_fields(
+		TICKET_DT,
+		[{"fieldname": SECRET_SCORE_FIELD, "fieldtype": "Int", "label": "Secret Score", "permlevel": 1}],
 	)
 
 
@@ -1484,6 +1557,102 @@ def _ensure_order_doctypes() -> None:
 	)
 
 
+_CASE_NONE = {"create": 0, "delete": 0, "submit": 0, "cancel": 0, "amend": 0}
+# Every field a proposal may change, and one of every kind it must refuse.
+CASE_FIELDS = [
+	{"fieldname": "subject", "fieldtype": "Data", "label": "Subject", "reqd": 1, "unique": 1},
+	{"fieldname": "project", "fieldtype": "Link", "label": "Project", "options": PROJECT_DT},
+	{
+		"fieldname": "status",
+		"fieldtype": "Select",
+		"label": "Status",
+		"options": "\n".join(CASE_STATUSES),
+		"default": CASE_STATUSES[0],
+	},
+	{
+		"fieldname": "priority",
+		"fieldtype": "Select",
+		"label": "Priority",
+		"options": "\n".join(CASE_PRIORITIES),
+		"default": CASE_PRIORITIES[0],
+	},
+	{"fieldname": "hours", "fieldtype": "Float", "label": "Hours"},
+	{"fieldname": "due_date", "fieldtype": "Date", "label": "Due Date"},
+	{"fieldname": "urgent", "fieldtype": "Check", "label": "Urgent"},
+	{"fieldname": "notes", "fieldtype": "Small Text", "label": "Notes"},
+	{"fieldname": "reference", "fieldtype": "Data", "label": "Reference", "read_only": 1},
+	{"fieldname": "internal_rate", "fieldtype": "Data", "label": "Internal Rate", "permlevel": 1},
+	{"fieldname": PASSWORD_FIELD, "fieldtype": "Password", "label": "Portal Password"},
+	{"fieldname": IBAN_FIELD, "fieldtype": "Data", "label": "IBAN"},
+	{"fieldname": "details", "fieldtype": "Text Editor", "label": "Details"},
+	{"fieldname": "lines", "fieldtype": "Table", "label": "Lines", "options": ORDER_ITEM_DT},
+	{"fieldname": "contact", "fieldtype": "Data", "label": "Contact"},
+	{"fieldname": "hidden_code", "fieldtype": "Data", "label": "Hidden Code", "hidden": 1},
+	{"fieldname": "external_id", "fieldtype": "Data", "label": "External ID", "set_only_once": 1},
+	{
+		"fieldname": "closing_note",
+		"fieldtype": "Data",
+		"label": "Closing Note",
+		"read_only_depends_on": "eval:doc.status=='Closed'",
+	},
+]
+# Each right spelled out to the zero, because frappe fills an unstated right with 1.
+CASE_PERMISSIONS = [
+	{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1},
+	{"role": "System Manager", "read": 1, "write": 1, "permlevel": 1},
+	{"role": READER_ROLE, "read": 1, "write": 0, **_CASE_NONE},
+	{"role": DRAFTER_ROLE, "read": 1, "write": 1, "create": 1, "delete": 0},
+	{"role": DRAFTER_ROLE, "read": 1, "write": 0, "permlevel": 1},
+	{"role": SUBMITTER_ROLE, "read": 1, "write": 1, **_CASE_NONE},
+	{"role": CASE_EDITOR_ROLE, "read": 1, "write": 1, **_CASE_NONE},
+	{"role": RATE_READER_ROLE, "read": 1, "write": 0, **_CASE_NONE},
+	{"role": RATE_READER_ROLE, "read": 1, "write": 0, "permlevel": 1},
+	{"role": RATE_WRITER_ROLE, "read": 1, "write": 0, **_CASE_NONE},
+	{"role": RATE_WRITER_ROLE, "read": 1, "write": 1, "permlevel": 1},
+]
+
+
+def _ensure_case_doctype() -> None:
+	"""A live record with one field of every kind a proposal must refuse.
+
+	`DRAFTER_ROLE` reads permlevel 1 and may propose a change to it.
+	`SUBMITTER_ROLE` — `APPROVER_USER`'s — edits level 0 only. The rate roles split
+	reading the permlevel-1 rate from changing it, so each approval wall has an
+	approver who stops at it.
+
+	Fields and rules added after a site first built the doctype are appended,
+	because `_make_doctype` leaves an existing doctype alone.
+	"""
+	_make_doctype(CASE_DT, "subject", fields=CASE_FIELDS, permissions=CASE_PERMISSIONS)
+	_append_fields(CASE_DT, CASE_FIELDS)
+	doc = frappe.get_doc("DocType", CASE_DT)
+	present = {(perm.role, cint(perm.permlevel)) for perm in doc.permissions}
+	missing = [
+		rule for rule in CASE_PERMISSIONS if (rule["role"], cint(rule.get("permlevel"))) not in present
+	]
+	if not missing:
+		return
+	for rule in missing:
+		doc.append("permissions", rule)
+	doc.flags.ignore_permissions = True
+	doc.save(ignore_permissions=True)
+	frappe.clear_cache(doctype=CASE_DT)
+
+
+def make_case(subject: str | None = None, **values: Any) -> Any:
+	"""Insert one FA Test Case on the Alpha project, as Administrator."""
+	case = frappe.get_doc(
+		{
+			"doctype": CASE_DT,
+			"subject": subject or f"FA Case {frappe.generate_hash(length=8)}",
+			"project": PROJECT_ALPHA,
+			**values,
+		}
+	)
+	case.insert(ignore_permissions=True)
+	return case
+
+
 def _ensure_read_only_roles() -> None:
 	"""Hold the reader roles to reading, on every doctype that grants them anything.
 
@@ -1493,7 +1662,7 @@ def _ensure_read_only_roles() -> None:
 	that prove an agent cannot write what its user may not write would pass on a
 	user who may, which is the same as not testing it.
 	"""
-	for doctype in (PROJECT_DT, TICKET_DT, VAULT_DT, BUNDLE_DT, ORDER_DT):
+	for doctype in (PROJECT_DT, TICKET_DT, VAULT_DT, BUNDLE_DT, ORDER_DT, CASE_DT):
 		doc = frappe.get_doc("DocType", doctype)
 		granted = [
 			perm
@@ -1619,6 +1788,14 @@ def _ensure_users() -> None:
 	# Permission below pins them to the other project.
 	_make_user(BLIND_APPROVER, "Blind Approver", ["Agent User", APPROVER_ROLE, SUBMITTER_ROLE])
 	_make_user(AUDITOR_USER, "Auditor", ["Agent User", AUDITOR_ROLE])
+	_make_user(
+		RATE_READING_APPROVER,
+		"Rate Reader",
+		["Agent User", APPROVER_ROLE, CASE_EDITOR_ROLE, RATE_READER_ROLE],
+	)
+	_make_user(
+		RATE_APPROVER, "Rate Approver", ["Agent User", APPROVER_ROLE, CASE_EDITOR_ROLE, RATE_WRITER_ROLE]
+	)
 
 
 def _make_user(email: str, first_name: str, roles: list[str], enabled: int = 1) -> None:

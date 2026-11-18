@@ -9,6 +9,9 @@ frappe.provide("frappe_agents");
 
 const APPROVE_METHOD = "frappe_agents.actions.approve_action";
 const REJECT_METHOD = "frappe_agents.actions.reject_action";
+// The proposed values of an Update are stored where no role reads them. This
+// method hands them out field by field, after checking the reader's access.
+const DIFF_METHOD = "frappe_agents.actions.get_update_diff";
 
 const STYLE_ID = "frappe-agents-action-styles";
 const VALUE_CHARS = 500;
@@ -60,6 +63,12 @@ const STYLES = `
 	.agent-action-child th, .agent-action-child td { padding: 2px 6px; border-bottom: 1px solid var(--border-color); text-align: left; }
 	.agent-action-child th { color: var(--text-muted); font-weight: normal; }
 	.agent-action-more { color: var(--text-muted); font-size: var(--text-sm); padding-top: 4px; }
+	.agent-action-diff { width: 100%; table-layout: fixed; margin-bottom: 12px; }
+	.agent-action-diff th { color: var(--text-muted); font-weight: normal; padding: 4px 8px; border-bottom: 1px solid var(--border-color); text-align: left; }
+	.agent-action-diff td { padding: 4px 8px; border-bottom: 1px solid var(--border-color); vertical-align: top; word-break: break-word; }
+	.agent-action-diff td.is-proposed { font-weight: 600; }
+	.agent-action-diff tr.is-changed td { background: var(--bg-red, var(--control-bg)); }
+	.agent-action-diff .is-empty { color: var(--text-muted); font-style: italic; }
 `;
 
 function add_styles() {
@@ -283,6 +292,11 @@ function render_target(frm) {
 		.text(`${__(frm.doc.target_doctype)}: ${frm.doc.target_name}`)
 		.appendTo($head);
 	$("<span class='text-muted'></span>").text(docstatus_label(doc.docstatus)).appendTo($head);
+	if (doc.workflow_state) {
+		$("<span class='text-muted'></span>")
+			.text(__("Workflow state: {0}", [__(doc.workflow_state)]))
+			.appendTo($head);
+	}
 	if (doc.modified) {
 		$("<span class='text-muted'></span>")
 			.text(__("Last edited {0} by {1}", [frappe.datetime.str_to_user(doc.modified), doc.modified_by || ""]))
@@ -301,7 +315,18 @@ function render_target(frm) {
 			.appendTo($body);
 	}
 
-	if (frm.doc.action_type === "Cancel") {
+	if (frm.doc.action_type === "Update") {
+		render_update(frm, $body);
+	} else if (frm.doc.action_type === "Workflow Transition") {
+		$("<div class='agent-action-note'></div>")
+			.text(
+				__(
+					"Approving applies the workflow action {0} out of state {1}, under your own roles. If the document is no longer in {1}, the approval fails. The Workflow decides the next state, and may submit or cancel the document.",
+					[frm.doc.workflow_action, frm.doc.from_workflow_state]
+				)
+			)
+			.appendTo($body);
+	} else if (frm.doc.action_type === "Cancel") {
 		$("<div class='agent-action-note'></div>")
 			.text(__("Approving cancels this submitted document. Its current values are below."))
 			.appendTo($body);
@@ -314,11 +339,97 @@ function render_target(frm) {
 	$body.append($field_table(doc, meta, state.child_metas || {}, state.changed || new Set()));
 }
 
+/** One proposed, stored or current value as plain text. Never HTML. */
+function diff_text(row, value) {
+	if (is_blank(value)) return null;
+	if (row.fieldtype === "Check") return cint(value) ? __("Yes") : __("No");
+	return truncate(value);
+}
+
+function $diff_cell(row, value, extra_class) {
+	const $cell = $("<td></td>");
+	if (extra_class) $cell.addClass(extra_class);
+	const text = diff_text(row, value);
+	if (text === null) return $cell.append($("<span class='is-empty'></span>").text(__("empty")));
+	return $cell.text(text);
+}
+
+function $diff_table(diff, pending) {
+	const $table = $("<table class='agent-action-diff'></table>");
+	const $head = $("<tr></tr>").appendTo($("<thead></thead>").appendTo($table));
+	[__("Field"), __("When proposed"), __("Now"), __("Proposed")].forEach((title) =>
+		$("<th></th>").text(title).appendTo($head)
+	);
+
+	const $body = $("<tbody></tbody>").appendTo($table);
+	(diff.fields || []).forEach((row) => {
+		const $row = $("<tr></tr>").appendTo($body);
+		$("<td></td>").text(row.label || row.fieldname).appendTo($row);
+		if (!row.readable) {
+			$("<td colspan='3' class='text-muted'></td>")
+				.text(__("You are not allowed to read this field."))
+				.appendTo($row);
+			return;
+		}
+		$row.append($diff_cell(row, row.before));
+		$row.append($diff_cell(row, row.now));
+		$row.append($diff_cell(row, row.proposed, "is-proposed"));
+		// Only a pending proposal can still fail on it; afterwards "now" is history.
+		if (pending && row.changed_since) $row.addClass("is-changed");
+	});
+	return $table;
+}
+
+/** The change itself, ahead of the rest of the document. */
+function render_update(frm, $body) {
+	const diff = frm.__fa.diff;
+	if (!diff || !diff.target_readable) {
+		$("<div class='agent-action-note is-danger'></div>")
+			.text(__("The proposed values could not be loaded."))
+			.appendTo($body);
+		return;
+	}
+	const pending = frm.doc.status === "Pending";
+	if (pending && diff.unreadable) {
+		$("<div class='agent-action-note is-warning'></div>")
+			.text(
+				__(
+					"You are not allowed to read every field in this change, so you cannot approve it. Another approver has to decide it."
+				)
+			)
+			.appendTo($body);
+	}
+	if (pending && diff.changed_since) {
+		$("<div class='agent-action-note is-danger'></div>")
+			.text(
+				__(
+					"A field below changed after the agent proposed this, so approving would fail. Reject it, or ask the agent to propose again."
+				)
+			)
+			.appendTo($body);
+	}
+	$("<div class='agent-action-note'></div>")
+		.text(
+			__(
+				"Approving saves the fields below under your own permissions. A field the document fills in from a changed link follows it, as it would in the form. The rest of the document is shown under the change."
+			)
+		)
+		.appendTo($body);
+	$body.append($diff_table(diff, pending));
+}
+
+function fetch_diff(frm) {
+	if (frm.doc.action_type !== "Update") return Promise.resolve(null);
+	return frappe.xcall(DIFF_METHOD, { action: frm.doc.name });
+}
+
 /** Fetch the target through the permission-checked endpoint, then its metas. */
 function fetch_target(frm) {
-	return frappe
-		.xcall("frappe.client.get", { doctype: frm.doc.target_doctype, name: frm.doc.target_name })
-		.then((doc) =>
+	return Promise.all([
+		frappe.xcall("frappe.client.get", { doctype: frm.doc.target_doctype, name: frm.doc.target_name }),
+		fetch_diff(frm),
+	])
+		.then(([doc, diff]) =>
 			with_doctype(frm.doc.target_doctype).then((meta) => {
 				const child_doctypes = visible_fields(meta)
 					.filter((df) => df.fieldtype === "Table" && (doc[df.fieldname] || []).length)
@@ -327,7 +438,7 @@ function fetch_target(frm) {
 				return Promise.all(unique.map((dt) => with_doctype(dt))).then((metas) => {
 					const child_metas = {};
 					unique.forEach((dt, index) => (child_metas[dt] = metas[index]));
-					return { doc: doc, meta: meta, child_metas: child_metas };
+					return { doc: doc, meta: meta, child_metas: child_metas, diff: diff };
 				});
 			})
 		);
@@ -350,6 +461,7 @@ function load_target(frm) {
 			state.target = loaded.doc;
 			state.meta = loaded.meta;
 			state.child_metas = loaded.child_metas;
+			state.diff = loaded.diff;
 			render_target(frm);
 			set_actions(frm);
 		})
@@ -378,8 +490,16 @@ function may_decide(frm) {
 	return true;
 }
 
+function action_verb(doc) {
+	if (doc.action_type === "Workflow Transition") {
+		return __("{0} (from {1})", [__(doc.workflow_action || ""), __(doc.from_workflow_state || "")]);
+	}
+	if (doc.action_type === "Update") return __("Change fields on");
+	return doc.action_type === "Cancel" ? __("Cancel") : __("Submit");
+}
+
 function decision_summary(frm) {
-	const verb = frm.doc.action_type === "Cancel" ? __("Cancel") : __("Submit");
+	const verb = action_verb(frm.doc);
 	return __("{0} {1} {2} as {3}.", [
 		verb,
 		__(frm.doc.target_doctype),
@@ -427,8 +547,19 @@ function send_approval(frm, expected_modified, note) {
 		args: args,
 		freeze: true,
 		freeze_message: __("Applying the action…"),
-		callback: () => {
-			frappe.show_alert({ message: __("Action applied"), indicator: "green" });
+		callback: (r) => {
+			const result = (r && r.message) || {};
+			if (result.status === "Failed") {
+				// A refusal by the document's own rules is recorded without its detail,
+				// which may quote values. The approver, who may read them, sees it here.
+				frappe.msgprint({
+					title: __("The action failed"),
+					message: frappe.utils.escape_html(result.detail || result.failure || ""),
+					indicator: "red",
+				});
+			} else {
+				frappe.show_alert({ message: __("Action applied"), indicator: "green" });
+			}
 			frm.reload_doc();
 		},
 		error: () => reload_after_refusal(frm, expected_modified),
@@ -449,6 +580,7 @@ function reload_after_refusal(frm, expected_modified) {
 			state.target = loaded.doc;
 			state.meta = loaded.meta;
 			state.child_metas = loaded.child_metas;
+			state.diff = loaded.diff;
 			state.stale = loaded.doc.modified !== expected_modified;
 			state.changed = state.stale ? changed_fields(before, loaded.doc) : new Set();
 			render_target(frm);
@@ -495,7 +627,12 @@ function reject(frm) {
 
 function set_actions(frm) {
 	if (!may_decide(frm)) return;
-	frm.page.set_primary_action(__("Approve"), () => approve(frm));
+	// A field that moved since the proposal makes the approval fail on the server.
+	// Offering the button anyway would only invite a click that cannot succeed.
+	const diff = frm.__fa.diff;
+	// Nor to an approver who cannot read every field: they would be approving blind.
+	const blocked = frm.doc.action_type === "Update" && (!diff || diff.changed_since || diff.unreadable);
+	if (!blocked) frm.page.set_primary_action(__("Approve"), () => approve(frm));
 	frm.add_custom_button(__("Reject"), () => reject(frm));
 }
 
@@ -546,6 +683,7 @@ frappe.ui.form.on("Agent Action", {
 			target: null,
 			meta: null,
 			child_metas: {},
+			diff: null,
 			stale: false,
 			changed: new Set(),
 		};
