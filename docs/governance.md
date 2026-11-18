@@ -110,11 +110,30 @@ tool, the doctype, the field names, the outcome. Only values are removed.
 
 The event log applies the same rules as the row, and goes one step further: a
 value it holds back is also taken out of the model's later text in that run,
-because a model that read a value can repeat it. A number is taken out only
-where it stands alone: a held-back 2025 stays in the date 2025-01-02. The run's
-stored answer and error follow the same rule, so they match what the log says.
-A result that is too long for the model is cut short, and is redacted before it
-is cut.
+because a model that read a value can repeat it. The run's stored answer and
+error follow the same rule, so they match what the log says. A result that is
+too long for the model is cut short, and is redacted before it is cut.
+
+What the text scrub takes out, exactly:
+
+- **Text values** of 4 characters or more, wherever they appear.
+- **Number values** of 4 significant digits or more, in any form that has the
+  same value. A held-back amount of 98765 is taken out of `98765`, `98765.00`,
+  `98,765.00`, `AED98765`, `98765AED`, `98765/month`, `amount:98765` and
+  `98765-99000`.
+
+What it keeps:
+
+- A number that is part of a longer number: a held-back 2025 stays in `12025`
+  and `2025.5`.
+- A number that is one part of three or more joined by hyphens or slashes: a
+  held-back 2025 stays in `2025-01-02`, `02/01/2025` and `ORD-2025-0001`.
+- Shorter values, numbers written in words, and number formats other than the
+  ones above, such as `98 765` or `98.765,00`.
+
+If a stored event or result cannot be redacted, its values are never learned.
+Then everything the model writes after it in that run, and the stored answer,
+is kept as `[redacted]`.
 
 A value is treated as sensitive when it is a Password field on the doctype the
 call names, when an administrator marked it sensitive in **Agent Settings**, or
