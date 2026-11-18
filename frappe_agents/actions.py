@@ -41,12 +41,26 @@ into the approver's request as an unhandled error.
 """
 
 import datetime
+from contextlib import contextmanager
 from typing import Any
 
 import frappe
 from frappe import _
+from frappe.desk.doctype.notification_log.notification_log import (
+	enqueue_create_notification,
+	make_notification_logs,
+)
 from frappe.model.workflow import apply_workflow, get_workflow, get_workflow_name
-from frappe.utils import add_to_date, cint, get_datetime, now_datetime, strip_html
+from frappe.utils import (
+	add_to_date,
+	cint,
+	escape_html,
+	get_datetime,
+	get_fullname,
+	now_datetime,
+	strip_html,
+)
+from frappe.utils.user import get_users_with_role
 
 from frappe_agents.tools.base import runtime_enabled
 
@@ -64,11 +78,33 @@ ACTION_TRANSITION = "Workflow Transition"
 
 DRAFT = 0
 SUBMITTED = 1
+CANCELLED = 2
 
 DEFAULT_EXPIRY_DAYS = 7
 FAILURE_LIMIT = 500
 NOTE_LIMIT = 1000
 SAVEPOINT = "agent_action_apply"
+
+# A proposal is a question for a few people, not a broadcast. Past this many
+# eligible approvers the rest are not told; they still see it in the queue.
+MAX_NOTIFIED_APPROVERS = 20
+NOTIFICATION_TYPE = "Alert"
+NOTIFY_SAVEPOINT = "agent_action_notify"
+SUBJECT_NOTE_LIMIT = 140
+# What a notification is built from. Never the reason, never the target's fields.
+NOTICE_FIELDS = (
+	"name",
+	"status",
+	"run",
+	"agent",
+	"requested_by",
+	"action_type",
+	"workflow_action",
+	"workflow_name",
+	"from_workflow_state",
+	"target_doctype",
+	"target_name",
+)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -151,6 +187,7 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 			"failure": None,
 		},
 	)
+	_notify_requester(doc_action, STATUS_APPLIED)
 
 	return {
 		"action": doc_action.name,
@@ -191,6 +228,7 @@ def reject_action(action: str, note: str) -> dict:
 			"decision_note": note,
 		},
 	)
+	_notify_requester(doc_action, STATUS_REJECTED, note)
 
 	return {"action": doc_action.name, "status": STATUS_REJECTED}
 
@@ -260,6 +298,7 @@ def record_proposal(
 	)
 	action.flags.ignore_permissions = True
 	action.insert(ignore_permissions=True)
+	_enqueue_approver_notice(action.name)
 	return action
 
 
@@ -273,20 +312,34 @@ def expire_stale_actions() -> int:
 	days = _expiry_days()
 	filters = {"status": STATUS_PENDING, "creation": ("<", _cutoff(days))}
 
-	stale = frappe.get_all("Agent Action", filters=filters, pluck="name")
+	# Read before the bulk write: once it lands, nothing tells these rows apart from
+	# the ones an earlier sweep expired, and those must not be announced twice.
+	stale = frappe.get_all("Agent Action", filters=filters, fields=list(NOTICE_FIELDS))
 	if not stale:
 		return 0
 
 	frappe.db.set_value(
 		"Agent Action",
-		filters,
+		{"name": ("in", [row.name for row in stale]), "status": STATUS_PENDING},
 		{
 			"status": STATUS_EXPIRED,
 			"failure": _("Expired after {0} days with no decision.").format(days),
 		},
 		update_modified=False,
 	)
-	return len(stale)
+	# Announce only what this sweep moved. A row decided between the read and the
+	# write kept its status, and its requester hears about the decision instead.
+	expired = set(
+		frappe.get_all(
+			"Agent Action",
+			filters={"name": ("in", [row.name for row in stale]), "status": STATUS_EXPIRED},
+			pluck="name",
+		)
+	)
+	for row in stale:
+		if row.name in expired:
+			_notify_requester(row, STATUS_EXPIRED)
+	return len(expired)
 
 
 def separation_of_duties_block(action: Any, user: str | None = None) -> str | None:
@@ -321,6 +374,261 @@ def is_stale(action: Any) -> bool:
 	if not created:
 		return False
 	return created < _cutoff(_expiry_days())
+
+
+def notify_approvers(action_name: str) -> None:
+	"""Tell the approvers who could actually decide a new proposal that it is waiting.
+
+	A background job, queued after the proposal commits. It never raises: a
+	notification that fails is an Error Log, and the proposal stands either way.
+	"""
+	with _never_raises("frappe_agents: approver notification failed"):
+		action = frappe.db.get_value("Agent Action", action_name, list(NOTICE_FIELDS), as_dict=True)
+		if not action or action.status != STATUS_PENDING:
+			return
+		if not frappe.db.exists(action.target_doctype, action.target_name):
+			return
+		target = frappe.get_doc(action.target_doctype, action.target_name)
+
+		recipients = eligible_approvers(action, target)
+		if not recipients:
+			return
+		make_notification_logs(
+			frappe._dict(
+				{
+					"type": NOTIFICATION_TYPE,
+					"document_type": "Agent Action",
+					"document_name": action.name,
+					"from_user": action.requested_by,
+					"subject": _approver_subject(action),
+				}
+			),
+			recipients,
+		)
+
+
+def eligible_approvers(action: Any, target: Any) -> list[str]:
+	"""The approvers who may decide `action` and could carry it through.
+
+	The same walls `approve_action` puts up, asked ahead of time: the
+	separation-of-duties block, read on the target, and the right the apply will
+	need. For a submit or a cancel that right is submit or cancel. For a workflow
+	action it is a role the step is open to, plus the right its target state needs.
+	An approver who fails any of them would only be told about a proposal they
+	cannot open or cannot apply. The step's condition and self-approval stay the
+	Workflow's call, made when the approver applies it.
+	"""
+	steps = _approval_steps(action, target)
+	eligible = []
+	for user in sorted(get_users_with_role(APPROVER_ROLE)):
+		if separation_of_duties_block(action, user):
+			continue
+		if not frappe.has_permission(action.target_doctype, "read", doc=target, user=user):
+			continue
+		if not _may_take_a_step(action, target, user, steps):
+			continue
+		eligible.append(user)
+		if len(eligible) >= MAX_NOTIFIED_APPROVERS:
+			break
+	return eligible
+
+
+def _approval_steps(action: Any, target: Any) -> list[tuple[str | None, str]]:
+	"""The ways an approver could apply `action`: (role required, right required).
+
+	A submit or a cancel has one way, open to any role. A workflow action has one
+	per matching transition in the Workflow, and none at all when the Workflow
+	changed or the document left the state the proposal was made from — the apply
+	would fail on those, so nobody is asked to try it.
+	"""
+	if action.action_type == ACTION_SUBMIT:
+		return [(None, "submit")]
+	if action.action_type == ACTION_CANCEL:
+		return [(None, "cancel")]
+	if action.action_type != ACTION_TRANSITION:
+		return []
+
+	if not action.workflow_name or get_workflow_name(action.target_doctype) != action.workflow_name:
+		return []
+	workflow = get_workflow(action.target_doctype)
+	if target.get(workflow.workflow_state_field) != action.from_workflow_state:
+		return []
+
+	docstatus = {row.state: cint(row.doc_status) for row in workflow.states}
+	before = docstatus.get(action.from_workflow_state, DRAFT)
+	steps = []
+	for row in workflow.transitions:
+		if row.state != action.from_workflow_state or row.action != action.workflow_action:
+			continue
+		steps.append((row.allowed, _right_for(before, docstatus.get(row.next_state, before))))
+	return steps
+
+
+def _right_for(before: int, after: int) -> str:
+	"""The document right a workflow step needs, from the docstatus it moves between."""
+	if after == SUBMITTED and before == DRAFT:
+		return "submit"
+	if after == CANCELLED:
+		return "cancel"
+	if before == SUBMITTED:
+		# A step between two submitted states updates a submitted document.
+		return "submit"
+	return "write"
+
+
+def _may_take_a_step(action: Any, target: Any, user: str, steps: list[tuple[str | None, str]]) -> bool:
+	roles = set(frappe.get_roles(user)) if any(role for role, _right in steps) else set()
+	for role, right in steps:
+		if role and role not in roles:
+			continue
+		if frappe.has_permission(action.target_doctype, right, doc=target, user=user):
+			return True
+	return False
+
+
+def _enqueue_approver_notice(action_name: str) -> None:
+	# After commit, so a proposal that rolls back tells nobody. Inline under test,
+	# where nothing ever commits.
+	try:
+		frappe.enqueue(
+			"frappe_agents.actions.notify_approvers",
+			queue="short",
+			enqueue_after_commit=True,
+			now=bool(frappe.flags.in_test),
+			action_name=action_name,
+		)
+	except Exception:
+		frappe.log_error(title="frappe_agents: approver notification failed")
+
+
+def _notify_requester(action: Any, status: str, note: str | None = None) -> None:
+	"""Tell whoever asked for a proposal how it ended. Never raises.
+
+	The requester and the run's effective user, when that is someone else. The
+	decider is left out: they know. Called after the status write, so a failure
+	here is logged and the decision stands.
+	"""
+	with _never_raises("frappe_agents: requester notification failed"):
+		decider = None if status == STATUS_EXPIRED else frappe.session.user
+		recipients = _requester_recipients(action, decider)
+		if not recipients:
+			return
+
+		notice = {
+			"type": NOTIFICATION_TYPE,
+			"document_type": "Agent Action",
+			"document_name": action.name,
+			"subject": _requester_subject(action, status, decider, note),
+		}
+		if decider:
+			notice["from_user"] = decider
+		enqueue_create_notification(recipients, notice)
+
+		for user in recipients:
+			frappe.publish_realtime(
+				"agent_action_decided",
+				{"action": action.name, "status": status, "run": action.run},
+				user=user,
+				after_commit=True,
+			)
+
+
+def _requester_recipients(action: Any, decider: str | None) -> list[str]:
+	run_user = frappe.db.get_value("Agent Run", action.run, "effective_user") if action.run else None
+	recipients = []
+	for user in (action.requested_by, run_user):
+		if user and user != decider and user not in recipients:
+			recipients.append(user)
+	return recipients
+
+
+def _approver_subject(action: Any) -> str:
+	# Agent, verb and target identity only. The reason is model-written and the
+	# fields are the target's business: both stay on the Agent Action form, behind
+	# its own permission check, and out of the bell.
+	if action.action_type == ACTION_TRANSITION:
+		template = _("{0} proposes the workflow action {3} on {1} {2}. It needs an approver.")
+	elif action.action_type == ACTION_CANCEL:
+		template = _("{0} proposes to cancel {1} {2}. It needs an approver.")
+	else:
+		template = _("{0} proposes to submit {1} {2}. It needs an approver.")
+	return template.format(
+		escape_html(action.agent or _("An agent")),
+		escape_html(_(action.target_doctype)),
+		escape_html(action.target_name),
+		_workflow_step(action),
+	)
+
+
+def _workflow_step(action: Any) -> str:
+	"""The workflow verb with the state it starts from. The same verb can be another
+	step out of another state, so the verb alone does not say which step this is."""
+	if not action.workflow_action:
+		return ""
+	verb = escape_html(_(action.workflow_action))
+	if not action.from_workflow_state:
+		return verb
+	return _("{0} (from {1})").format(verb, escape_html(_(action.from_workflow_state)))
+
+
+def _requester_subject(action: Any, status: str, decider: str | None, note: str | None = None) -> str:
+	# The subject is the whole notice: released frappe shows nothing else in the
+	# bell, and an Alert is never emailed. So a rejection's note rides in it, cut
+	# short, and the full note stays on the Agent Action form.
+	templates = _requester_templates(action.action_type)
+	subject = templates[status].format(
+		escape_html(get_fullname(decider) if decider else ""),
+		escape_html(_(action.target_doctype)),
+		escape_html(action.target_name),
+		_workflow_step(action),
+	)
+	if note:
+		subject = _("{0} Note: {1}").format(subject, escape_html(_shorten(note, SUBJECT_NOTE_LIMIT)))
+	return subject
+
+
+def _requester_templates(action_type: str) -> dict:
+	# Whole sentences per verb, so a translator never has to glue fragments.
+	if action_type == ACTION_TRANSITION:
+		return {
+			STATUS_APPLIED: _("{0} approved the workflow action {3} on {1} {2}."),
+			STATUS_REJECTED: _("{0} rejected the workflow action {3} on {1} {2}."),
+			STATUS_FAILED: _("The workflow action {3} on {1} {2} failed when {0} approved it."),
+			STATUS_EXPIRED: _("The proposed workflow action {3} on {1} {2} expired with no decision."),
+		}
+	if action_type == ACTION_CANCEL:
+		return {
+			STATUS_APPLIED: _("{0} approved the proposal to cancel {1} {2}."),
+			STATUS_REJECTED: _("{0} rejected the proposal to cancel {1} {2}."),
+			STATUS_FAILED: _("The proposal to cancel {1} {2} failed when {0} approved it."),
+			STATUS_EXPIRED: _("The proposal to cancel {1} {2} expired with no decision."),
+		}
+	return {
+		STATUS_APPLIED: _("{0} approved the proposal to submit {1} {2}."),
+		STATUS_REJECTED: _("{0} rejected the proposal to submit {1} {2}."),
+		STATUS_FAILED: _("The proposal to submit {1} {2} failed when {0} approved it."),
+		STATUS_EXPIRED: _("The proposal to submit {1} {2} expired with no decision."),
+	}
+
+
+def _shorten(text: str, limit: int) -> str:
+	text = " ".join(strip_html(text).split())
+	return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+@contextmanager
+def _never_raises(title: str):
+	"""Run a notification step; on any failure, undo its writes and log it.
+
+	The savepoint matters under test, where the notification inserts inline: a
+	half-written batch is rolled back rather than committed with the decision.
+	"""
+	frappe.db.savepoint(NOTIFY_SAVEPOINT)
+	try:
+		yield
+	except Exception:
+		frappe.db.rollback(save_point=NOTIFY_SAVEPOINT)
+		frappe.log_error(title=title)
 
 
 def _check_kill_switch() -> None:
@@ -512,6 +820,7 @@ def _record_failure(action: Any, note: str | None, edited: int, failure: str) ->
 			"failure": failure[:FAILURE_LIMIT],
 		},
 	)
+	_notify_requester(action, STATUS_FAILED)
 	return {
 		"action": action.name,
 		"status": STATUS_FAILED,

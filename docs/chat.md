@@ -64,6 +64,14 @@ open and running while it thinks, then folded into one line — **Thought for 4s
 — the moment it stops. Click the line to read it. The thinking is not the
 answer, and it is never what the conversation is stored with.
 
+## When the agent asks for a submit or a cancel
+
+An agent cannot submit or cancel a document. It asks, and the chat shows a card:
+**Waiting for an approver**, the document, the agent's reason, and a link to the
+proposal. Someone else decides it — not you, if you asked, and not the person who
+owns the agent. The approvers who could decide it are notified, and you are
+notified when it is decided or expires. See [Approvals](approvals.md).
+
 ## When something does not go through
 
 A message that could not be sent says so in the log, in the server's own words,

@@ -2340,7 +2340,7 @@ frappe_agents.ChatUI = class ChatUI {
 		}
 		const $card = $("<div class='agent-chat-action'></div>");
 		$("<div class='agent-chat-action-title'></div>")
-			.text(__("Waiting for your approval: {0}", [verb]))
+			.text(__("Waiting for an approver: {0}", [verb]))
 			.appendTo($card);
 
 		if (data.target_doctype && data.target_name) {
