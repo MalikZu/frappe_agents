@@ -24,7 +24,7 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
-from frappe_agents.api import fill_from_file, get_fill_values, record_filled_document
+from frappe_agents.api import discard_extraction, fill_from_file, get_fill_values, record_filled_document
 from frappe_agents.boot import boot_form_agents
 from frappe_agents.extraction.fill import discard_stale_fills
 from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction
@@ -202,10 +202,29 @@ class TestFillFromFile(AgentTestCase):
 		self.assertEqual(flag["master_field"], "vendor")
 
 	def test_the_iban_the_master_holds_is_not_a_mismatch(self):
-		"""The control for the test above."""
+		"""The control for the test above, and the one case offered as a single click."""
 		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: VENDOR_IBAN})))
 
-		self.assertEqual(self.values(extraction)["sensitive"][IBAN_FIELD]["mismatch"], 0)
+		flag = self.values(extraction)["sensitive"][IBAN_FIELD]
+		self.assertEqual(flag["mismatch"], 0)
+		self.assertEqual(flag["compared"], 1)
+		self.assertEqual(flag["blocked"], 0)
+
+	def test_an_altered_iban_cannot_be_used_with_one_click(self):
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+
+		self.assertEqual(self.values(extraction)["sensitive"][IBAN_FIELD]["blocked"], 1)
+
+	def test_an_iban_compared_with_nothing_is_not_agreement(self):
+		"""No linked record to compare with is not a match, and gets no shortcut."""
+		fields = self.fields(**{IBAN_FIELD: ALTERED_IBAN})
+		fields.pop("vendor")
+		extraction = self.read(extraction_reply(fields))
+
+		flag = self.values(extraction)["sensitive"][IBAN_FIELD]
+		self.assertEqual(flag["compared"], 0)
+		self.assertEqual(flag["mismatch"], 0)
+		self.assertEqual(flag["blocked"], 1)
 
 	def test_a_sensitive_value_inside_a_row_is_withheld_too(self):
 		fields = self.fields(items=[{"item": "FA Widget", "qty": 1, IBAN_FIELD: ALTERED_IBAN}])
@@ -342,6 +361,7 @@ class TestFillFromFile(AgentTestCase):
 	def test_the_saved_document_is_recorded_and_the_source_attached(self):
 		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
 		order = self.save_order(**{IBAN_FIELD: ALTERED_IBAN})
+		before = frappe.db.count(ORDER_DT)
 
 		done = self.record(extraction, order.name)
 
@@ -355,8 +375,7 @@ class TestFillFromFile(AgentTestCase):
 		self.assertEqual(flag["saved"], "printed")
 		# Compared afresh against the vendor the saved order links to.
 		self.assertEqual(flag["saved_mismatch"], 1)
-		# The bank detail stays on the document; the flag records only how it compares.
-		self.assertNotIn("applied_value", flag)
+		self.assertEqual(frappe.db.count(ORDER_DT), before)
 		self.assertTrue(
 			frappe.db.exists(
 				"File",
@@ -367,6 +386,43 @@ class TestFillFromFile(AgentTestCase):
 				},
 			)
 		)
+
+	def test_a_typed_value_is_recorded_as_typed_and_not_copied(self):
+		"""The bank detail stays on the document; the row records only how it compares."""
+		typed = "AE07 0331 1111 2222 3333 444"
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+		order = self.save_order(**{IBAN_FIELD: typed})
+
+		self.assertEqual(self.record(extraction, order.name)["sensitive"][IBAN_FIELD], "typed")
+		stored = frappe.db.get_value(EXTRACTION, extraction, "sensitive_flags")
+		self.assertNotIn(typed, stored)
+		self.assertNotIn(typed.replace(" ", ""), stored)
+
+	def test_another_user_cannot_record_a_reading(self):
+		extraction = self.read(extraction_reply(self.fields()))
+		order = self.save_order(user=SECOND_DRAFTER)
+
+		with self.assertRaises(frappe.PermissionError):
+			self.record(extraction, order.name, user=SECOND_DRAFTER)
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "status"), READY)
+
+	def test_another_users_document_cannot_claim_a_reading(self):
+		extraction = self.read(extraction_reply(self.fields()))
+		order = self.save_order(user=SECOND_DRAFTER)
+
+		with self.assertRaises(frappe.ValidationError):
+			self.record(extraction, order.name)
+		self.assertFalse(frappe.db.get_value(EXTRACTION, extraction, "created_doc"))
+
+	def test_a_discarded_reading_cannot_be_recorded(self):
+		extraction = self.read(extraction_reply(self.fields()))
+		with as_user(DRAFT_USER):
+			discard_extraction(extraction)
+		order = self.save_order()
+
+		with self.assertRaises(frappe.ValidationError):
+			self.record(extraction, order.name)
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "status"), DISCARDED)
 
 	def test_a_sensitive_field_left_empty_is_recorded_as_empty(self):
 		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
