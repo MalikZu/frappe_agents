@@ -449,7 +449,7 @@ def _resolve_start(start: Any) -> int:
 
 def _resolve_order_by(meta: Any, order_by: Any, allowed_levels: list) -> str:
 	if not order_by:
-		return "modified desc"
+		return "modified desc, name asc"
 	if not isinstance(order_by, str):
 		raise ValueError("order_by must be a string like 'modified desc'.")
 
@@ -469,7 +469,12 @@ def _resolve_order_by(meta: Any, order_by: Any, allowed_levels: list) -> str:
 		if cint(df.permlevel) not in allowed_levels:
 			raise ToolDenied(f"You are not allowed to order {meta.name} by {fieldname}.")
 
-	return f"{fieldname} {direction}"
+	# Rows that tie on the sort field come back in whatever order the database
+	# likes, and it may like a different one for the next page. The name breaks
+	# the tie, so paging never skips or repeats a row.
+	if fieldname == "name":
+		return f"name {direction}"
+	return f"{fieldname} {direction}, name asc"
 
 
 def _docs_touched(doctype: str, names: list) -> str | None:
