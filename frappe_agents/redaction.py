@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import frappe
+from frappe.utils import format_timedelta
 
 REDACTED = "[redacted]"
 
@@ -194,7 +195,10 @@ def _collect(value: Any, secrets: set[str]) -> None:
 		unwrapped = _UNTRUSTED.fullmatch(value)
 		if unwrapped:
 			secrets.add(unwrapped.group(1))
-	elif isinstance(value, (int, float, Decimal, datetime.date, datetime.time, datetime.timedelta)):
+	elif isinstance(value, datetime.timedelta):
+		# Not str(): a day or more, or a fraction of a second, reads differently there.
+		secrets.add(format_timedelta(value))
+	elif isinstance(value, (int, float, Decimal, datetime.date, datetime.time)):
 		secrets.add(str(value))
 	elif isinstance(value, dict):
 		for item in value.values():
