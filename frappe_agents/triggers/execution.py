@@ -12,9 +12,10 @@ twice:
 * `finish_trigger_run`, once the model has answered. It checks everything again
   against the document as it is now, and writes the one target field.
 
-Both the read and the write go through `execute_tool`, so each one is an audited
+The file read and the write go through `execute_tool`, so each one is an audited
 Agent Tool Call with the kill switch, the grant check and the permission check
-it always has. The model itself is offered no tools; `execute_tool` refuses any
+it always has. A source field is read off the document after the same read
+checks, and the run's input message records exactly what was read. The model itself is offered no tools; `execute_tool` refuses any
 it asks for, because only the runtime may call a tool on a triggered run.
 """
 
@@ -24,7 +25,6 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.model.workflow import get_workflow_name
 from frappe.utils import cint, cstr, escape_html, now_datetime, strip_html
 
 from frappe_agents.access.grants import VERB_READ, VERB_UPDATE_DRAFT
@@ -44,8 +44,10 @@ from frappe_agents.triggers import (
 	HTML_TARGETS,
 	TARGET_FIELDTYPES,
 	TRIGGER,
+	UNREADABLE_FIELDTYPES,
 	WRITES_FILE_TEXT,
 	TriggerRefused,
+	workflow_state_field,
 )
 
 READ_TOOL = "read_document"
@@ -168,7 +170,14 @@ def _check_writable(run: Any, trigger: Any, agent: Any) -> Any:
 		)
 	if trigger.event != EVENT_ATTACHMENT:
 		source = meta.get_field(trigger.source_field)
-		if not source or cint(source.permlevel) not in meta.get_permlevel_access("read"):
+		if (
+			not source
+			or source.fieldtype in UNREADABLE_FIELDTYPES
+			or source.fieldname in sensitive_fieldnames(doctype)
+		):
+			# Checked again here: a field can be marked sensitive after the trigger was saved.
+			raise TriggerRefused(_("The field {0} cannot be read by a trigger.").format(trigger.source_field))
+		if cint(source.permlevel) not in meta.get_permlevel_access("read"):
 			raise TriggerRefused(
 				_("{0} may not read the field {1}.").format(run.effective_user, trigger.source_field)
 			)
@@ -197,13 +206,6 @@ def _target_field(meta: Any, trigger: Any) -> Any:
 	return df
 
 
-def workflow_state_field(doctype: str) -> str | None:
-	workflow = get_workflow_name(doctype)
-	if not workflow:
-		return None
-	return frappe.get_cached_value("Workflow", workflow, "workflow_state_field")
-
-
 def _read_file(run: Any) -> dict:
 	"""The attachment, read through `read_document` as the run's user."""
 	if not run.get("trigger_file") or not frappe.db.exists("File", run.trigger_file):
@@ -224,7 +226,9 @@ def _read_file(run: Any) -> dict:
 	read = result.get("result") or {}
 	tokens = cint(read.get("tokens"))
 	if tokens:
-		# The reader looked at a scan with the run's model. Its tokens are the run's.
+		# The reader looked at a scan with the run's model. Its tokens are the run's,
+		# and `execute_run` adds them to the model's own when it records the cost.
+		run.flags.trigger_tokens = tokens
 		_update(run, {"tokens_in": tokens})
 	return read
 
@@ -345,10 +349,12 @@ def write_target(run: Any, trigger: Any, text: str | None) -> bool:
 			{"doctype": doc.doctype, "name": doc.name, "values": {target.fieldname: value}},
 			by_runtime=True,
 		)
-	if not result.get("ok"):
-		raise TriggerRefused(_("The target field could not be written: {0}").format(result.get("error")))
+		if not result.get("ok"):
+			raise TriggerRefused(_("The target field could not be written: {0}").format(result.get("error")))
 
-	_leave_note(run, trigger, doc.doctype, doc.name, target)
+		# Inside the run, like the write: the note is a Comment, and a Comment saved
+		# outside an agent run is an event another trigger could answer.
+		_leave_note(run, trigger, doc.doctype, doc.name, target)
 	return True
 
 
