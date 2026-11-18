@@ -29,9 +29,9 @@ drafts in your real data. Use test records where you can.
 - Read the **Documents** table on each result. It lists every draft the run
   wrote. Delete the drafts you do not want by hand.
 
-A rehearsal never submits or cancels anything. If the agent proposes a submit or
-a cancel, the proposal is closed as **Expired** when the run ends, even if
-scoring fails. No approver can approve it, and it does not count in the Review
+A rehearsal never submits, cancels or moves a workflow. If the agent makes a
+proposal of any kind, the proposal is closed as **Expired** when the run ends,
+even if scoring fails. No approver can approve it, and it does not count in the Review
 Quality report.
 
 ## Choose who the agent acts for
