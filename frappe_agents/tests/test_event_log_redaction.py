@@ -240,7 +240,8 @@ class TestEventLogRedaction(AgentTestCase):
 			run, _ = self.turn(self.read_script(order, model_says(answer)))
 
 		stored = frappe.db.get_value("Agent Run", run, "output_message")
-		self.assertNotIn("98765", stored)
+		# Word-bounded: the answer also holds 1987650 on purpose, which must stay.
+		self.assertNotRegex(stored, r"(?<!\d)98765(?!\d)")
 		self.assertNotIn("98,765", stored)
 		for kept in ("2025-01-02", "ORD-2025-0001", "1987650", "-99000"):
 			self.assertIn(kept, stored)
