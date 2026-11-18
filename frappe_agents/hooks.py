@@ -58,8 +58,12 @@ agent_tools = [
 # --------------
 
 # A proposal nobody decided is not a decision. Sweep pending actions past the
-# expiry in Agent Settings so the agent has to make its case again.
+# expiry in Agent Settings so the agent has to make its case again. And an MCP
+# client that goes away never says so: end the sessions nobody is using.
 scheduler_events = {
+	"hourly": [
+		"frappe_agents.mcp.server.close_idle_sessions",
+	],
 	"daily": [
 		"frappe_agents.actions.expire_stale_actions",
 	],
