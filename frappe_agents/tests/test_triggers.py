@@ -21,6 +21,7 @@ from frappe_agents.tests.fixtures import (
 	EXTRACT_PROFILE,
 	ORDER_DT,
 	RESTRICTED_USER,
+	SECOND_DRAFTER,
 	AgentTestCase,
 	as_user,
 	make_matrix_agent,
@@ -45,6 +46,8 @@ from frappe_agents.triggers.dispatch import (
 	SKIP_ROLE,
 	SKIP_SWITCH,
 	clear_index,
+	mark_dirty,
+	on_update,
 	release,
 	release_lock,
 	run_trigger,
@@ -293,6 +296,38 @@ class TestWhichSavesFire(TriggerCase):
 		self.assertEqual(len(self.dispatched(calls)), 1)
 		self.assertEqual(skips_today(trigger.name).get(SKIP_RATE), 1)
 
+	def test_one_busy_person_does_not_use_up_everyone_s_hour(self):
+		self.make_trigger(max_runs_per_hour=2, max_runs_per_user_per_hour=1)
+
+		with self.queue() as calls:
+			make_order_draft()
+			make_order_draft()
+			make_order_draft(user=SECOND_DRAFTER)
+
+		self.assertEqual(
+			[kwargs["fired_by"] for kwargs in self.dispatched(calls)], [DRAFT_USER, SECOND_DRAFTER]
+		)
+
+	def test_an_upload_to_an_unsaved_document_fires_when_the_document_is_created(self):
+		"""frappe re-points such a File with a direct update, so the insert is where it shows."""
+		trigger = self.make_trigger(event="Attachment Added", source_field=None, instruction="Read it.")
+		temporary = f"new-fa-test-order-{frappe.generate_hash(length=6)}"
+
+		with self.queue() as calls, as_user(DRAFT_USER):
+			file = make_pdf_attachment(name=temporary)
+		self.assertEqual(self.dispatched(calls), [])
+
+		order = make_order_draft()
+		frappe.db.set_value("File", file.name, "attached_to_name", order.name)
+		with self.queue() as calls, as_user(DRAFT_USER):
+			order.flags.in_insert = True
+			on_update(order)
+
+		fired = self.dispatched(calls)
+		self.assertEqual(
+			[(kwargs["trigger"], kwargs["file"]) for kwargs in fired], [(trigger.name, file.name)]
+		)
+
 	def test_an_attachment_fires_with_its_file(self):
 		trigger = self.make_trigger(event="Attachment Added", source_field=None, file_extensions="pdf")
 		order = make_order_draft()
@@ -390,6 +425,23 @@ class TestStartingARun(TriggerCase):
 		self.assertEqual(len(missed), 1)
 		self.assertEqual(missed[0]["fired_by"], DRAFT_USER)
 		self.assertTrue(take_lock(trigger.name, ORDER_DT, order.name))
+
+	def test_every_file_left_waiting_is_read_in_turn(self):
+		trigger = self.make_trigger(event="Attachment Added", source_field=None, instruction="Read it.")
+		order = make_order_draft()
+		for file in ("fa-file-one", "fa-file-two"):
+			mark_dirty(trigger.name, ORDER_DT, order.name, DRAFT_USER, file)
+		finished = frappe._dict(
+			name="fa-finished", trigger=trigger.name, context_doctype=ORDER_DT, context_name=order.name
+		)
+
+		read = []
+		for _ in range(3):
+			with self.queue() as calls:
+				release(finished)
+			read += [kwargs["file"] for kwargs in self.dispatched(calls)]
+
+		self.assertEqual(read, ["fa-file-one", "fa-file-two"])
 
 
 class TestTheRun(TriggerCase):
