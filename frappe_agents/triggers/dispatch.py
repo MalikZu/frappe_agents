@@ -23,6 +23,7 @@ stopped firing says why on its own form instead of in nobody's log.
 """
 
 import json
+import operator
 from typing import Any
 
 import frappe
@@ -30,7 +31,7 @@ import redis
 from frappe import _
 from frappe.query_builder.functions import Sum
 from frappe.utils import cint, cstr, now_datetime, today
-from frappe.utils.data import evaluate_filters
+from frappe.utils.data import cast
 
 from frappe_agents.tools.base import RUN_FLAG, runtime_enabled
 from frappe_agents.triggers import (
@@ -68,6 +69,15 @@ SKIP_REASONS = (SKIP_NO_USER, SKIP_RATE, SKIP_SWITCH, SKIP_AGENT, SKIP_ROLE, SKI
 # Saves that never fire a trigger whatever the settings say. Nobody's action is
 # behind them, and the user they run as is Administrator.
 SYSTEM_FLAGS = ("in_install", "in_install_db", "in_migrate", "in_patch", "in_uninstall")
+
+COMPARISONS = {
+	"=": operator.eq,
+	"!=": operator.ne,
+	">": operator.gt,
+	"<": operator.lt,
+	">=": operator.ge,
+	"<=": operator.le,
+}
 
 FILE = "File"
 LOCAL_FILE_PREFIXES = ("/files/", "/private/files/")
@@ -201,14 +211,42 @@ def enqueue_run(trigger: str, doctype: str, docname: str, user: str, file: str |
 
 
 def conditions_hold(trigger: Any, doc: Any) -> bool:
-	"""Every condition row on the trigger holds on this document."""
-	filters = []
+	"""Every condition row on the trigger holds on this document.
+
+	Compared after casting both sides to the field's own type, so `amount > 50`
+	compares numbers and `status = Open` compares text, whatever the row stored.
+	"""
+	meta = frappe.get_meta(doc.doctype)
 	for row in trigger.get("conditions") or []:
-		value: Any = row.value
-		if row.condition in ("in", "not in"):
-			value = [part.strip() for part in cstr(row.value).split(",") if part.strip()]
-		filters.append([row.fieldname, row.condition, value])
-	return not filters or bool(evaluate_filters(doc, filters))
+		df = meta.get_field(row.fieldname)
+		if not _holds(doc.get(row.fieldname), row.condition, row.value, df.fieldtype if df else None):
+			return False
+	return True
+
+
+def _holds(actual: Any, condition: str, expected: Any, fieldtype: str | None) -> bool:
+	if condition == "is":
+		wanted_set = cstr(expected).strip().lower() == "set"
+		return _is_empty(actual) != wanted_set
+	if condition in ("in", "not in"):
+		options = [part.strip() for part in cstr(expected).split(",") if part.strip()]
+		found = cstr(actual) in options
+		return found if condition == "in" else not found
+	if condition in ("like", "not like"):
+		needle = cstr(expected).replace("%", "").lower()
+		found = needle in cstr(actual).lower()
+		return found if condition == "like" else not found
+
+	if fieldtype:
+		actual, expected = cast(fieldtype, actual), cast(fieldtype, expected)
+	else:
+		actual, expected = cstr(actual), cstr(expected)
+	compare = COMPARISONS.get(condition)
+	try:
+		return bool(compare and compare(actual, expected))
+	except TypeError:
+		# A value of the wrong shape cannot meet a condition. Never fire on doubt.
+		return False
 
 
 # --- the cached index -------------------------------------------------------

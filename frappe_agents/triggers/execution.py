@@ -133,6 +133,12 @@ def _check_writable(run: Any, trigger: Any, agent: Any) -> Any:
 	doctype, name = run.context_doctype, run.context_name
 	if not frappe.db.exists(doctype, name):
 		raise TriggerRefused(_("{0} {1} no longer exists.").format(doctype, name))
+	# Asked first, so the refusal names the real reason. The write path refuses a
+	# submitted document too; this is the same answer, earlier and cheaper.
+	if cint(frappe.db.get_value(doctype, name, "docstatus")) != DRAFT:
+		raise TriggerRefused(
+			_("{0} {1} is submitted or cancelled. A trigger only writes to drafts.").format(doctype, name)
+		)
 	if not frappe.has_permission(doctype, "write", doc=name):
 		raise TriggerRefused(
 			_("{0} may not change {1} {2}, so the trigger cannot write to it.").format(
@@ -141,10 +147,6 @@ def _check_writable(run: Any, trigger: Any, agent: Any) -> Any:
 		)
 
 	doc = frappe.get_doc(doctype, name)
-	if cint(doc.docstatus) != DRAFT:
-		raise TriggerRefused(
-			_("{0} {1} is submitted or cancelled. A trigger only writes to drafts.").format(doctype, name)
-		)
 	if WRITE_TOOL not in get_agent_tool_names(agent):
 		raise TriggerRefused(
 			_("Agent {0} may not edit drafts, so it cannot write the target field.").format(agent.name)
