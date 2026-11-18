@@ -158,8 +158,10 @@ class TestExtractionGate(AgentTestCase):
 		"""The v16 masking trap, which would make every extraction a mismatch forever.
 
 		This user may read the vendor and may not see its IBAN unmasked. Read through
-		the query layer it is "XXXXXXXX" — assert that first, or the rest of this test
-		would keep passing after the mask was gone and prove nothing.
+		`get_list` it is "XXXXXXXX" — assert that first, or the rest of this test
+		would keep passing after the mask was gone and prove nothing. `get_list` is
+		the read that masks on every v16: from v16.50 `db.get_value`, `get_all` and
+		`get_doc` hand back the stored value, before it they masked too.
 		"""
 		# frappe_agents patch (version-15): this asserts v16 field masking.
 		# Where the framework masks nothing, Agent Settings' own sensitive
@@ -167,8 +169,8 @@ class TestExtractionGate(AgentTestCase):
 		if not masking_supported():
 			self.skipTest("the gate has no masked-field source on this Frappe version")
 		with as_user(DRAFT_USER):
-			through_query_layer = frappe.db.get_value(VENDOR_DT, VENDOR_ACME, IBAN_FIELD)
-		self.assertEqual(through_query_layer, "XXXXXXXX")
+			rows = frappe.get_list(VENDOR_DT, filters={"name": VENDOR_ACME}, fields=[IBAN_FIELD])
+		self.assertEqual(rows[0][IBAN_FIELD], "XXXXXXXX")
 
 		doc, _ = self.extract(**{IBAN_FIELD: VENDOR_IBAN})
 

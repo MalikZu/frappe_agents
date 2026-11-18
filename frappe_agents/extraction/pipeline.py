@@ -53,6 +53,7 @@ from frappe_agents.runner.providers import (
 	ProviderError,
 	call_model_extract,
 )
+from frappe_agents.runner.queue import run_queue
 from frappe_agents.tools.base import current_run, runtime_enabled
 
 EXTRACTION = "Document Extraction"
@@ -134,7 +135,7 @@ def queue_extraction(file_name: str, target_doctype: str, model_profile: str | N
 
 	frappe.enqueue(
 		"frappe_agents.extraction.pipeline.run_extraction",
-		queue="long",
+		queue=run_queue(),
 		timeout=JOB_TIMEOUT,
 		enqueue_after_commit=True,
 		extraction=extraction.name,

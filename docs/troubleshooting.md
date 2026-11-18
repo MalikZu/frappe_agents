@@ -58,6 +58,11 @@ a scratch site. Disable or delete the leftovers.
 The workspace lives at `/app/agents`. If the desk tile is gone or 404s, go there
 directly.
 
+From Frappe v16.50, a site shows either the **Apps** screen or the older **Desktop
+Icons** grid (Desktop Settings → Desktop Page). A fresh site starts on the Apps
+screen. The Apps screen has no desk tiles. Open **Agents** from the Apps screen. A
+site upgraded with tiles stays on the grid and keeps the Agents tile.
+
 If the sidebar entry is missing too, run `bench --site yoursite migrate` and then
 `bench --site yoursite clear-cache`. On a site upgraded from an older release the
 sidebar row may need the migrate to appear.

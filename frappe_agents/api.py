@@ -32,6 +32,7 @@ from frappe_agents.extraction.pipeline import (
 )
 from frappe_agents.extraction.schema import build_extraction_schema
 from frappe_agents.model_profiles import check_profile, profile_choices
+from frappe_agents.runner.queue import run_queue, run_timeout
 from frappe_agents.tools.base import AUTONOMY_CAPABILITIES, runtime_enabled
 from frappe_agents.tools.draft_tools import SYSTEM_FIELDS
 from frappe_agents.tools.registry import agent_tool_order
@@ -346,7 +347,8 @@ def start_run(
 
 	frappe.enqueue(
 		"frappe_agents.runner.run.execute_run",
-		queue="long",
+		queue=run_queue(),
+		timeout=run_timeout(),
 		enqueue_after_commit=True,
 		run_name=run.name,
 	)

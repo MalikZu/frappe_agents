@@ -8,6 +8,8 @@
  "field_order": [
   "global_enabled",
   "max_depth",
+  "run_queue",
+  "run_timeout",
   "default_daily_token_budget",
   "action_expiry_days",
   "suppress_on_import",
@@ -31,6 +33,21 @@
    "fieldname": "max_depth",
    "fieldtype": "Int",
    "label": "Max Depth"
+  },
+  {
+   "default": "agents",
+   "description": "Background queue for chat turns and extractions. Give it its own worker, so a turn does not hold up other jobs. When no worker listens on it, runs use the long queue.",
+   "fieldname": "run_queue",
+   "fieldtype": "Data",
+   "label": "Run Queue"
+  },
+  {
+   "default": "600",
+   "description": "Seconds a chat turn may run on a worker. A longer turn is stopped and marked failed.",
+   "fieldname": "run_timeout",
+   "fieldtype": "Int",
+   "label": "Run Timeout (seconds)",
+   "non_negative": 1
   },
   {
    "description": "Fallback token budget per agent per day when the agent sets none.",
@@ -92,7 +109,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-13 13:20:00.000000",
+ "modified": "2026-10-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Settings",

@@ -63,4 +63,8 @@ scheduler_events = {
 	"daily": [
 		"frappe_agents.actions.expire_stale_actions",
 	],
+	# A run no worker started would show "Queued…" for ever. Fail it with a reason.
+	"hourly": [
+		"frappe_agents.runner.queue.fail_unstarted_runs",
+	],
 }
