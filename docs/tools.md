@@ -69,14 +69,17 @@ handed a document dump it did not need.
 `update_draft` defaults to drafts the agent itself created. A rule may widen it
 to any draft.
 
-The three `propose_*` tools are the only route to a submitted document, and they
-produce a row, not a change. On a doctype with an active Workflow, only
-`propose_transition` works — see [Workflow actions](approvals.md#workflow-actions).
+`propose_submit`, `propose_cancel` and `propose_transition` are the only route
+to a submitted document, and they produce a row, not a change. On a doctype with
+an active Workflow, `propose_transition` is the only one of the three that works
+— see [Workflow actions](approvals.md#workflow-actions).
 
 A record with no submit step — a ticket, a lead, a task — is live from the
 moment it is saved. `update_draft` changes it at once. `propose_update` asks a
 person first, and stores the values the record held so the approval fails if
-they moved — see [Field changes](approvals.md#field-changes).
+they moved — see [Field changes](approvals.md#field-changes). It works on a
+doctype with an active Workflow too: the approver needs the role the current
+state allows to edit, and the workflow state itself is refused.
 
 ## Reading a tool call
 

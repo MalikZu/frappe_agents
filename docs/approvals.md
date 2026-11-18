@@ -210,9 +210,11 @@ The agent cannot propose a change to:
 One refused field refuses the whole proposal. The approver approves one exact
 set of changes, so nothing is dropped quietly.
 
-The agent needs **read** on the document and on each field's permission level.
-It does not need write: writing is the approver's job. A link must name a record
-the agent's user may read.
+The agent needs **read** on the document and on each field's permission level,
+and its access rule must tick **Read** as well as **Propose**. It does not need
+write: writing is the approver's job. A link must name a record the agent's user
+may read. When the agent's rules do not let it read the linked doctype, the link
+is kept as written and checked at approval.
 
 A record with a submit step is refused. The agent changes a draft with
 `update_draft`. A submitted document is changed by cancelling and amending it.
@@ -234,13 +236,16 @@ fills in from that link follow it, as they would in the form.
 If a field changed after the agent proposed, its row is red and **Approve** is
 not offered. Reject the proposal, or ask the agent to propose again.
 
+If you may not read one of the fields, **Approve** is not offered either. You
+would be approving a value you cannot see, so another approver has to decide.
+
 ### What approving checks
 
 The change is saved as you, with an ordinary save. Every check in
 [Approving](#approving) runs first. Then:
 
-- **You need write** on the document, and at the permission level of every
-  field in the change. Frappe's own save would quietly keep the old value of a
+- **You need read and write** on the document, and at the permission level of
+  every field in the change. Frappe's own save would quietly keep the old value of a
   field you may not write and save the rest. The app refuses the whole change
   instead.
 - **Each field must still hold the value the agent saw.** A change to a field
@@ -253,6 +258,10 @@ The change is saved as you, with an ordinary save. Every check in
 - **Every value is read back after the save.** If the document's own rules
   changed a value while saving, the whole change is rolled back and the proposal
   is **Failed**.
+
+If the document's own rules refuse the save, the row says so and nothing more.
+Their message can quote field values, and the row is readable by people who may
+not read those fields. You see the message when you click **Approve**.
 
 A rollback undoes what was written to the database. It does not undo work the
 document's code queued to run once the request finishes — a webhook, a
