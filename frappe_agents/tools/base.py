@@ -190,7 +190,7 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, atomic: boo
 		frappe.flags[RUN_FLAG] = previous_run
 
 	if atomic and outcome != OUTCOME_SUCCESS:
-		frappe.db.rollback(save_point=MCP_SAVEPOINT)
+		_undo_call(tool_name, run_name)
 
 	_log_call(
 		run_name,
@@ -334,6 +334,23 @@ def _accepts(method: Any, name: str) -> bool:
 		return name in inspect.signature(method).parameters
 	except SIGNATURE_ERRORS:
 		return False
+
+
+def _undo_call(tool_name: str, run_name: str) -> None:
+	"""Roll a failed atomic call back, and never let the rollback cost the audit row.
+
+	The savepoint can already be gone: a deadlock rolls the whole transaction
+	back, and so does a handler that rolled back itself. Then the only undo left
+	is the whole transaction, and the row below is still written.
+	"""
+	try:
+		frappe.db.rollback(save_point=MCP_SAVEPOINT)
+	except Exception:
+		frappe.logger("frappe_agents").warning(
+			f"savepoint for tool {tool_name} on run {run_name} was gone; rolled back the transaction",
+			exc_info=True,
+		)
+		frappe.db.rollback()
 
 
 def _identity_refusal(run_doc: Any) -> str | None:

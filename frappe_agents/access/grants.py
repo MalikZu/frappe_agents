@@ -56,6 +56,7 @@ from frappe_agents.access.exclusions import (
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
 	CAPABILITY_DRAFT,
+	SURFACE_MCP,
 	ToolDenied,
 	current_run,
 )
@@ -119,11 +120,14 @@ FILE_TOOLS = frozenset({"read_document"})
 GENERIC_TOOLS = frozenset(DOCTYPE_TOOL_VERBS) | REPORT_TOOLS | FILE_TOOLS | BUILDER_TOOLS
 
 # What an outside MCP client may be offered, out of what the matrix exposes.
-# Extraction is left out because it spends this site's model tokens for a client
-# that brings its own model; the builder tools because designing agents is the
-# configuration of the runtime, not work inside it; tools other apps registered
-# because nobody has said they are safe to hand to a model the site did not pick.
-MCP_HIDDEN_TOOLS = frozenset({"extract_document"}) | BUILDER_TOOLS
+# Extraction and file reading are left out because both can spend this site's
+# model tokens — a scan is read by the agent's own vision model — for a client
+# that brings its own model, and an MCP run records no tokens for the budget to
+# count. The builder tools are left out because designing agents is the
+# configuration of the runtime, not work inside it, and tools other apps
+# registered because nobody has said they are safe to hand to a model the site
+# did not pick.
+MCP_HIDDEN_TOOLS = frozenset({"extract_document"}) | FILE_TOOLS | BUILDER_TOOLS
 MCP_TOOLS = GENERIC_TOOLS - MCP_HIDDEN_TOOLS
 
 
@@ -201,6 +205,10 @@ def require_grant(target: str, verb: str, target_type: str = TARGET_DOCTYPE) -> 
 		raise ToolDenied(exclusion_reason(target))
 	if target_type == TARGET_REPORT and report_is_excluded(target):
 		raise ToolDenied(report_exclusion_reason(target))
+	if target_type == TARGET_DOCTYPE and target == BLUEPRINT and _on_mcp():
+		# The builder tools are hidden from MCP; drafting the blueprint they feed
+		# is the same configuration work by another route.
+		raise ToolDenied(f"An MCP client may not work on {BLUEPRINT} records.")
 
 	agent = current_agent()
 	if agent is None or in_legacy_mode(agent):
@@ -336,6 +344,11 @@ def proposals_allowed(agent: Any) -> bool:
 	"""Whether this agent's autonomy reaches the proposal tools at all."""
 	agent = _agent_doc(agent)
 	return CAPABILITY_DRAFT in AUTONOMY_CAPABILITIES.get(agent.get("autonomy"), set())
+
+
+def _on_mcp() -> bool:
+	run = current_run()
+	return run is not None and run.get("surface") == SURFACE_MCP
 
 
 def current_agent() -> Any:
