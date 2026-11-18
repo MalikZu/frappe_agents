@@ -818,8 +818,8 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$send.on("click", () => (this.running_turns().length ? this.stop() : this.send()));
 		this.$attach.on("click", () => this.attach());
 		this.$input.on("keydown", (e) => {
-			// An input method is still composing — Arabic, Chinese, Japanese,
-			// Korean. Enter there picks a word or ends the composition; it is not
+			// An input method (for example Chinese, Japanese or Korean) is still
+			// composing. Enter there picks a word or ends the composition; it is not
 			// the person asking to send. 229 is what older browsers report instead.
 			// Read off the native event: jQuery does not copy `isComposing`.
 			const native = e.originalEvent || e;
@@ -1554,6 +1554,8 @@ frappe_agents.ChatUI = class ChatUI {
 				if (this.conversation !== conversation) return;
 				this.conversation = null;
 				this.show_empty(__("That conversation could not be loaded."));
+				// Nothing is pending on an empty log, so the button is Send again.
+				this.render_send();
 			},
 		});
 	}
@@ -2160,20 +2162,24 @@ frappe_agents.ChatUI = class ChatUI {
 			delete this.stop_timers[run];
 			if (this.destroyed || !this.pending[run] || !this.conversation) return;
 			const conversation = this.conversation;
+			// Not over yet, or the server could not be asked: check again, until
+			// the checks run out. A failed check counts as one, so a server that
+			// stays down still gives the composer back.
+			const again = () => {
+				if (this.conversation !== conversation || !this.pending[run]) return;
+				if (tries + 1 < STOP_CHECK_LIMIT) this.check_stopped(run, STOP_CHECK_MS, tries + 1);
+				else this.let_go(run);
+			};
 			frappe.call({
 				method: "frappe_agents.api.get_conversation",
 				args: { conversation: conversation },
 				callback: (r) => {
 					if (this.conversation !== conversation || !this.pending[run]) return;
 					const found = ((r.message || {}).runs || []).find((one) => one.name === run);
-					if (!found || FINISHED_STATUSES.includes(found.status)) {
-						this.reload_tail();
-					} else if (tries + 1 < STOP_CHECK_LIMIT) {
-						this.check_stopped(run, STOP_CHECK_MS, tries + 1);
-					} else {
-						this.let_go(run);
-					}
+					if (!found || FINISHED_STATUSES.includes(found.status)) this.reload_tail();
+					else again();
 				},
+				error: again,
 			});
 		}, delay);
 	}
@@ -2956,7 +2962,9 @@ frappe_agents.ChatUI = class ChatUI {
 		if (input && status !== "Cancelled") this.add_retry($row, input);
 		this.insert_before_pending(run, $row);
 		this.clear_pending(run);
-		this.announce(__("The run failed."));
+		// A stopped turn is not a failure, and the reason says which stop it was:
+		// the person's own, or the site's switch.
+		this.announce(status === "Cancelled" && error ? error : __("The run failed."));
 	}
 
 	/**

@@ -53,6 +53,7 @@ from frappe_agents.harness.tools import AgentTool, AgentToolResult
 from frappe_agents.model_profiles import check_profile
 from frappe_agents.redaction import EventRedactor
 from frappe_agents.runner.proposal_updates import note_for, with_note
+from frappe_agents.runner.providers import ProviderError
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
@@ -269,8 +270,9 @@ def execute_run(run_name: str) -> None:
 		frappe.logger("frappe_agents").error(f"run {run_name} failed", exc_info=True)
 		if run is not None:
 			# A provider error that ends a stopped run — a retry backoff cut short
-			# by Stop, say — is the stop, not a failure.
-			stopped = _stop_reason(run.name)
+			# by Stop raises one — is the stop, not a failure. Anything else that
+			# broke is a failure, whether or not somebody also pressed Stop.
+			stopped = _stop_reason(run.name) if isinstance(exc, ProviderError) else None
 			if stopped:
 				_fail(run, stopped, status="Cancelled")
 			else:
