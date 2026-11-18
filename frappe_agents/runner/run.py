@@ -268,7 +268,13 @@ def execute_run(run_name: str) -> None:
 	except Exception as exc:
 		frappe.logger("frappe_agents").error(f"run {run_name} failed", exc_info=True)
 		if run is not None:
-			_fail(run, str(exc) or exc.__class__.__name__)
+			# A provider error that ends a stopped run — a retry backoff cut short
+			# by Stop, say — is the stop, not a failure.
+			stopped = _stop_reason(run.name)
+			if stopped:
+				_fail(run, stopped, status="Cancelled")
+			else:
+				_fail(run, str(exc) or exc.__class__.__name__)
 	finally:
 		# Restore the job's original identity once the run ends.
 		frappe.set_user(original_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
@@ -379,6 +385,13 @@ def _execute(run: Any) -> None:
 		# The last thing the model wrote, even on the path where the loop threw
 		# and nothing else will flush it.
 		events.updates.flush()
+
+	if events.final_text is None and not cancellation.is_cancelled():
+		# The loop ended without an answer and nobody cancelled the token. A turn
+		# parked in a provider retry backoff ends that way when it is stopped: the
+		# backoff gives up, and the provider's last refusal is what the loop
+		# reports. Asked once more here, so that run ends Cancelled, not Failed.
+		_check_kill_switch(cancellation, run.name)
 
 	if cancellation.is_cancelled():
 		return _fail(run, cancellation.reason or "The run was cancelled.", status="Cancelled")
