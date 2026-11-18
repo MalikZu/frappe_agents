@@ -61,7 +61,9 @@ LEGACY_RUN_KEYS = {
 }
 # What a run says about the documents it had read. Added the same way and under
 # the same promise: present and empty for every run that read nothing.
-ADDED_RUN_KEYS = {"extractions"}
+# And where each of the run's proposals stands now, for the same reason: a
+# proposal is decided after the run that made it, by somebody else.
+ADDED_RUN_KEYS = {"extractions", "actions"}
 
 
 class TestConversationPayload(AgentTestCase):

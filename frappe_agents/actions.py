@@ -106,6 +106,30 @@ NOTICE_FIELDS = (
 	"target_name",
 )
 
+# How many of a user's past rejections on one document the proposal tools look
+# through for one made on the same version of it.
+REJECTION_LOOKBACK = 5
+
+# What a proposal's state is read from, for the chat card and the agent's history.
+STATE_FIELDS = (
+	"name",
+	"run",
+	"status",
+	"action_type",
+	"workflow_action",
+	"workflow_name",
+	"from_workflow_state",
+	"target_doctype",
+	"target_name",
+	"reason",
+	"decision_note",
+	"failure",
+	"decided_at",
+	"requested_by",
+	"agent",
+	"creation",
+)
+
 
 @frappe.whitelist(methods=["POST"])
 def approve_action(action: str, expected_modified: Any, note: str | None = None) -> dict:
@@ -629,6 +653,110 @@ def _never_raises(title: str):
 	except Exception:
 		frappe.db.rollback(save_point=NOTIFY_SAVEPOINT)
 		frappe.log_error(title=title)
+
+
+def state_fields() -> list[str]:
+	"""The Agent Action columns a chat card and the agent's history are built from."""
+	return list(STATE_FIELDS)
+
+
+def proposal_state(row: Any) -> dict:
+	"""One proposal as the session user may see it: where it stands, and why.
+
+	Everything about the target is taken out when the session user cannot read
+	the target today: its doctype and name, the agent's reason, the approver's
+	note and the failure text. The note and the failure are about the document,
+	and a failure is the document's own validation message, which may quote its
+	fields. What stays is what is about the proposal itself: its status, the verb,
+	the run, and when it was decided.
+	"""
+	row = frappe._dict(row)
+	state = {
+		"action": row.name,
+		"run": row.run,
+		"status": row.status,
+		"action_type": row.action_type,
+		"workflow_action": row.get("workflow_action"),
+		"workflow_name": row.get("workflow_name"),
+		"from_workflow_state": row.get("from_workflow_state"),
+		"target_doctype": row.target_doctype,
+		"target_name": row.target_name,
+		"reason": row.reason,
+		"decision_note": row.decision_note,
+		"failure": row.failure,
+		"decided_at": row.decided_at,
+		"target_visible": 1,
+		"can_decide": 0,
+	}
+	if row.status == STATUS_PENDING and is_stale(row):
+		# Past its window and refused by `approve_action` already; the daily sweep
+		# writes it down later. Until then it is shown as what it is.
+		state["status"] = STATUS_EXPIRED
+
+	# A target that is gone has nobody to ask about, so it is not shown at all:
+	# the doctype-level right says nothing about one document's User Permissions.
+	exists = bool(
+		row.target_doctype and row.target_name and frappe.db.exists(row.target_doctype, row.target_name)
+	)
+	if not exists or not target_readable(row):
+		state.update(
+			{
+				"target_visible": 0,
+				"target_doctype": None,
+				"target_name": None,
+				# A workflow's names are part of the target's process, and can say
+				# what kind of document it is.
+				"workflow_action": None,
+				"workflow_name": None,
+				"from_workflow_state": None,
+				"reason": None,
+				"decision_note": None,
+				"failure": None,
+			}
+		)
+		return state
+
+	if state["status"] == STATUS_PENDING:
+		state["can_decide"] = 0 if separation_of_duties_block(row) else 1
+	return state
+
+
+def rejected_proposal_for(target_doctype: str, target_name: str, action_type: str, modified: Any) -> Any:
+	"""This user's rejected proposal for the same thing on the document as it is now, if any.
+
+	Read through `get_list`, so it finds the session user's own proposals and
+	nobody else's. A rejection of the same action on a document that has changed
+	since is not this one: the document is a different question now.
+	"""
+	rows = frappe.get_list(
+		"Agent Action",
+		filters={
+			"target_doctype": target_doctype,
+			"target_name": target_name,
+			"action_type": action_type,
+			"status": STATUS_REJECTED,
+		},
+		fields=["name", "decision_note", "proposal_modified"],
+		order_by="creation desc",
+		limit_page_length=REJECTION_LOOKBACK,
+	)
+	for row in rows:
+		if _same_timestamp(row.proposal_modified, modified):
+			return row
+	return None
+
+
+def target_readable(row: Any) -> bool:
+	"""Whether the session user may read the document a proposal is about."""
+	doctype, name = row.get("target_doctype"), row.get("target_name")
+	if not doctype or not name:
+		return False
+	if not frappe.db.exists(doctype, name):
+		# The target is gone, so there is no document to check against. The
+		# doctype-level right is the most that can be asked here, and the approval
+		# will fail on the missing document anyway.
+		return bool(frappe.has_permission(doctype, "read"))
+	return bool(frappe.has_permission(doctype, "read", doc=name))
 
 
 def _check_kill_switch() -> None:
