@@ -400,11 +400,11 @@ def _plant_bait(rehearsal: Any, user: str) -> tuple[str | None, dict | None, lis
 			"content": rehearsal.bait_text,
 		}
 	)
+	# Saved through Comment.validate, which sanitises the HTML. The desk renders a
+	# comment as HTML for everyone who opens the document, so raw bait here would
+	# let a manager plant script on records they can only read. That is also why
+	# the close-the-wrapper case ships for the file vector only.
 	comment.insert(ignore_permissions=True)
-	# The XSS filter on insert rewrites a literal `</untrusted>`, which is the one
-	# thing the wrapper case exists to send. Written back raw, the way a hostile
-	# integration or an import would leave it.
-	frappe.db.set_value("Comment", comment.name, "content", rehearsal.bait_text, update_modified=False)
 	return (
 		None,
 		{"vector": vector, "doctype": rehearsal.context_doctype, "name": rehearsal.context_name},
