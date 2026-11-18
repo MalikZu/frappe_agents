@@ -9,6 +9,7 @@ sensitive must be `[redacted]` in both. The live frame is the exception: it goes
 only to the user who ran the turn, who already holds the value.
 """
 
+import json
 from unittest.mock import patch
 
 import frappe
@@ -17,7 +18,7 @@ from frappe_agents import redaction
 from frappe_agents.api import get_conversation
 from frappe_agents.harness.messages import message_text
 from frappe_agents.patches.v0_7_0 import redact_stored_event_logs
-from frappe_agents.redaction import REDACTED, EventRedactor, redact, redact_json_text
+from frappe_agents.redaction import REDACTED, EventRedactor, redact, redact_json_text, scrub
 from frappe_agents.runner.providers import ProviderError
 from frappe_agents.runner.run import EVENT
 from frappe_agents.tests.fixtures import (
@@ -323,6 +324,93 @@ class TestVersionChanges(AgentTestCase):
 		self.assertIn("New title", stored_text)
 
 
+NUMBER_ARGS = {"doctype": ORDER_DT, "name": "ORD-2025-0001", "slice": "fields"}
+NUMBER_RESULT = {
+	"ok": True,
+	"result": {
+		"amount": 2025,
+		"date": "2025-01-02",
+		"name": "ORD-2025-0001",
+		"total": 12025,
+		"note": "Paid 2025.",
+	},
+	"error": None,
+}
+NUMBER_KEPT = {"date": "2025-01-02", "name": "ORD-2025-0001", "total": 12025}
+
+
+class TestNumbersStayInTheirPlace(AgentTestCase):
+	"""A sensitive number is held back where it stands, not inside other values.
+
+	A sensitive amount of 2025 must not turn a date into `[redacted]-01-02`, a
+	name into `ORD-[redacted]-0001`, or 12025 into `1[redacted]` — and the stored
+	result must stay JSON, because the chat parses it to redraw a proposal card.
+	"""
+
+	def stored(self, recorded: bool) -> tuple[dict, str]:
+		text = frappe.as_json(NUMBER_RESULT)
+		with amount_is_sensitive():
+			redactor = EventRedactor()
+			redactor.event({"type": "tool_execution_start", "toolCallId": "call_1", "args": NUMBER_ARGS})
+			if recorded:
+				redactor.record_result("call_1", NUMBER_ARGS, NUMBER_RESULT, text, frappe.as_json)
+			ended = redactor.event(
+				{
+					"type": "tool_execution_end",
+					"toolCallId": "call_1",
+					"result": {"content": [{"type": "text", "text": text}]},
+				}
+			)
+			said = redactor.event(
+				{
+					"type": "message_end",
+					"message": {
+						"role": "assistant",
+						"content": [
+							{"type": "text", "text": "Paid 2025 on 2025-01-02 for ORD-2025-0001, 12025."}
+						],
+					},
+				}
+			)
+		return json.loads(ended["result"]["content"][0]["text"]), said["message"]["content"][0]["text"]
+
+	def test_a_recorded_result_stays_json_with_its_neighbours_intact(self):
+		result, said = self.stored(recorded=True)
+
+		self.assertEqual(result["result"]["amount"], REDACTED)
+		self.assertEqual(result["result"]["note"], f"Paid {REDACTED}.")
+		for key, value in NUMBER_KEPT.items():
+			self.assertEqual(result["result"][key], value)
+		self.assertEqual(said, f"Paid {REDACTED} on 2025-01-02 for ORD-2025-0001, 12025.")
+
+	def test_a_result_read_back_from_text_stays_json_too(self):
+		result, _ = self.stored(recorded=False)
+
+		self.assertEqual(result["result"]["amount"], REDACTED)
+		for key, value in NUMBER_KEPT.items():
+			self.assertEqual(result["result"][key], value)
+
+	def test_prose_loses_a_number_only_where_it_stands_alone(self):
+		text = "2025 on 2025-01-02, ORD-2025-0001, 12025, 2025.5, v2025 and 15000; then 2025."
+
+		self.assertEqual(
+			scrub(text, {"2025", "1500"}),
+			f"{REDACTED} on 2025-01-02, ORD-2025-0001, 12025, 2025.5, v2025 and 15000; then {REDACTED}.",
+		)
+
+	def test_update_events_hold_back_their_arguments_too(self):
+		stored = EventRedactor().event(
+			{
+				"type": "tool_execution_update",
+				"toolCallId": "call_1",
+				"args": {"doctype": ORDER_DT, PASSWORD_FIELD: PASSWORD},
+				"partialResult": {"content": []},
+			}
+		)
+
+		self.assertEqual(stored["args"][PASSWORD_FIELD], REDACTED)
+
+
 class TestRedactJsonText(AgentTestCase):
 	def test_text_with_nothing_to_hold_back_keeps_every_byte(self):
 		text = '{"ok": true,   "rows": []}'
@@ -352,6 +440,28 @@ class TestRedactJsonText(AgentTestCase):
 		self.assertNotIn(IBAN[:6], clean)
 		self.assertIn(str(AMOUNT), secrets)
 		self.assertEqual(redact_json_text(clean, keys)[0], clean)
+
+	def test_a_cut_versions_result_holds_back_a_sensitive_change(self):
+		whole = frappe.as_json(
+			{
+				"versions": [
+					{
+						"changes": [
+							{"field": f"items[0].{IBAN_FIELD}", "from": "AE0100000000", "to": IBAN},
+							{"field": "order_title", "from": "Old title", "to": "New title"},
+						]
+					}
+				]
+			}
+		)
+		cut = whole[: whole.index("New title")]
+
+		clean, secrets = redact_json_text(cut, {IBAN_FIELD})
+
+		self.assertNotIn(IBAN, clean)
+		self.assertNotIn("AE0100000000", clean)
+		self.assertIn("Old title", clean)
+		self.assertEqual(secrets, {"AE0100000000", IBAN})
 
 	def test_a_key_inside_a_string_is_not_a_key(self):
 		text = '{"notes": "the \\"iban\\": 1234 is fine", "rows": [' + "1" * 5
@@ -466,6 +576,19 @@ class TestRedactStoredEventLogs(AgentTestCase):
 		self.assertNotIn(str(AMOUNT), log)
 		self.assertNotIn(IBAN, log)
 		self.assertEqual(frappe.db.get_value("Agent Run", run.name, "output_message"), f"It is {REDACTED}.")
+
+	def test_an_event_the_backfill_cannot_redact_loses_its_body(self):
+		run = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
+		frappe.db.set_value("Agent Run", run.name, "event_log", self.old_log(), update_modified=False)
+
+		with patch("frappe_agents.redaction.EventRedactor.event", side_effect=RuntimeError("broken")):
+			redact_stored_event_logs.execute()
+
+		log = stored_log(run.name)
+		self.assertNotIn(PASSWORD, log)
+		self.assertNotIn(IBAN, log)
+		for event in frappe.parse_json(log)["events"]:
+			self.assertLessEqual(set(event), {"type", "seq", "toolCallId", "toolName"})
 
 	def test_an_unreadable_log_is_left_as_it_was(self):
 		run = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
