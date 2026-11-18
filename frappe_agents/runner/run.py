@@ -221,6 +221,8 @@ DRAFT_DISCIPLINE = (
 	"to nothing, so it is your workspace — build it, correct it, correct it again.\n"
 	"You may not submit or cancel anything. Submitting is a proposal a human decides, "
 	"and so is cancelling: call propose_submit or propose_cancel and state your reason. "
+	"On a document a Workflow governs, call propose_transition with one of the "
+	"workflow's actions instead. "
 	"The approver reads that reason next to the document, so make it specific — what the "
 	"document commits to, what you checked, and why now.\n"
 	"A proposal is not an act. Never tell the user that a document was submitted or "

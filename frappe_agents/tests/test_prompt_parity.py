@@ -54,11 +54,17 @@ TOOL_RULES = (
 )
 
 # The draft rules, likewise. Only an agent that can write drafts is given them.
+#
+# CHANGED ON PURPOSE, 2026-11-18: one sentence added, naming propose_transition
+# for documents a Workflow governs. Without it the model learns that tool only
+# from the refusal propose_submit gives on such a document.
 DRAFT_RULES = (
 	"You may create and update draft documents directly. A draft commits the business "
 	"to nothing, so it is your workspace — build it, correct it, correct it again.\n"
 	"You may not submit or cancel anything. Submitting is a proposal a human decides, "
 	"and so is cancelling: call propose_submit or propose_cancel and state your reason. "
+	"On a document a Workflow governs, call propose_transition with one of the "
+	"workflow's actions instead. "
 	"The approver reads that reason next to the document, so make it specific — what the "
 	"document commits to, what you checked, and why now.\n"
 	"A proposal is not an act. Never tell the user that a document was submitted or "
