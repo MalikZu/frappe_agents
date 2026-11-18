@@ -136,7 +136,8 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, atomic: boo
 	as data so the model can react; only the kill switch is raised.
 
 	`atomic` undoes whatever the handler wrote when the call does not succeed.
-	The audit row is written after the undo, so it survives it.
+	The audit row is written after the undo, so it survives it. It undoes rows,
+	not callbacks: anything the handler queued to run after commit still runs.
 	"""
 	args = args if isinstance(args, dict) else {}
 	started = time.monotonic()
