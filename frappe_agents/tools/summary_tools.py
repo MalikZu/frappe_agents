@@ -20,7 +20,13 @@ An aggregate is a read of every row it covers, so it is held to more than a list
   not open. `search_documents` re-checks such rows one by one; a total cannot.
 - **Small groups keep their count and lose their values.** A sum over one or two
   documents is those documents' values. Below `MIN_GROUP_SIZE`, sum, avg, min and
-  max come back null and the row says it was suppressed.
+  max come back null and the row says it was suppressed, and so do the total's
+  values, which would otherwise give the held-back group away by subtraction.
+
+Suppression is a nudge toward reading small groups with `search_documents`, not
+a confidentiality control. Two summaries whose filters differ by one document
+still differ by that document's values. The control is the read permission: every
+document counted here is one the user may already open.
 """
 
 from typing import Any
@@ -116,6 +122,10 @@ def summarize_documents(payload: dict) -> dict:
 
 	suppressed = sum(_suppress_small(row, aggregates) for row in rows)
 	_suppress_small(total, aggregates)
+	if suppressed and group_by:
+		# The total less the groups on show is the group that was held back. Its
+		# count stays; its values go with it.
+		_withhold_values(total, aggregates)
 	# The database ordered small groups by the values just withheld. Their place
 	# in the list would still say how large those values were, so they go last.
 	rows.sort(key=lambda row: row["suppressed"])
@@ -286,14 +296,21 @@ def _refuse_withheld_filters(meta: Any, filters: dict, withheld: set) -> None:
 
 def _suppress_small(row: dict, aggregates: list) -> bool:
 	"""Null a small group's values in place. True when anything was withheld."""
-	value_aliases = [alias for fn, _field, alias in aggregates if fn != FN_COUNT]
-	if not value_aliases or cint(row.get(FN_COUNT)) >= MIN_GROUP_SIZE:
+	if not _value_aliases(aggregates) or cint(row.get(FN_COUNT)) >= MIN_GROUP_SIZE:
 		row["suppressed"] = False
 		return False
-	for alias in value_aliases:
+	_withhold_values(row, aggregates)
+	return True
+
+
+def _withhold_values(row: dict, aggregates: list) -> None:
+	for alias in _value_aliases(aggregates):
 		row[alias] = None
 	row["suppressed"] = True
-	return True
+
+
+def _value_aliases(aggregates: list) -> list[str]:
+	return [alias for fn, _field, alias in aggregates if fn != FN_COUNT]
 
 
 def _clean_total(total: dict, aggregates: list) -> dict:
@@ -323,8 +340,8 @@ TOOLS = [
 			f"include_cancelled. At most {MAX_GROUPS} groups come back, largest first; 'total' "
 			"is the figure across all of them, and 'truncated' says whether groups were left out. "
 			f"A group of fewer than {MIN_GROUP_SIZE} documents shows its count but no sum, "
-			"average, minimum or maximum ('suppressed' is true): use search_documents to read "
-			"those documents. Refused on doctypes whose access is checked document by document, "
+			"average, minimum or maximum ('suppressed' is true), and then 'total' shows only its "
+			"count too: use search_documents to read those documents. Refused on doctypes whose access is checked document by document, "
 			"such as ToDo, File or Communication: use search_documents there."
 		),
 		"args_schema": {
