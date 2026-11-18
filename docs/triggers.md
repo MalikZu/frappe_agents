@@ -84,7 +84,7 @@ which costs tokens, and the run records them.
 
 | Event | Fires when |
 |---|---|
-| **Attachment Added** | A file is attached to a document of the doctype. **File Extensions** narrows it. |
+| **Attachment Added** | A file is attached to a document of the doctype. A file uploaded before the document was first saved fires when the document is created. **File Extensions** narrows it. |
 | **Field Changed** | The source field changes. On a new document, when it is created with the field filled. |
 | **Document Inserted** | A document of the doctype is created. |
 
@@ -104,14 +104,15 @@ These never fire a trigger:
 | Limit | Default | When it is reached |
 |---|---|---|
 | **Max Runs Per Hour** | 30 | Events past it are skipped and counted |
-| **Max Runs Per User Per Hour** | 10 | Same, per person |
+| **Max Runs Per User Per Hour** | 10 | Same, per person. An event past a person's own cap does not count against the trigger's cap |
 | **Daily Token Budget** on the trigger | empty | The trigger stops for the day |
 | **Daily Token Budget** on the agent | Agent Settings | The trigger stops for the day |
 | **Global Enabled** in Agent Settings | on | No trigger fires, and a queued run is cancelled |
 
 **One run per document per trigger.** An event that arrives while a run is
 working on the same document waits. When that run ends, one more run starts and
-reads the newest state. A burst of ten edits costs two runs, not ten.
+reads the newest state. A burst of ten edits costs two runs, not ten. Files are
+the exception: each waiting file gets its own run, one after the other.
 
 **An answer made from text that has since changed is not written.** If the
 source field changes while the model works, the answer is dropped and the run
@@ -195,6 +196,11 @@ submitted, or a Select answer was not one of the options.
 - **Only If Empty and Field Changed together write once.** A later change to the
   source field finds the target filled and stops. Turn Only If Empty off to keep a
   summary current; a person's edit to the target is then overwritten.
-- **A person still editing the form** sees it change shortly after their save,
-  because the write lands a few seconds later.
+- **A person still editing the form can lose their next save.** The write lands a
+  few seconds after their save and changes the document under them. Their next
+  save then fails with "has been modified after you have opened it", and they
+  must reload. Pick events people make at the end of their work, such as an
+  attachment, not a field they are still typing in.
+- **A trigger that has run cannot be deleted.** Its runs link to it, and runs are
+  never deleted. Clear **Enabled** instead.
 - **Child tables and single doctypes** cannot have triggers.
