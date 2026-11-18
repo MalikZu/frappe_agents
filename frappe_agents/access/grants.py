@@ -74,7 +74,7 @@ VERBS = {
 	VERB_READ: ("can_read", "read"),
 	VERB_CREATE_DRAFT: ("can_create_draft", "create drafts of"),
 	VERB_UPDATE_DRAFT: ("can_update_draft", "edit drafts of"),
-	VERB_PROPOSE: ("can_propose", "propose submit or cancel on"),
+	VERB_PROPOSE: ("can_propose", "propose submit, cancel or a workflow action on"),
 	VERB_EXTRACT: ("can_extract", "extract into"),
 }
 
@@ -99,10 +99,11 @@ DOCTYPE_TOOL_VERBS = {
 	"update_draft": VERB_UPDATE_DRAFT,
 	"propose_submit": VERB_PROPOSE,
 	"propose_cancel": VERB_PROPOSE,
+	"propose_transition": VERB_PROPOSE,
 	"extract_document": VERB_EXTRACT,
 }
 
-PROPOSE_TOOLS = frozenset({"propose_submit", "propose_cancel"})
+PROPOSE_TOOLS = frozenset({"propose_submit", "propose_cancel", "propose_transition"})
 REPORT_TOOLS = frozenset({"run_report"})
 # The Agents Builder's meta tools. They answer with the shape of the site and
 # never with a document, so they ride the one grant that says the agent is here

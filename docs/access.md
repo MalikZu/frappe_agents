@@ -21,7 +21,7 @@ One rule row names one target and ticks what is allowed on it:
 | Read | list and read documents of this doctype |
 | Draft New | create documents, always as drafts |
 | Draft Edit | change a draft it or its user already made |
-| Propose | ask a person to submit or cancel — never do it |
+| Propose | ask a person to submit, cancel or take a workflow action — never do it |
 | Extract | read an attached file into a draft of this doctype |
 
 Two more columns narrow a row:

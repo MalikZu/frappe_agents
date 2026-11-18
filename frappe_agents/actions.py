@@ -6,6 +6,13 @@ the approver's own session under the approver's own permissions. There is no
 `ignore_permissions` on the apply path, deliberately: an approver who may not
 submit the document may not cause it to be submitted either.
 
+A Workflow Transition is applied the same way, through Frappe's own
+`apply_workflow`, in the approver's session. The Workflow then decides: the
+transition must be open to the approver's roles, its condition must hold, and
+self-approval is refused where the transition says so. `apply_workflow` may
+submit or cancel the document, which is why this module is the only place in
+the app that calls it — no tool does.
+
 Three things in here look like belt-and-braces and are not:
 
 * **The workflow refusal is checked twice.** Frappe does not block a server-side
@@ -43,7 +50,7 @@ from frappe.desk.doctype.notification_log.notification_log import (
 	enqueue_create_notification,
 	make_notification_logs,
 )
-from frappe.model.workflow import get_workflow_name
+from frappe.model.workflow import apply_workflow, get_workflow, get_workflow_name
 from frappe.utils import (
 	add_to_date,
 	cint,
@@ -67,6 +74,7 @@ STATUS_EXPIRED = "Expired"
 
 ACTION_SUBMIT = "Submit"
 ACTION_CANCEL = "Cancel"
+ACTION_TRANSITION = "Workflow Transition"
 
 DRAFT = 0
 SUBMITTED = 1
@@ -127,23 +135,9 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	_check_lock(doc_action, target, expected_modified)
 
-	# Re-checked here, not only at proposal time: a Workflow activated in between
-	# would otherwise be bypassed by this submit, silently and without a trace.
-	workflow = get_workflow_name(doc_action.target_doctype)
-	if workflow:
-		return _record_failure(
-			doc_action,
-			note,
-			0,
-			_(
-				"{0} is now governed by an active Workflow ({1}). Agent proposals cannot "
-				"submit or cancel workflow-governed documents; use the workflow's own transitions."
-			).format(doc_action.target_doctype, workflow),
-		)
-
-	state_problem = _state_problem(doc_action, target)
-	if state_problem:
-		return _record_failure(doc_action, note, 0, state_problem)
+	problem = _apply_problem(doc_action, target)
+	if problem:
+		return _record_failure(doc_action, note, 0, problem)
 
 	# Before the apply, never after: submit() overwrites `modified` with the
 	# approver's own timestamp, and the comparison stops meaning anything.
@@ -160,10 +154,17 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	frappe.db.savepoint(SAVEPOINT)
 	try:
-		if doc_action.action_type == ACTION_SUBMIT:
+		if doc_action.action_type == ACTION_TRANSITION:
+			# As the session user, who is the approver. apply_workflow lists the
+			# transitions for the approver's roles, checks the condition and
+			# self-approval, and saves, submits or cancels with their permissions.
+			apply_workflow(target, doc_action.workflow_action)
+		elif doc_action.action_type == ACTION_SUBMIT:
 			target.submit()
-		else:
+		elif doc_action.action_type == ACTION_CANCEL:
 			target.cancel()
+		else:
+			frappe.throw(_("Unknown action type {0}.").format(doc_action.action_type))
 	except Exception as exc:
 		# Undo whatever the half-finished transition wrote — a cancel that trips on a
 		# back-link has already written docstatus 2 by the time it throws.
@@ -189,7 +190,11 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 		"status": STATUS_APPLIED,
 		"target_doctype": doc_action.target_doctype,
 		"target_name": doc_action.target_name,
-		"docstatus": cint(target.docstatus),
+		# Read back rather than taken from `target`: apply_workflow loads and saves
+		# its own copy of the document.
+		"docstatus": cint(
+			frappe.db.get_value(doc_action.target_doctype, doc_action.target_name, "docstatus")
+		),
 		"edited_before_approval": edited,
 	}
 
@@ -224,17 +229,30 @@ def reject_action(action: str, note: str) -> dict:
 	return {"action": doc_action.name, "status": STATUS_REJECTED}
 
 
-def pending_action_for(target_doctype: str, target_name: str, action_type: str) -> str | None:
-	"""The Pending proposal already covering this target and action, if there is one."""
-	return frappe.db.exists(
-		"Agent Action",
-		{
-			"target_doctype": target_doctype,
-			"target_name": target_name,
-			"action_type": action_type,
-			"status": STATUS_PENDING,
-		},
-	)
+def pending_action_for(
+	target_doctype: str,
+	target_name: str,
+	action_type: str,
+	workflow_action: str | None = None,
+	from_workflow_state: str | None = None,
+) -> str | None:
+	"""The Pending proposal already covering this target and action, if there is one.
+
+	For a workflow transition the action is the workflow's own verb out of one
+	state: a pending Approve does not block a Reject, and a stale Approve out of an
+	earlier state does not block the Approve out of this one.
+	"""
+	filters = {
+		"target_doctype": target_doctype,
+		"target_name": target_name,
+		"action_type": action_type,
+		"status": STATUS_PENDING,
+	}
+	if workflow_action:
+		filters["workflow_action"] = workflow_action
+	if from_workflow_state:
+		filters["from_workflow_state"] = from_workflow_state
+	return frappe.db.exists("Agent Action", filters)
 
 
 def record_proposal(
@@ -244,6 +262,9 @@ def record_proposal(
 	target_name: str,
 	reason: str,
 	proposal_modified: Any,
+	workflow_action: str | None = None,
+	workflow_name: str | None = None,
+	from_workflow_state: str | None = None,
 ) -> Any:
 	"""Insert one Pending Agent Action for a proposal the tools have already checked.
 
@@ -259,6 +280,9 @@ def record_proposal(
 			"agent": run.agent,
 			"requested_by": frappe.session.user,
 			"action_type": action_type,
+			"workflow_action": workflow_action,
+			"workflow_name": workflow_name,
+			"from_workflow_state": from_workflow_state,
 			"target_doctype": target_doctype,
 			"target_name": target_name,
 			"reason": reason,
@@ -616,6 +640,83 @@ def _check_lock(action: Any, target: Any, expected_modified: Any) -> None:
 			).format(action.target_doctype, action.target_name),
 			frappe.TimestampMismatchError,
 		)
+
+
+def _apply_problem(action: Any, target: Any) -> str | None:
+	"""Why this proposal cannot be applied to the document as it is now, if it cannot."""
+	workflow = get_workflow_name(action.target_doctype)
+
+	if action.action_type == ACTION_TRANSITION:
+		if not workflow:
+			return _(
+				"{0} is no longer governed by an active Workflow, so there is no transition to apply."
+			).format(action.target_doctype)
+		return _transition_problem(action, target, workflow)
+
+	# Re-checked here, not only at proposal time: a Workflow activated in between
+	# would otherwise be bypassed by this submit, silently and without a trace.
+	if workflow:
+		return _(
+			"{0} is now governed by an active Workflow ({1}). Agent proposals cannot "
+			"submit or cancel workflow-governed documents; the agent can propose a workflow action instead."
+		).format(action.target_doctype, workflow)
+
+	return _state_problem(action, target)
+
+
+def _transition_problem(action: Any, target: Any, workflow: str) -> str | None:
+	"""Why this workflow action may not run on the document as it is now, if it may not.
+
+	A workflow action is a verb, and verbs repeat: Draft -Approve-> Manager Approved
+	-Approve-> Approved is an ordinary two-level approval. `apply_workflow` resolves
+	the verb against the state the document is in *now*, so a proposal made from the
+	first state, approved after someone took that step by hand, would take the second
+	step instead — one the run's user may never have been offered. The proposal is
+	bound to the Workflow and the state it was made from, and anything else fails.
+	The timestamp lock cannot stand in for this: an approver who reloads sends the
+	new timestamp and passes it.
+	"""
+	if not action.workflow_action:
+		return _("This proposal names no workflow action.")
+	if not action.workflow_name or not action.from_workflow_state:
+		# Fail closed: without the state it was made from, the verb has no meaning.
+		return _("This proposal does not record the workflow state it was made from. Ask the agent again.")
+	if workflow != action.workflow_name:
+		return _(
+			"{0} is now governed by the Workflow {1}, not {2} as when the agent proposed. Ask the agent again."
+		).format(action.target_doctype, workflow, action.workflow_name)
+
+	state = target.get(get_workflow(action.target_doctype).workflow_state_field)
+	if state != action.from_workflow_state:
+		return _(
+			"{0} {1} has moved from {2} to {3} since the agent proposed {4}. The proposal was "
+			"for the step out of {2}, so it cannot be applied now."
+		).format(
+			action.target_doctype,
+			action.target_name,
+			action.from_workflow_state,
+			state,
+			action.workflow_action,
+		)
+
+	if _queues_in_background(action.target_doctype):
+		return _(
+			"{0} submits and cancels in the background, so this approval could not tell whether the "
+			"workflow action went through. Apply it from the document itself."
+		).format(action.target_doctype)
+
+	# Whether the step is open to this approver, and its condition, are the
+	# Workflow's call, made inside apply_workflow.
+	return None
+
+
+def _queues_in_background(doctype: str) -> bool:
+	"""Whether Frappe would hand this doctype's submit or cancel to a background job.
+
+	`apply_workflow` then returns before anything is written, and the row would say
+	Applied about a document that has not moved.
+	"""
+	return bool(cint(frappe.get_meta(doctype).queue_in_background))
 
 
 def _state_problem(action: Any, target: Any) -> str | None:
