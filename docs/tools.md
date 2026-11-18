@@ -65,6 +65,9 @@ handed a document dump it did not need.
 A page used to come back with a `count` that was only the page size. A model
 that read it as a total stated the wrong number. That field is gone.
 
+Rows that tie on the sort field are ordered by name, so paging never skips or
+repeats a row.
+
 For "how many" and "how much", the model calls `summarize_documents` instead.
 It asks the database for the number, as the running user, so role permissions,
 User Permissions and permission query conditions shape the totals exactly as
@@ -83,11 +86,16 @@ An aggregate reads every row it covers, so the tool has limits a list does not:
 | Limit | What happens |
 |---|---|
 | **50 groups** | Largest first. `truncated` says groups were left out. `total` still covers all of them. A rule's row cap lowers the 50. |
-| **Groups smaller than 3 documents** | The count comes back. `sum`, `avg`, `min` and `max` come back empty, and the row says `suppressed`. These groups go last. |
+| **Groups smaller than 3 documents** | The count comes back. `sum`, `avg`, `min` and `max` come back empty, and the row says `suppressed`. These groups go last. The values in `total` come back empty too, because the total less the other groups would give them away. |
 | **Fields the user may not read** | Refused, when the field is above the user's permission level. |
 | **Withheld fields** | Refused as a group, an aggregate or a filter: masked fields, fields marked sensitive in **Agent Settings**, and Password fields. A count under a filter on a field answers "how many have this value", so filters are refused too. |
 | **Free text** | Refused. Long text is not a category. |
-| **Doctypes checked document by document** | Refused. Some doctypes, such as ToDo, File, Communication, Contact, Address, Event and Note, register a per-document permission hook. A list query cannot run that hook, so a count could include documents the user may not open. Use `search_documents` there: it checks every row. |
+| **Doctypes checked document by document** | Refused. Some doctypes, such as ToDo, File, Communication, Contact, Address, Event and Note, register a per-document permission hook. A list query cannot run that hook, so a count could include documents the user may not open. Use `search_documents` there: it checks every row. A hook that an app registers for every doctype makes every doctype one of these. |
+
+Small-group suppression is a nudge, not a confidentiality control. Two
+summaries whose filters differ by one document still differ by that document's
+values. What protects a value is the read permission: every document a summary
+counts is one the user may already open.
 
 ## Draft
 
