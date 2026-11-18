@@ -120,6 +120,24 @@ class TestTheAgentIsTold(ProposalCase):
 
 		self.assertIn("was approved and applied", wire[-1]["content"])
 
+	def test_a_failed_apply_is_told_with_the_reason_wrapped(self):
+		# Submitted behind the proposal's back, so the apply finds no draft.
+		frappe.get_doc(ORDER_DT, self.order.name).submit()
+		self.approve()
+
+		_run, wire = self.next_turn()
+
+		last = wire[-1]["content"]
+		self.assertIn("was approved, but applying it failed", last)
+		self.assertIn('<untrusted source="failure message">', last)
+
+	def test_a_document_name_is_read_as_data(self):
+		self.reject()
+
+		_run, wire = self.next_turn()
+
+		self.assertIn(f'<untrusted source="document name">{self.order.name}</untrusted>', wire[-1]["content"])
+
 	def test_a_pending_proposal_is_not_told(self):
 		_run, wire = self.next_turn()
 
@@ -248,6 +266,24 @@ class TestARejectionIsNotAskedAgain(ProposalCase):
 		order.amount = 250
 		with as_user(DRAFT_USER):
 			order.save()
+
+		payload = self.propose_again()
+
+		self.assertTrue(payload["ok"], payload.get("error"))
+		# Let through, and the approver is told it was rejected before.
+		reason = frappe.db.get_value("Agent Action", payload["result"]["action"], "reason")
+		self.assertTrue(reason.startswith("Proposed again after an earlier rejection"))
+
+	def test_a_proposal_past_its_window_does_not_block_a_new_one(self):
+		frappe.db.set_single_value("Agent Settings", "action_expiry_days", 7)
+		frappe.clear_document_cache("Agent Settings", "Agent Settings")
+		frappe.db.set_value(
+			"Agent Action",
+			self.action,
+			"creation",
+			add_to_date(now_datetime(), days=-30),
+			update_modified=False,
+		)
 
 		payload = self.propose_again()
 
