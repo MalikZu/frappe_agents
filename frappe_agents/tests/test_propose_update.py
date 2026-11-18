@@ -27,6 +27,7 @@ from frappe_agents.actions import approve_action, eligible_approvers, get_update
 from frappe_agents.field_changes import normalise
 from frappe_agents.tests.fixtures import (
 	APPROVER_USER,
+	AUDITOR_USER,
 	BLIND_APPROVER,
 	CASE_DT,
 	DRAFT_USER,
@@ -452,6 +453,20 @@ class TestProposeUpdate(AgentTestCase):
 		self.assertEqual(diff, {"fields": [], "target_readable": 0, "changed_since": 0})
 		self.assertFalse(row.get("proposed_values"))
 		self.assertFalse(row.get("seen_values"))
+
+	def test_a_reader_of_the_queue_cannot_filter_on_the_stored_values(self):
+		"""A `like` filter on the hidden column would read the values one guess at a time.
+
+		frappe v16 refuses a filter on a field the user may not read at its
+		permlevel. version-15 refuses sorting and grouping only, which is why the
+		port there keeps the values out of Agent Action altogether.
+		"""
+		case = make_case(internal_rate=SECRET_RATE)
+		self.proposed(case.name, {"internal_rate": "rate-1"})
+
+		for column in ("seen_values", "proposed_values"):
+			with as_user(AUDITOR_USER), self.assertRaises(frappe.PermissionError, msg=column):
+				frappe.get_list("Agent Action", filters={column: ["like", "%rate%"]}, pluck="name")
 
 	# -- who is told ----------------------------------------------------------
 
