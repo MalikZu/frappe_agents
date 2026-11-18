@@ -507,7 +507,9 @@ class TestMCPEndpoint(AgentTestCase):
 	def test_an_agent_blueprint_cannot_be_drafted_over_mcp(self):
 		session = self.open_session()
 
-		_, body = self.call(session, "create_draft", {"doctype": BLUEPRINT, "values": {}})
+		_, body = self.call(
+			session, "create_draft", {"doctype": BLUEPRINT, "values": {"blueprint_name": "FA MCP Blueprint"}}
+		)
 
 		self.assertTrue(body["result"]["isError"])
 		self.assertIn(BLUEPRINT, body["result"]["content"][-1]["text"])
