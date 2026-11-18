@@ -12,6 +12,7 @@ what the grants allow, and that every tools/call ends in the same audit row and
 the same draft/propose wall chat ends in.
 """
 
+import base64
 import json
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -31,6 +32,7 @@ from frappe_agents.mcp.server import (
 	handle,
 )
 from frappe_agents.tests.fixtures import (
+	DISABLED_USER,
 	DRAFT_USER,
 	OPEN_USER,
 	ORDER_DT,
@@ -48,6 +50,8 @@ from frappe_agents.tests.fixtures import (
 from frappe_agents.tools.base import execute_tool
 
 MCP_AGENT = "FA MCP Agent"
+SECOND_MCP_AGENT = "FA MCP Agent Two"
+WEBSITE_USER = "fa-mcp-website@example.com"
 BLUEPRINT = "Agent Blueprint"
 PATH = "/api/method/frappe_agents.mcp.server.handle"
 
@@ -61,7 +65,13 @@ def give_api_key(user: str) -> str:
 	return f"token {key}:{secret}"
 
 
-def make_mcp_agent(autonomy: str = "Draft", allow_mcp: int = 1, rules: list | None = None):
+def make_mcp_agent(
+	autonomy: str = "Draft",
+	allow_mcp: int = 1,
+	rules: list | None = None,
+	name: str = MCP_AGENT,
+	may_read_files: int = 0,
+):
 	agent = make_matrix_agent(
 		rules=rules
 		if rules is not None
@@ -69,12 +79,27 @@ def make_mcp_agent(autonomy: str = "Draft", allow_mcp: int = 1, rules: list | No
 			rule(ORDER_DT, can_read=1, can_create_draft=1, can_propose=1, can_extract=1),
 			rule(BLUEPRINT, can_create_draft=1),
 		],
-		name=MCP_AGENT,
+		name=name,
 		autonomy=autonomy,
+		may_read_files=may_read_files,
 	)
 	agent.db_set("allow_mcp", allow_mcp, update_modified=False)
 	frappe.clear_document_cache("Agent", agent.name)
 	return agent
+
+
+def make_website_user() -> str:
+	if not frappe.db.exists("User", WEBSITE_USER):
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": WEBSITE_USER,
+				"first_name": "FA Website",
+				"user_type": "Website User",
+				"send_welcome_email": 0,
+			}
+		).insert(ignore_permissions=True)
+	return WEBSITE_USER
 
 
 @contextmanager
@@ -231,6 +256,36 @@ class TestMCPEndpoint(AgentTestCase):
 		self.assertIn("Administrator", body["error"]["message"])
 		self.assertEqual(self.mcp_runs(), [])
 
+	def test_a_basic_credential_is_accepted(self):
+		pair = self.credential.split(" ", 1)[1]
+		basic = "Basic " + base64.b64encode(pair.encode()).decode()
+
+		response, _ = self.rpc("initialize", {}, credential=basic)
+
+		self.assertEqual(response.status_code, 200)
+
+	def test_a_key_looked_up_on_another_doctype_is_refused(self):
+		response, _ = self.rpc("initialize", {}, headers={"Frappe-Authorization-Source": "Contact"})
+
+		self.assertEqual(response.status_code, 401)
+
+	def test_a_disabled_user_is_refused(self):
+		credential = give_api_key(DISABLED_USER)
+
+		response, _ = self.rpc("initialize", {}, user=DISABLED_USER, credential=credential)
+
+		self.assertEqual(response.status_code, 401)
+		self.assertEqual(self.mcp_runs(), [])
+
+	def test_a_website_user_is_refused(self):
+		user = make_website_user()
+		credential = give_api_key(user)
+
+		response, body = self.rpc("initialize", {}, user=user, credential=credential)
+
+		self.assertEqual(response.status_code, 403)
+		self.assertIn("system users", body["error"]["message"])
+
 	def test_a_page_on_another_site_is_refused(self):
 		response, _ = self.rpc("initialize", {}, headers={"Origin": "https://evil.example"})
 
@@ -264,6 +319,31 @@ class TestMCPEndpoint(AgentTestCase):
 		response, _ = self.rpc("tools/list", session=session, user=OPEN_USER, credential=other)
 
 		self.assertEqual(response.status_code, 404)
+
+	def test_a_session_belongs_to_its_agent(self):
+		make_mcp_agent(name=SECOND_MCP_AGENT)
+		session = self.open_session()
+
+		response, _ = self.rpc("tools/list", session=session, agent=SECOND_MCP_AGENT)
+
+		self.assertEqual(response.status_code, 404)
+
+	def test_nobody_else_can_end_a_session(self):
+		session = self.open_session()
+		other = give_api_key(OPEN_USER)
+
+		response, _ = self.post(session=session, method="DELETE", user=OPEN_USER, credential=other)
+
+		self.assertEqual(response.status_code, 404)
+		self.assertEqual(frappe.db.get_value("Agent Run", session, "status"), "Running")
+
+	def test_old_sessions_end_when_too_many_are_open(self):
+		sessions = [self.open_session() for _ in range(server.MAX_OPEN_SESSIONS + 1)]
+
+		statuses = [frappe.db.get_value("Agent Run", name, "status") for name in sessions]
+
+		self.assertEqual(statuses.count("Running"), server.MAX_OPEN_SESSIONS)
+		self.assertEqual(statuses[0], "Completed")
 
 	def test_tools_need_a_session(self):
 		response, body = self.rpc("tools/list")
@@ -338,6 +418,14 @@ class TestMCPEndpoint(AgentTestCase):
 		self.assertEqual(by_name["search_documents"]["inputSchema"]["type"], "object")
 		self.assertTrue(by_name["search_documents"]["annotations"]["readOnlyHint"])
 		self.assertFalse(by_name["create_draft"]["annotations"]["destructiveHint"])
+
+	def test_file_reading_is_not_offered_even_when_the_agent_may_read_files(self):
+		make_mcp_agent(may_read_files=1)
+		session = self.open_session()
+
+		_, body = self.rpc("tools/list", session=session)
+
+		self.assertNotIn("read_document", {tool["name"] for tool in body["result"]["tools"]})
 
 	def test_a_suggest_agent_lists_read_tools_only(self):
 		make_mcp_agent(autonomy="Suggest")
@@ -416,6 +504,15 @@ class TestMCPEndpoint(AgentTestCase):
 		calls = tool_calls_for(session)
 		self.assertEqual([(c.tool, c.outcome) for c in calls], [("extract_document", "Denied")])
 
+	def test_an_agent_blueprint_cannot_be_drafted_over_mcp(self):
+		session = self.open_session()
+
+		_, body = self.call(session, "create_draft", {"doctype": BLUEPRINT, "values": {}})
+
+		self.assertTrue(body["result"]["isError"])
+		self.assertIn(BLUEPRINT, body["result"]["content"][-1]["text"])
+		self.assertEqual([c.outcome for c in tool_calls_for(session)], ["Denied"])
+
 	def test_the_kill_switch_stops_a_session_and_is_audited(self):
 		session = self.open_session()
 		set_kill_switch(0)
@@ -434,7 +531,8 @@ class TestMCPEndpoint(AgentTestCase):
 	def test_a_user_is_rate_limited(self):
 		with extraction_settings(mcp_requests_per_minute=2):
 			# A window of its own, so earlier requests in this minute do not count.
-			with patch.object(server.time, "time", return_value=4_000_000_000.0):
+			window = 4_000_000_000.0 + int(frappe.generate_hash(length=6), 16) * 60
+			with patch.object(server, "_clock", return_value=window):
 				statuses = [self.rpc("ping")[0].status_code for _ in range(3)]
 
 		self.assertEqual(statuses[-1], 429)
@@ -507,6 +605,32 @@ class TestToolChokepointIdentity(AgentTestCase):
 		self.assertFalse(payload["ok"])
 		self.assertIn("acts for", payload["error"])
 		self.assertEqual([c.outcome for c in tool_calls_for(run.name)], ["Denied"])
+
+	def test_an_mcp_run_never_goes_past_draft_even_for_a_write_agent(self):
+		"""Nothing that ships is Write class, so one tool is made Write for this test."""
+		make_mcp_agent(autonomy="Write")
+		frappe.db.set_value("Agent Tool", "create_draft", "capability", "Write", update_modified=False)
+		frappe.clear_document_cache("Agent Tool", "create_draft")
+		self.addCleanup(frappe.clear_document_cache, "Agent Tool", "create_draft")
+
+		mcp_run = make_run(effective_user=DRAFT_USER, agent=MCP_AGENT)
+		mcp_run.db_set("surface", "MCP", update_modified=False)
+		chat_run = make_run(effective_user=DRAFT_USER, agent=MCP_AGENT)
+		args = {
+			"doctype": ORDER_DT,
+			"dry_run": 1,
+			"values": {"order_title": "FA MCP Write", "project": PROJECT_ALPHA, "amount": 1},
+		}
+
+		with as_user(DRAFT_USER):
+			over_mcp = execute_tool(mcp_run, "create_draft", args)
+			in_chat = execute_tool(chat_run, "create_draft", args)
+
+		self.assertFalse(over_mcp["ok"])
+		self.assertIn("never go past Draft", over_mcp["error"])
+		# Chat holds Write autonomy to Write: whatever the draft itself says, the
+		# capability gate let it through.
+		self.assertNotIn("capability", in_chat["error"] or "")
 
 	def test_an_atomic_call_that_fails_leaves_only_its_audit_row(self):
 		run = make_run(effective_user=DRAFT_USER)

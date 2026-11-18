@@ -400,8 +400,10 @@ def _resolve_handler(run_doc: Any, tool_name: str):
 
 	if agent is not None:
 		allowed = AUTONOMY_CAPABILITIES.get(agent.autonomy, {CAPABILITY_READ})
-		if on_mcp:
-			allowed = allowed & MCP_CAPABILITIES
+		if on_mcp and tool.capability in allowed and tool.capability not in MCP_CAPABILITIES:
+			raise ToolDenied(
+				f"Tool {tool_name} needs {tool.capability} capability, and MCP clients never go past Draft."
+			)
 		if tool.capability not in allowed:
 			raise ToolDenied(
 				f"Tool {tool_name} needs {tool.capability} capability, agent autonomy is {agent.autonomy}."
