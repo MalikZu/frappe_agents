@@ -40,6 +40,12 @@ _UNTRUSTED = re.compile(r'<untrusted source="[^"]*">(.*)</untrusted>', re.DOTALL
 # What a stored result says when its value was cut at a sensitive key.
 CUT_NOTE = "\n... (truncated)"
 
+# A value that reads as a number. Prose is scrubbed of one only where it stands
+# alone: 2025 is not taken out of 2025-01-02, ORD-2025-0001 or 12025.
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+_NUMBER_BEFORE = r"(?<![\w.\-/:])"
+_NUMBER_AFTER = r"(?![\w\-/:]|[.,]\d)"
+
 # A doctype named anywhere in a result's JSON text, for a result whose call is unknown.
 _DOCTYPE = re.compile(r'"doctype"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
@@ -193,9 +199,37 @@ def scrub(text: str | None, secrets: set[str]) -> str | None:
 	if not text or not secrets:
 		return text
 	for secret in secrets:
-		if len(secret) >= SCRUB_MIN_LENGTH and secret in text:
+		if len(secret) < SCRUB_MIN_LENGTH or secret not in text:
+			continue
+		if _NUMBER.fullmatch(secret):
+			text = re.sub(_NUMBER_BEFORE + re.escape(secret) + _NUMBER_AFTER, REDACTED, text)
+		else:
 			text = text.replace(secret, REDACTED)
 	return text
+
+
+def scrub_values(value: Any, secrets: set[str]) -> Any:
+	"""A structure with every string in it scrubbed. Keys, numbers and shape stay.
+
+	For JSON that was already redacted by key: a value-scrub of its serialised
+	text would also hit bare numbers and break the JSON, so only the strings in it
+	are prose to clean.
+	"""
+	if not secrets:
+		return value
+	if isinstance(value, str):
+		return scrub(value, secrets)
+	if isinstance(value, dict):
+		return {key: scrub_values(item, secrets) for key, item in value.items()}
+	if isinstance(value, (list, tuple)):
+		return [scrub_values(item, secrets) for item in value]
+	return value
+
+
+def body_withheld(payload: dict) -> dict:
+	"""An event that could not be redacted: what it was and when, without its body."""
+	kept = ("type", "seq", "toolCallId", "toolName")
+	return {key: payload[key] for key in kept if key in payload}
 
 
 class EventRedactor:
@@ -232,7 +266,8 @@ class EventRedactor:
 		keys = sensitive_keys(args)
 		clean, secrets = redact(result, keys)
 		self._remember(call_id, keys, secrets)
-		self.results[call_id] = (raw_text, serialise(clean))
+		_, known = self._call(call_id)
+		self.results[call_id] = (raw_text, serialise(scrub_values(clean, known)))
 
 	def hold_back_result(self, call_id: str, raw_text: str) -> None:
 		"""A result that could not be redacted is stored as the marker alone."""
@@ -250,6 +285,7 @@ class EventRedactor:
 		if kind == "tool_execution_start":
 			event["args"] = self._arguments(event.get("toolCallId"), event.get("args"))
 		elif kind == "tool_execution_update":
+			event["args"] = self._arguments(event.get("toolCallId"), event.get("args"))
 			event["partialResult"] = self._result(event.get("toolCallId"), event.get("partialResult"))
 		elif kind == "tool_execution_end":
 			event["result"] = self._result(event.get("toolCallId"), event.get("result"))
@@ -281,10 +317,12 @@ class EventRedactor:
 		if not isinstance(result, dict):
 			return result
 		keys = self._result_keys(call_id, result)
+		_, known = self._call(call_id)
 		raw_text, stored_text = self.results.get(call_id) or (None, None)
 		found: set[str] = set()
 		if "details" in result:
-			result["details"], details_secrets = redact(result["details"], keys)
+			details, details_secrets = redact(result["details"], keys)
+			result["details"] = scrub_values(details, (known | details_secrets) - {REDACTED})
 			found |= details_secrets
 		blocks = result.get("content")
 		if isinstance(blocks, list):
@@ -294,11 +332,9 @@ class EventRedactor:
 				if raw_text is not None and block["text"] == raw_text:
 					block["text"] = stored_text
 					continue
-				block["text"], text_secrets = redact_json_text(block["text"], keys)
+				block["text"], text_secrets = redact_json_text(block["text"], keys, known)
 				found |= text_secrets
 		self._remember(call_id, keys, found)
-		_, secrets = self._call(call_id)
-		self._scrub_blocks(blocks, secrets)
 		return result
 
 	def _result_keys(self, call_id: Any, result: dict) -> set[str]:
@@ -352,24 +388,36 @@ class EventRedactor:
 					block[field] = scrub(block[field], secrets)
 
 
-def redact_json_text(text: str, keys: set[str]) -> tuple[str, set[str]]:
+def redact_json_text(text: str, keys: set[str], known: set[str] = frozenset()) -> tuple[str, set[str]]:
 	"""Text that holds a tool's JSON result, with sensitive values held back.
 
 	A tool result reaches the model as JSON text, so it is redacted by key like
-	any other result. Text that is left unchanged keeps every byte it had. Text
-	that does not parse — a result cut short at the model's limit — is scanned
-	instead, see `_redact_json_scan`.
+	any other result. Values already held back from the same call (`known`) are
+	scrubbed out of the strings in it, never out of the text as a whole, so it
+	stays the JSON it was. Text that is left unchanged keeps every byte it had.
+	Text that does not parse — a result cut short at the model's limit — is
+	scanned instead, see `_redact_json_scan`.
 	"""
 	try:
 		parsed = json.loads(text)
 	except ValueError:
-		return _redact_json_scan(text, keys)
+		scanned, secrets = _redact_json_scan(text, keys)
+		return scrub(scanned, (set(known) | secrets) - {REDACTED}), secrets
 	if not isinstance(parsed, (dict, list)):
 		return text, set()
 	clean, secrets = redact(parsed, keys)
+	clean = scrub_values(clean, (set(known) | secrets) - {REDACTED})
 	if clean == parsed:
 		return text, secrets
 	return frappe.as_json(clean), secrets
+
+
+def _field_value_is_sensitive(decoder: json.JSONDecoder, text: str, start: int, keys: set[str]) -> bool:
+	try:
+		field, _ = decoder.raw_decode(text, start)
+	except ValueError:
+		return False
+	return isinstance(field, str) and field.rsplit(".", 1)[-1].lower() in keys
 
 
 def _redact_json_scan(text: str, keys: set[str]) -> tuple[str, set[str]]:
@@ -379,6 +427,11 @@ def _redact_json_scan(text: str, keys: set[str]) -> tuple[str, set[str]]:
 	piece of some other value. A value under a sensitive key is held back whatever
 	its type — string, number, object. A value the cut lands inside runs to the
 	end of the text, so everything from its start is held back: fail closed.
+
+	A version change names its field as a value, the way `_walk` reads it. The
+	serialiser sorts keys, so `field` comes before the `from` and `to` it governs:
+	once a sensitive `field` is read, the `from` and `to` after it are held back
+	until the next `field`.
 	"""
 	if not keys:
 		return text, set()
@@ -386,6 +439,7 @@ def _redact_json_scan(text: str, keys: set[str]) -> tuple[str, set[str]]:
 	secrets: set[str] = set()
 	out: list[str] = []
 	copied = at = 0
+	changed_is_sensitive = False
 	while True:
 		at = text.find('"', at)
 		if at < 0:
@@ -398,12 +452,18 @@ def _redact_json_scan(text: str, keys: set[str]) -> tuple[str, set[str]]:
 		colon = end
 		while colon < len(text) and text[colon] in " \t\r\n":
 			colon += 1
-		if colon >= len(text) or text[colon] != ":" or name.lower() not in keys:
+		if colon >= len(text) or text[colon] != ":":
 			at = end
 			continue
 		start = colon + 1
 		while start < len(text) and text[start] in " \t\r\n":
 			start += 1
+		if name == "field":
+			changed_is_sensitive = _field_value_is_sensitive(decoder, text, start, keys)
+		held = name.lower() in keys or (changed_is_sensitive and name in CHANGE_VALUE_KEYS)
+		if not held:
+			at = end
+			continue
 		out.append(text[copied:start])
 		try:
 			value, stop = decoder.raw_decode(text, start)
