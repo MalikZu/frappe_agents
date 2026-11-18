@@ -275,6 +275,9 @@ def _in_chain(text: str, span: tuple[int, int], chains: list[tuple[int, int]]) -
 	  digits or more after it — then at most one single-letter suffix:
 	  ORD-2025-0001, SINV-25-00012, PO2-2025-0001, ORD-2025-0001-A.
 
+	The number must lie wholly inside the date or reference; one that runs past
+	it (2025-01-02T98,765) is held back.
+
 	Anything else is how a value is written, and is held back: a range
 	(98765-99000-1, AED-98765-99000), an amount with its unit or currency
 	(98765/month/employee, AED-98765/month, AED-98765-99000-pm), a label in front
@@ -283,8 +286,10 @@ def _in_chain(text: str, span: tuple[int, int], chains: list[tuple[int, int]]) -
 	"""
 	start, end = span
 	for chain_start, chain_end in chains:
-		if chain_start <= start < chain_end or chain_start < end <= chain_end:
+		if chain_start <= start and end <= chain_end:
 			return _is_kept_shape(text[chain_start:chain_end])
+		if start < chain_end and chain_start < end:
+			return False
 	return False
 
 
