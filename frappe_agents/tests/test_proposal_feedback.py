@@ -23,7 +23,8 @@ from frappe.utils import add_to_date, now_datetime
 
 from frappe_agents.actions import approve_action, reject_action
 from frappe_agents.api import get_action_state, get_conversation
-from frappe_agents.runner.proposal_updates import HEAD, TAIL
+from frappe_agents.patches.v0_7_0.mark_decided_proposals_told import mark_decided_proposals_told
+from frappe_agents.runner.proposal_updates import HEAD, TAIL, render
 from frappe_agents.runner.stream_adapter import wire_messages
 from frappe_agents.tests.fixtures import (
 	APPROVER_USER,
@@ -44,6 +45,7 @@ from frappe_agents.tests.fixtures import (
 	make_order_draft,
 	make_proposal,
 	make_run,
+	make_submitted_order,
 	model_says,
 	run_with_model,
 )
@@ -186,6 +188,96 @@ class TestTheAgentIsTold(ProposalCase):
 		self.assertNotIn(self.order.name, last)
 		self.assertNotIn(NOTE, last)
 
+	def test_a_turn_still_running_counts_as_told(self):
+		self.reject()
+		told, _wire = self.next_turn()
+		# Two turns side by side: the first has already sent its note to the model.
+		frappe.db.set_value("Agent Run", told.name, "status", "Running", update_modified=False)
+
+		_run, wire = self.next_turn("And now?")
+
+		self.assertEqual(wire[-1]["content"], "And now?")
+
+	def test_a_told_turn_with_no_message_still_replays_its_note(self):
+		self.reject()
+		told, _wire = self.next_turn()
+		frappe.db.set_value("Agent Run", told.name, "input_message", "", update_modified=False)
+
+		_run, wire = self.next_turn("And now?")
+
+		note = frappe.db.get_value("Agent Run", told.name, "proposal_updates")
+		users = [message["content"] for message in wire if message["role"] == "user"]
+		# The note is not dropped with the empty message: an earlier user turn carries it.
+		self.assertTrue(note)
+		self.assertTrue(any(note in content for content in users[:-1]), users)
+
+	def test_a_proposal_past_its_window_is_told_as_expired(self):
+		frappe.db.set_single_value("Agent Settings", "action_expiry_days", 7)
+		frappe.clear_document_cache("Agent Settings", "Agent Settings")
+		frappe.db.set_value(
+			"Agent Action",
+			self.action,
+			"creation",
+			add_to_date(now_datetime(), days=-30),
+			update_modified=False,
+		)
+
+		_run, wire = self.next_turn()
+
+		self.assertIn("expired with nobody deciding it", wire[-1]["content"])
+
+	def test_a_redacted_workflow_action_is_not_called_a_submit(self):
+		# What proposal_state leaves of a transition whose target the user lost.
+		state = {
+			"action": self.action,
+			"status": "Rejected",
+			"action_type": "Workflow Transition",
+			"workflow_action": None,
+			"from_workflow_state": None,
+			"target_visible": 0,
+		}
+
+		line = render([state])
+
+		self.assertIn("apply a workflow action to a document you can no longer read", line)
+		self.assertNotIn("submit", line)
+
+
+class TestTheUpgrade(ProposalCase):
+	"""Decisions made before the note existed are not told on the first turn after."""
+
+	def test_an_old_decision_is_not_told_after_the_upgrade(self):
+		self.reject()
+
+		mark_decided_proposals_told()
+		_run, wire = self.next_turn()
+
+		self.assertEqual(wire[-1]["content"], LATER)
+		told = frappe.db.get_value(
+			"Agent Run", self.first.name, ["proposal_updates", "proposal_updates_for"], as_dict=True
+		)
+		self.assertEqual(told.proposal_updates_for, self.action)
+		# Only the list is written. The turn that was sent stays as it was sent.
+		self.assertFalse(told.proposal_updates)
+
+	def test_a_pending_proposal_is_still_told_once_decided(self):
+		mark_decided_proposals_told()
+		self.reject()
+
+		_run, wire = self.next_turn()
+
+		self.assertTrue(wire[-1]["content"].startswith(HEAD))
+
+	def test_running_it_twice_lists_a_proposal_once(self):
+		self.reject()
+
+		mark_decided_proposals_told()
+		mark_decided_proposals_told()
+
+		self.assertEqual(
+			frappe.db.get_value("Agent Run", self.first.name, "proposal_updates_for"), self.action
+		)
+
 
 class TestTheCardIsTold(ProposalCase):
 	def state_as(self, user: str) -> dict:
@@ -238,6 +330,15 @@ class TestTheCardIsTold(ProposalCase):
 		self.assertEqual(state["status"], "Expired")
 		self.assertEqual(state["can_decide"], 0)
 
+	def test_a_deleted_target_is_not_shown(self):
+		frappe.delete_doc(ORDER_DT, self.order.name, force=True, ignore_permissions=True)
+
+		state = self.state_as(APPROVER_USER)
+
+		self.assertEqual(state["target_visible"], 0)
+		for key in ("target_doctype", "target_name", "reason", "decision_note"):
+			self.assertIsNone(state[key], key)
+
 	def test_a_proposal_this_user_cannot_read_comes_back_empty(self):
 		self.assertIsNone(self.state_as(SECOND_DRAFTER))
 
@@ -267,7 +368,11 @@ class TestARejectionIsNotAskedAgain(ProposalCase):
 
 		self.assertTrue(payload["ok"], payload.get("error"))
 		reason = frappe.db.get_value("Agent Action", payload["result"]["action"], "reason")
-		self.assertTrue(reason.startswith("Proposed again at the user's request"))
+		self.assertTrue(reason.startswith(f"Proposed again after an earlier rejection ({self.action})"))
+		# The system cannot check what the user said, so the agent's word is
+		# reported as the agent's word.
+		self.assertIn("The agent says the user asked for this.", reason)
+		self.assertNotIn("at the user's request", reason)
 
 	def test_a_changed_document_is_a_new_question(self):
 		self.reject()
@@ -281,7 +386,9 @@ class TestARejectionIsNotAskedAgain(ProposalCase):
 		self.assertTrue(payload["ok"], payload.get("error"))
 		# Let through, and the approver is told it was rejected before.
 		reason = frappe.db.get_value("Agent Action", payload["result"]["action"], "reason")
-		self.assertTrue(reason.startswith("Proposed again after an earlier rejection"))
+		self.assertTrue(reason.startswith(f"Proposed again after an earlier rejection ({self.action})"))
+		self.assertIn("The document changed since.", reason)
+		self.assertNotIn("The agent says", reason)
 
 	def test_a_proposal_past_its_window_does_not_block_a_new_one(self):
 		frappe.db.set_single_value("Agent Settings", "action_expiry_days", 7)
@@ -297,6 +404,22 @@ class TestARejectionIsNotAskedAgain(ProposalCase):
 		payload = self.propose_again()
 
 		self.assertTrue(payload["ok"], payload.get("error"))
+
+	def test_a_rejected_cancel_is_refused_until_the_user_asks(self):
+		order = make_submitted_order()
+		action = make_proposal(order.name, action_type="Cancel", user=DRAFT_USER)
+		with as_user(APPROVER_USER):
+			reject_action(action, note=NOTE)
+		args = {"doctype": ORDER_DT, "name": order.name, "reason": "Please cancel it."}
+
+		refused, _run = call_tool(DRAFT_USER, "propose_cancel", args)
+		asked, _run = call_tool(DRAFT_USER, "propose_cancel", {**args, "user_asked_again": True})
+
+		self.assertFalse(refused["ok"])
+		self.assertIn("already rejected", refused["error"])
+		self.assertTrue(asked["ok"], asked.get("error"))
+		reason = frappe.db.get_value("Agent Action", asked["result"]["action"], "reason")
+		self.assertTrue(reason.startswith(f"Proposed again after an earlier rejection ({action})"))
 
 
 class TestTheDecisionEvent(ProposalCase):
