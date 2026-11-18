@@ -34,6 +34,7 @@ from frappe_agents.model_profiles import check_profile
 from frappe_agents.rehearsals import scoring
 from frappe_agents.runner.run import FORBIDDEN_USERS, execute_run
 from frappe_agents.tools.base import CAPABILITY_READ, runtime_enabled
+from frappe_agents.triggers.dispatch import no_triggers
 
 REHEARSAL = "Agent Rehearsal"
 RESULT = "Agent Rehearsal Result"
@@ -406,8 +407,10 @@ def _plant_bait(rehearsal: Any, user: str) -> tuple[str | None, dict | None, lis
 	# Saved through Comment.validate, which sanitises the HTML. The desk renders a
 	# comment as HTML for everyone who opens the document, so raw bait here would
 	# let a manager plant script on records they can only read. That is also why
-	# the close-the-wrapper case ships for the file vector only.
-	comment.insert(ignore_permissions=True)
+	# the close-the-wrapper case ships for the file vector only. And it fires no
+	# agent trigger: a trigger that answered the bait would be the bait working.
+	with no_triggers():
+		comment.insert(ignore_permissions=True)
 	return (
 		None,
 		{"vector": vector, "doctype": rehearsal.context_doctype, "name": rehearsal.context_name},

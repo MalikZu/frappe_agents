@@ -24,6 +24,7 @@ stopped firing says why on its own form instead of in nobody's log.
 
 import json
 import operator
+from contextlib import contextmanager
 from typing import Any
 
 import frappe
@@ -73,6 +74,7 @@ SKIP_REASONS = (SKIP_NO_USER, SKIP_RATE, SKIP_SWITCH, SKIP_AGENT, SKIP_ROLE, SKI
 
 # Saves that never fire a trigger whatever the settings say. Nobody's action is
 # behind them, and the user they run as is Administrator.
+NO_TRIGGERS_FLAG = "frappe_agents_no_triggers"
 SYSTEM_FLAGS = ("in_install", "in_install_db", "in_migrate", "in_patch", "in_uninstall")
 
 COMPARISONS = {
@@ -167,11 +169,26 @@ def _suppressed() -> bool:
 	flags = frappe.flags
 	if any(flags.get(flag) for flag in SYSTEM_FLAGS):
 		return True
-	if flags.get(RUN_FLAG):
+	if flags.get(RUN_FLAG) or flags.get(NO_TRIGGERS_FLAG):
 		return True
 	if flags.get("in_import"):
 		return bool(cint(frappe.get_cached_doc("Agent Settings").get("suppress_on_import")))
 	return False
+
+
+@contextmanager
+def no_triggers():
+	"""Saves inside this block fire no trigger.
+
+	For the runtime's own writes that are not tool calls: a rehearsal plants bait
+	on a document, and a trigger that answered it would be the bait working.
+	"""
+	previous = frappe.flags.get(NO_TRIGGERS_FLAG)
+	frappe.flags[NO_TRIGGERS_FLAG] = True
+	try:
+		yield
+	finally:
+		frappe.flags[NO_TRIGGERS_FLAG] = previous
 
 
 def _doc_fires(doc: Any, row: dict) -> bool:
