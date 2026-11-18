@@ -392,10 +392,7 @@ def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: 
 		# That run ended between the two asks and found nothing waiting. This
 		# event is the one to run, so take it back, and leave the rest waiting.
 		pending = take_dirty(doc.name, doctype, docname) or {}
-		rest = [other for other in pending.get("files") or [] if other != file]
-		if rest:
-			for other in rest:
-				mark_dirty(doc.name, doctype, docname, pending.get("user") or fired_by, other)
+		_wait_again(doc.name, doctype, docname, pending, running=file)
 
 	try:
 		run = _insert_run(doc, agent, doctype, docname, fired_by, file)
@@ -468,13 +465,15 @@ def release(run: Any) -> None:
 		missed = take_dirty(trigger, doctype, docname)
 		if not missed:
 			return
-		files = missed.get("files") or []
-		user = missed.get("user")
-		# One more run: the newest field event, or the oldest waiting file. Any other
-		# files stay waiting for the run after that.
-		enqueue_run(trigger, doctype, docname, user, files[0] if files else None)
-		for file in files[1:]:
-			mark_dirty(trigger, doctype, docname, user, file)
+		# One more run: the oldest waiting file, as the person who attached it, or
+		# else the newest field event. Everything else waits for the run after that.
+		files = waiting_files(missed)
+		if files:
+			first = files[0]
+			enqueue_run(trigger, doctype, docname, first["user"], first["file"])
+			_wait_again(trigger, doctype, docname, missed, running=first["file"])
+		elif missed.get("user"):
+			enqueue_run(trigger, doctype, docname, missed["user"], None)
 	except Exception:
 		frappe.logger("frappe_agents").error(f"could not release trigger run {run.name}", exc_info=True)
 
@@ -563,18 +562,42 @@ def release_lock(trigger: str, doctype: str, docname: str) -> None:
 
 
 def mark_dirty(trigger: str, doctype: str, docname: str, user: str, file: str | None) -> None:
-	"""Leave an event for the run in flight. The newest person, every waiting file.
+	"""Leave an event for the run in flight.
 
-	A field event needs remembering once: the run it queues reads the newest state.
-	Files are different — three uploaded together are three files to read.
+	A field event needs remembering once: the run it queues reads the newest state,
+	as the newest person. Files are different. Three uploaded together are three
+	files to read, and each is read as the person who attached it — never as
+	whoever happened to attach the last one.
 	"""
 	key = _key(_doc_key("dirty", trigger, doctype, docname))
 	raw = _raw().get(key)
 	pending = json.loads(raw) if raw else {}
-	files = pending.get("files") or []
-	if file and file not in files and len(files) < MAX_WAITING_FILES:
-		files.append(file)
-	_raw().set(key, json.dumps({"user": user, "files": files}), ex=LOCK_SECONDS)
+	files = waiting_files(pending)
+	if file:
+		if file not in {waiting["file"] for waiting in files} and len(files) < MAX_WAITING_FILES:
+			files.append({"file": file, "user": user})
+	else:
+		pending["user"] = user
+	_raw().set(key, json.dumps({"user": pending.get("user"), "files": files}), ex=LOCK_SECONDS)
+
+
+def waiting_files(pending: dict) -> list[dict]:
+	"""The waiting files, each with the person who attached it."""
+	files = []
+	for waiting in pending.get("files") or []:
+		if isinstance(waiting, dict) and waiting.get("file") and waiting.get("user"):
+			files.append({"file": waiting["file"], "user": waiting["user"]})
+	return files
+
+
+def _wait_again(trigger: str, doctype: str, docname: str, pending: dict, running: str | None) -> None:
+	"""Put back what was waiting, except the event about to run, each with its own person."""
+	for waiting in waiting_files(pending):
+		if waiting["file"] != running:
+			mark_dirty(trigger, doctype, docname, waiting["user"], waiting["file"])
+	if running and pending.get("user"):
+		# A file runs now; a field event that was waiting still needs its own run.
+		mark_dirty(trigger, doctype, docname, pending["user"], None)
 
 
 def take_dirty(trigger: str, doctype: str, docname: str) -> dict | None:
