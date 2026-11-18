@@ -22,11 +22,12 @@ The model call is mocked with canned JSON in the engine's own shape.
 from unittest.mock import patch
 
 import frappe
+from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 from frappe.utils import add_to_date, now_datetime
 
 from frappe_agents.api import discard_extraction, fill_from_file, get_fill_values, record_filled_document
 from frappe_agents.boot import boot_form_agents
-from frappe_agents.extraction.fill import discard_stale_fills
+from frappe_agents.extraction.fill import TOKEN_KEY, discard_stale_fills
 from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction
 from frappe_agents.tests.fixtures import (
 	ALTERED_IBAN,
@@ -42,10 +43,12 @@ from frappe_agents.tests.fixtures import (
 	VAULT_DT,
 	VAULT_RECORD,
 	VENDOR_ACME,
+	VENDOR_ACME_HOLDINGS,
 	VENDOR_DT,
 	VENDOR_IBAN,
 	AgentTestCase,
 	as_user,
+	extract_as,
 	extraction_reply,
 	extraction_settings,
 	make_legacy_agent,
@@ -56,6 +59,7 @@ from frappe_agents.tests.fixtures import (
 	rule,
 	run_extraction_with,
 )
+from frappe_agents.tools.base import masking_supported
 
 FILL_AGENT = "FA Fill Agent"
 READY = "Ready"
@@ -84,7 +88,9 @@ def make_fill_agent(
 	return agent
 
 
-class TestFillFromFile(AgentTestCase):
+class FillTestCase(AgentTestCase):
+	"""A form agent with an Extract rule on orders, a PDF on a live order, and helpers."""
+
 	def setUp(self) -> None:
 		super().setUp()
 		self.agent = make_fill_agent()
@@ -128,6 +134,26 @@ class TestFillFromFile(AgentTestCase):
 	def assert_nothing_saved(self) -> None:
 		self.assertEqual(frappe.db.count(ORDER_DT), self.orders_before)
 
+	def save_order(self, user: str = DRAFT_USER, **values):
+		order = frappe.get_doc(
+			{
+				"doctype": ORDER_DT,
+				"order_title": f"FA Saved {frappe.generate_hash(length=8)}",
+				"project": PROJECT_ALPHA,
+				"vendor": VENDOR_ACME,
+				**values,
+			}
+		)
+		with as_user(user):
+			order.insert()
+		return order
+
+	def record(self, extraction: str, docname: str, user: str = DRAFT_USER) -> dict:
+		with as_user(user):
+			return record_filled_document(extraction, docname)
+
+
+class TestFillFromFile(FillTestCase):
 	# --- the job stops before any insert ---------------------------------------
 
 	def test_a_fill_stops_at_ready_and_inserts_nothing(self):
@@ -340,24 +366,6 @@ class TestFillFromFile(AgentTestCase):
 
 	# --- after the save -----------------------------------------------------------
 
-	def save_order(self, user: str = DRAFT_USER, **values):
-		order = frappe.get_doc(
-			{
-				"doctype": ORDER_DT,
-				"order_title": f"FA Saved {frappe.generate_hash(length=8)}",
-				"project": PROJECT_ALPHA,
-				"vendor": VENDOR_ACME,
-				**values,
-			}
-		)
-		with as_user(user):
-			order.insert()
-		return order
-
-	def record(self, extraction: str, docname: str, user: str = DRAFT_USER) -> dict:
-		with as_user(user):
-			return record_filled_document(extraction, docname)
-
 	def test_the_saved_document_is_recorded_and_the_source_attached(self):
 		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
 		order = self.save_order(**{IBAN_FIELD: ALTERED_IBAN})
@@ -479,3 +487,264 @@ class TestFillFromFile(AgentTestCase):
 
 		agents = {agent["name"]: agent for agent in bootinfo["frappe_agents"]["form_agents"]}
 		self.assertEqual(agents[FILL_AGENT]["extract_doctypes"], [ORDER_DT])
+
+
+class TestFillHandoverRechecks(FillTestCase):
+	"""A reading done this morning is not a permission held now.
+
+	Each test reads the file, then changes something the reading depended on, and
+	asks for the values again. Each starts with the control where it can: the
+	same handover before the change, so a check that does nothing cannot pass.
+	"""
+
+	def set_property(self, doctype: str, fieldname: str, prop: str, value, prop_type: str) -> None:
+		"""A Property Setter for the length of the test, removed and uncached after it."""
+		make_property_setter(doctype, fieldname, prop, value, prop_type)
+		self.forget_meta(doctype)
+		self.addCleanup(self.drop_property, doctype, fieldname, prop)
+
+	def drop_property(self, doctype: str, fieldname: str, prop: str) -> None:
+		frappe.db.delete("Property Setter", {"doc_type": doctype, "field_name": fieldname, "property": prop})
+		self.forget_meta(doctype)
+
+	def forget_meta(self, doctype: str) -> None:
+		frappe.clear_cache(doctype=doctype)
+		# Masked fields are cached per doctype and user, apart from the meta.
+		frappe.cache.delete_keys(f"masked_fields::{doctype}")
+
+	def unmask_vendor_iban(self) -> None:
+		"""Show the vendor's IBAN unmasked, so masking is not why a value is hidden."""
+		if masking_supported():
+			self.set_property(VENDOR_DT, IBAN_FIELD, "mask", 0, "Check")
+
+	def restrict_vendors(self, to: str = VENDOR_ACME_HOLDINGS) -> None:
+		"""Leave DRAFT_USER able to read one vendor only, from now on."""
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": DRAFT_USER,
+				"allow": VENDOR_DT,
+				"for_value": to,
+				"apply_to_all_doctypes": 0,
+				"applicable_for": VENDOR_DT,
+			}
+		).insert(ignore_permissions=True)
+		frappe.clear_cache(user=DRAFT_USER)
+		self.addCleanup(self.lift_vendor_restriction)
+
+	def lift_vendor_restriction(self) -> None:
+		frappe.db.delete("User Permission", {"user": DRAFT_USER, "allow": VENDOR_DT})
+		frappe.clear_cache(user=DRAFT_USER)
+
+	# --- links and candidates ---------------------------------------------------
+
+	def test_a_link_out_of_reach_after_reading_goes_back_to_text(self):
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+		self.assertEqual(self.values(extraction)["values"]["vendor"], VENDOR_ACME)
+
+		self.restrict_vendors()
+		answer = self.values(extraction)
+
+		self.assertNotIn("vendor", answer["values"])
+		self.assertEqual(answer["candidates"]["vendor"]["options"], [])
+		self.assertNotIn(VENDOR_ACME, frappe.as_json(answer["candidates"]))
+		# The master went with it: nothing named, the mismatch kept, no shortcut.
+		flag = answer["sensitive"][IBAN_FIELD]
+		self.assertIsNone(flag["master_name"])
+		self.assertIsNone(flag["master_value"])
+		self.assertEqual(flag["mismatch"], 1)
+		self.assertEqual(flag["blocked"], 1)
+
+	def test_a_candidate_out_of_reach_after_reading_is_removed(self):
+		extraction = self.read(extraction_reply(self.fields(vendor="FA Acme")))
+		before = {option["name"] for option in self.values(extraction)["candidates"]["vendor"]["options"]}
+		self.assertEqual(before, {VENDOR_ACME, VENDOR_ACME_HOLDINGS})
+
+		self.restrict_vendors()
+		after = {option["name"] for option in self.values(extraction)["candidates"]["vendor"]["options"]}
+
+		self.assertEqual(after, {VENDOR_ACME_HOLDINGS})
+
+	# --- duplicates -------------------------------------------------------------
+
+	def test_a_duplicate_out_of_reach_after_reading_is_counted_not_named(self):
+		first, _ = extract_as(DRAFT_USER, self.file.name, extraction_reply(self.fields()))
+		extraction = self.read(extraction_reply(self.fields()))
+		named = [row["name"] for row in self.values(extraction)["duplicates"]["same_file"]]
+		self.assertIn(first.name, named)
+
+		frappe.db.set_value(EXTRACTION, first.name, "owner", SECOND_DRAFTER, update_modified=False)
+		duplicates = self.values(extraction)["duplicates"]
+
+		self.assertNotIn(first.name, frappe.as_json(duplicates))
+		self.assertEqual(duplicates["same_file_hidden_count"], 1)
+
+	def test_a_saved_draft_does_not_collide_with_itself(self):
+		order = make_order_draft(user=DRAFT_USER)
+		started = self.start(docname=order.name)
+		run_extraction_with(started["extraction"], extraction_reply(self.fields()))
+		collision = {"fieldname": "order_title", "value": order.order_title, "name": order.name}
+		frappe.db.set_value(
+			EXTRACTION,
+			started["extraction"],
+			"duplicate_flags",
+			frappe.as_json({"unique_collisions": [collision]}),
+		)
+
+		duplicates = self.values(started["extraction"])["duplicates"]
+
+		self.assertEqual(duplicates["unique_collisions"], [])
+		self.assertEqual(duplicates["unique_collisions_hidden_count"], 0)
+
+	# --- fields and the target ----------------------------------------------------
+
+	def test_a_field_made_read_only_after_reading_is_not_handed_over(self):
+		extraction = self.read(extraction_reply(self.fields()))
+		self.assertIn("amount", self.values(extraction)["values"])
+
+		self.set_property(ORDER_DT, "amount", "read_only", 1, "Check")
+		answer = self.values(extraction)
+
+		self.assertNotIn("amount", answer["values"])
+		self.assertIn("amount", answer["ignored"])
+
+	def test_a_draft_submitted_after_reading_is_not_filled(self):
+		order = make_order_draft(user=DRAFT_USER)
+		started = self.start(docname=order.name)
+		run_extraction_with(started["extraction"], extraction_reply(self.fields()))
+
+		frappe.db.set_value(ORDER_DT, order.name, "docstatus", 1)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self.values(started["extraction"])
+		self.assertIn("no longer a draft", str(caught.exception))
+
+	# --- the master's value -------------------------------------------------------
+
+	def test_the_master_value_shows_only_while_the_user_may_see_it(self):
+		"""The control for the two tests below: unmasked, level 0, the value is shown."""
+		self.unmask_vendor_iban()
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+
+		self.assertEqual(self.values(extraction)["sensitive"][IBAN_FIELD]["master_value"], VENDOR_IBAN)
+
+	def test_a_master_field_above_the_users_permlevel_is_never_shown(self):
+		"""The only field protection there is on version-15."""
+		self.unmask_vendor_iban()
+		self.set_property(VENDOR_DT, IBAN_FIELD, "permlevel", 1, "Int")
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+
+		stored = frappe.parse_json(frappe.db.get_value(EXTRACTION, extraction, "sensitive_flags"))[IBAN_FIELD]
+		self.assertIsNone(stored["master_value"])
+		self.assertEqual(stored["master_visible"], 0)
+		self.assertEqual(stored["mismatch"], 1)
+
+		flag = self.values(extraction)["sensitive"][IBAN_FIELD]
+		self.assertIsNone(flag["master_value"])
+		self.assertEqual(flag["mismatch"], 1)
+		self.assertNotIn(VENDOR_IBAN, frappe.as_json(flag))
+
+	def test_masking_turned_on_after_reading_hides_the_master_value(self):
+		if not masking_supported():
+			self.skipTest("this Frappe version has no field masking")
+		self.unmask_vendor_iban()
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+		self.assertEqual(self.values(extraction)["sensitive"][IBAN_FIELD]["master_value"], VENDOR_IBAN)
+
+		self.drop_property(VENDOR_DT, IBAN_FIELD, "mask")
+		with as_user(DRAFT_USER):
+			masked = {df.fieldname for df in frappe.get_meta(VENDOR_DT).get_masked_fields()}
+		if IBAN_FIELD not in masked:
+			# What this test checks is the handover's re-check, not the framework's
+			# masking; where the framework does not report the mask there is nothing
+			# for the re-check to act on.
+			self.skipTest("the framework does not report this field as masked for this user")
+		flag = self.values(extraction)["sensitive"][IBAN_FIELD]
+
+		self.assertIsNone(flag["master_value"])
+		self.assertEqual(flag["mismatch"], 1)
+
+	def test_the_master_is_compared_again_at_handover(self):
+		"""The one-click offer rests on the master as it is now, not this morning."""
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: VENDOR_IBAN})))
+		self.assertEqual(self.values(extraction)["sensitive"][IBAN_FIELD]["blocked"], 0)
+
+		frappe.db.set_value(VENDOR_DT, VENDOR_ACME, IBAN_FIELD, ALTERED_IBAN)
+		flag = self.values(extraction)["sensitive"][IBAN_FIELD]
+
+		self.assertEqual(flag["mismatch"], 1)
+		self.assertEqual(flag["blocked"], 1)
+
+	def test_an_empty_master_is_not_agreement(self):
+		extraction = self.read(
+			extraction_reply(self.fields(vendor=VENDOR_ACME_HOLDINGS, **{IBAN_FIELD: ALTERED_IBAN}))
+		)
+
+		flag = self.values(extraction)["sensitive"][IBAN_FIELD]
+		self.assertEqual(flag["master_name"], VENDOR_ACME_HOLDINGS)
+		self.assertEqual(flag["compared"], 0)
+		self.assertEqual(flag["mismatch"], 0)
+		self.assertEqual(flag["blocked"], 1)
+
+
+class TestFillRecordedBySave(FillTestCase):
+	"""The save records the reading. The browser's call after it is only a courtesy."""
+
+	def save_with_token(self, extraction: str, user: str = DRAFT_USER, **values):
+		order = frappe.get_doc(
+			{
+				"doctype": ORDER_DT,
+				"order_title": f"FA Saved {frappe.generate_hash(length=8)}",
+				"project": PROJECT_ALPHA,
+				"vendor": VENDOR_ACME,
+				TOKEN_KEY: extraction,
+				**values,
+			}
+		)
+		with as_user(user):
+			order.insert()
+		return order
+
+	def test_the_save_itself_records_the_reading(self):
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+
+		order = self.save_with_token(extraction, **{IBAN_FIELD: ALTERED_IBAN})
+
+		doc = frappe.get_doc(EXTRACTION, extraction)
+		self.assertEqual(doc.status, ACCEPTED)
+		self.assertEqual(doc.created_doc, order.name)
+		self.assertEqual(frappe.parse_json(doc.sensitive_flags)[IBAN_FIELD]["saved"], "printed")
+		self.assertTrue(
+			frappe.db.exists(
+				"File",
+				{
+					"file_url": self.file.file_url,
+					"attached_to_doctype": ORDER_DT,
+					"attached_to_name": order.name,
+				},
+			)
+		)
+
+	def test_the_call_after_the_save_reports_what_the_save_recorded(self):
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+		order = self.save_with_token(extraction)
+
+		with as_user(DRAFT_USER):
+			done = record_filled_document(extraction, order.name)
+
+		self.assertEqual(done["status"], ACCEPTED)
+		self.assertEqual(done["created_doc"], order.name)
+		self.assertTrue(done["source_attached"])
+		self.assertEqual(done["sensitive"][IBAN_FIELD], "empty")
+
+	def test_a_token_for_someone_elses_reading_changes_nothing(self):
+		extraction = self.read(extraction_reply(self.fields()))
+
+		order = self.save_with_token(extraction, user=SECOND_DRAFTER)
+
+		self.assertTrue(frappe.db.exists(ORDER_DT, order.name))
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "status"), READY)
+
+	def test_a_token_that_names_nothing_never_breaks_the_save(self):
+		order = self.save_with_token("FA no such reading")
+
+		self.assertTrue(frappe.db.exists(ORDER_DT, order.name))
