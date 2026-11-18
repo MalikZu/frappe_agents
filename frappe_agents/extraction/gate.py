@@ -125,6 +125,9 @@ def _flag(spec: dict, fieldname: str, value: Any, links: dict) -> dict:
 	flag["master_value"] = _cut(master_value) if visible else None
 	flag["master_visible"] = 1 if visible else 0
 	if master_value:
+		# Only a master that holds a value was compared. "No mismatch" against an
+		# empty master means nothing was checked, and must not read as agreement.
+		flag["compared"] = 1
 		flag["mismatch"] = 0 if same_value(value, master_value) else 1
 	return flag
 
@@ -147,6 +150,7 @@ def _blank_flag(value: Any) -> dict:
 		"master_field": None,
 		"master_value": None,
 		"master_visible": 0,
+		"compared": 0,
 		"mismatch": 0,
 		"confirmed": 0,
 	}
@@ -191,6 +195,11 @@ def _master(target_doctype: str | None, fieldname: str, links: dict) -> tuple | 
 		)
 
 	return None
+
+
+def is_masked(doctype: str, fieldname: str) -> bool:
+	"""Whether this user sees this field masked on this doctype now."""
+	return fieldname in _masked_fields(frappe.get_meta(doctype))
 
 
 def _masked_fields(meta: Any) -> set[str]:

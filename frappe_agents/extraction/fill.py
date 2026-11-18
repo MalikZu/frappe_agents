@@ -122,11 +122,11 @@ def fill_row(name: str) -> Any:
 	resolved under the owner's permissions, and the values are meant for the form
 	the owner has open, not for anybody else's.
 	"""
-	if not name or not frappe.db.exists(EXTRACTION, name):
-		frappe.throw(_("No such reading: {0}").format(name))
+	# Missing and somebody else's answer alike, and name nobody: a reading's name
+	# is not a way to learn who else has been reading files.
+	if not name or frappe.db.get_value(EXTRACTION, name, "owner") != frappe.session.user:
+		raise frappe.PermissionError(_("No such reading of yours: {0}").format(name))
 	doc = frappe.get_doc(EXTRACTION, name)
-	if doc.owner != frappe.session.user:
-		raise frappe.PermissionError(_("This reading belongs to {0}.").format(doc.owner))
 	if doc.get("purpose") != PURPOSE_FILL:
 		frappe.throw(_("{0} is not a Fill from file reading.").format(name))
 	return doc
@@ -167,7 +167,7 @@ def fill_values(doc: Any) -> dict:
 			"sensitive": _sensitive_view(flags),
 			"candidates": candidates,
 			"notes": _parsed(doc.field_confidence),
-			"duplicates": _parsed(doc.duplicate_flags),
+			"duplicates": _readable_duplicates(doctype, _parsed(doc.duplicate_flags), doc.get("target_name")),
 			"ignored": sorted(ignored),
 			"source": _source(doc.source_file),
 		}
@@ -193,9 +193,14 @@ def record_filled(doc: Any, docname: str) -> dict:
 	target = doc.get("target_name")
 	if target and docname != target:
 		frappe.throw(_("This reading was for {0} {1}.").format(doctype, target))
-	if not docname or not frappe.db.exists(doctype, docname):
-		frappe.throw(_("No such {0}: {1}").format(doctype, docname))
-	frappe.has_permission(doctype, "read", doc=docname, throw=True)
+	# Write, not read: this attaches a file to the document and says the person
+	# filled it. Missing and not writable answer alike.
+	if (
+		not docname
+		or not frappe.db.exists(doctype, docname)
+		or not frappe.has_permission(doctype, "write", doc=docname)
+	):
+		raise frappe.PermissionError(_("You are not allowed to change {0} {1}.").format(doctype, docname))
 
 	saved = frappe.get_doc(doctype, docname)
 	if not target and (
@@ -344,17 +349,63 @@ def _sensitive_view(flags: dict) -> dict:
 		master_doctype = flag.get("master_doctype")
 		master_name = flag.get("master_name")
 		readable = bool(master_doctype and master_name and gate.readable(master_doctype, master_name))
+		visible = (
+			readable
+			and cint(flag.get("master_visible"))
+			and not gate.is_masked(master_doctype, SENSITIVE_ROW.sub(r"\g<field>", key))
+		)
+		compared = readable and cint(flag.get("compared"))
+		mismatch = cint(flag.get("mismatch"))
 		view[key] = {
 			"value": flag.get("value"),
 			"master_doctype": master_doctype if readable else None,
 			"master_name": master_name if readable else None,
 			"master_field": flag.get("master_field") if readable else None,
-			"master_value": flag.get("master_value")
-			if readable and cint(flag.get("master_visible"))
-			else None,
-			"mismatch": cint(flag.get("mismatch")) if readable else 0,
+			"master_value": flag.get("master_value") if visible else None,
+			"compared": 1 if compared else 0,
+			# A mismatch found at reading time stays found, even when the master has
+			# since gone out of reach: losing sight of a record is not agreeing with it.
+			"mismatch": mismatch,
+			# One click is offered only when the record this document links to holds
+			# the same value. Anything else (a mismatch, nothing compared, a master
+			# out of reach) is typed by the person after checking somewhere else.
+			"blocked": 0 if (compared and not mismatch) else 1,
 		}
 	return view
+
+
+def _readable_duplicates(doctype: str, duplicates: dict, target_name: str | None) -> dict:
+	"""Duplicate flags re-checked for what this user may open now.
+
+	A name that has gone out of reach is counted instead, the way the gate counts
+	the ones that were out of reach from the start. A saved draft does not collide
+	with itself.
+	"""
+	same_file, hidden_files = [], cint(duplicates.get("same_file_hidden_count"))
+	for row in duplicates.get("same_file") or []:
+		if not isinstance(row, dict):
+			continue
+		if not gate.readable(EXTRACTION, row.get("name")):
+			hidden_files += 1
+			continue
+		created = row.get("created_doc")
+		same_file.append({**row, "created_doc": created if gate.readable(doctype, created) else None})
+
+	collisions, hidden_collisions = [], cint(duplicates.get("unique_collisions_hidden_count"))
+	for row in duplicates.get("unique_collisions") or []:
+		if not isinstance(row, dict) or (target_name and row.get("name") == target_name):
+			continue
+		if not gate.readable(doctype, row.get("name")):
+			hidden_collisions += 1
+			continue
+		collisions.append(row)
+
+	return {
+		"same_file": same_file,
+		"same_file_hidden_count": hidden_files,
+		"unique_collisions": collisions,
+		"unique_collisions_hidden_count": hidden_collisions,
+	}
 
 
 def _source(file_name: str | None) -> dict:
@@ -387,7 +438,7 @@ def _stamp_saved(doctype: str, saved: Any, flags: dict) -> dict:
 	for key, flag in stamped.items():
 		if not isinstance(flag, dict):
 			continue
-		value = _saved_value(saved, key)
+		value = _saved_value(saved, key, flag.get("value"))
 		if value in (None, ""):
 			state = SAVED_EMPTY
 		elif gate.same_value(value, flag.get("value")):
@@ -405,24 +456,35 @@ def _stamp_saved(doctype: str, saved: Any, flags: dict) -> dict:
 	return stamped
 
 
-def _saved_value(saved: Any, key: str) -> Any:
+def _saved_value(saved: Any, key: str, printed: Any) -> Any:
+	"""The saved value a flag is about.
+
+	For a value in a child row, the row the reading numbered may not be the row it
+	became: the person can add rows before it, or reorder them. So any row holding
+	the printed value answers for it first, and the numbered row only otherwise.
+	"""
 	match = SENSITIVE_ROW.match(key)
 	if not match:
 		return saved.get(key)
 	rows = saved.get(match.group("table")) or []
+	field = match.group("field")
+	if printed not in (None, ""):
+		for row in rows:
+			if gate.same_value(row.get(field), printed):
+				return row.get(field)
 	index = int(match.group("index"))
 	if index >= len(rows):
 		return None
-	return rows[index].get(match.group("field"))
+	return rows[index].get(field)
 
 
 def _attach_source(doc: Any, doctype: str, docname: str) -> bool:
 	"""Attach the file the form was filled from to the saved document.
 
-	Under the person's own permission: File's create check is write on the
-	document it attaches to, which they just used to save it. A failure is a
-	missing attachment, not a failed save, so it is logged and reported, never
-	raised.
+	Under the person's own permission and nothing else: `record_filled` has
+	already required write on the document, and the File insert makes its own
+	checks. A failure is a missing attachment, not a failed save, so it is logged
+	and reported, never raised.
 	"""
 	savepoint = "fa_fill_attach"
 	frappe.db.savepoint(savepoint)
