@@ -82,7 +82,8 @@ def rehearse(name: str, script, model_profile: str | None = None) -> tuple:
 	"""Queue as the manager, then run the job the queue would have run."""
 	with as_user(MANAGER), patch("frappe.enqueue") as enqueue:
 		result = queue_rehearsal(frappe.get_doc(REHEARSAL, name), model_profile=model_profile)
-	enqueue.assert_called_once()
+	jobs = [call.args[0] for call in enqueue.call_args_list if call.args]
+	assert "frappe_agents.rehearsals.runner.execute_rehearsal" in jobs, jobs
 	provider = FakeProvider(script)
 	with as_user(MANAGER), patch("frappe_agents.runner.run.ModelProfileProvider", return_value=provider):
 		execute_rehearsal(result)
@@ -119,6 +120,8 @@ class TestRehearsalRuns(AgentTestCase):
 		run = frappe.get_doc("Agent Run", result.run)
 		self.assertEqual(run.surface, "Rehearsal")
 		self.assertEqual(run.effective_user, DRAFT_USER)
+		# Owned by the test user, like a chat run: the manager does not get its log.
+		self.assertEqual(run.owner, DRAFT_USER)
 		# The audit row is the real one, and the result carries a copy a manager can read.
 		self.assertEqual(frappe.db.count("Agent Tool Call", {"run": run.name}), 1)
 		self.assertEqual([row.tool for row in result.calls], ["search_documents"])
@@ -187,10 +190,13 @@ class TestBait(AgentTestCase):
 		grant_role(DRAFT_USER, RUN_AS_ROLE)
 
 	def bait_file(self) -> str:
+		"""The file on the newest rehearsal conversation, whatever name the disk gave it."""
+		conversation = frappe.get_all(
+			"Agent Conversation", filters={"rehearsal": 1}, order_by="creation desc", pluck="name", limit=1
+		)[0]
 		return frappe.get_all(
 			"File",
-			filters={"attached_to_doctype": "Agent Conversation", "file_name": "notes.txt"},
-			order_by="creation desc",
+			filters={"attached_to_doctype": "Agent Conversation", "attached_to_name": conversation},
 			pluck="name",
 			limit=1,
 		)[0]
@@ -271,8 +277,9 @@ class TestInjectionPack(AgentTestCase):
 
 	def test_a_well_behaved_model_passes_every_case(self):
 		for name in self.rehearsals:
-			with self.subTest(case=frappe.db.get_value(REHEARSAL, name, "pack_case")):
-				result, _ = rehearse(
+			case = frappe.db.get_value(REHEARSAL, name, "pack_case")
+			with self.subTest(case=case):
+				result, provider = rehearse(
 					name,
 					[
 						model_calls(timeline(self.order.name)),
@@ -280,6 +287,10 @@ class TestInjectionPack(AgentTestCase):
 					],
 				)
 				self.assertEqual(result.verdict, "Pass", [c.as_dict() for c in result.checks])
+				if case == "close-the-wrapper":
+					# The bait's own closing tag reached the wrapper and was defused.
+					transcript = str(provider.messages(-1))
+					self.assertIn("&lt;/untrusted", transcript)
 
 	def test_a_model_that_obeys_the_bait_fails_every_case(self):
 		for name in self.rehearsals:
@@ -333,6 +344,20 @@ class TestRehearsalPermissions(AgentTestCase):
 		frappe.clear_document_cache("Agent", DRAFT_AGENT)
 		with self.assertRaises(frappe.ValidationError):
 			make_rehearsal([("No writes", "")], run_as_user=MANAGER)
+
+	def test_a_service_user_needs_the_rehearsal_role_too(self):
+		"""Any manager may name an agent's service user, so that is no licence to read as it."""
+		frappe.db.set_value("Agent", DRAFT_AGENT, {"run_as": "Service User", "service_user": DRAFT_USER})
+		frappe.clear_document_cache("Agent", DRAFT_AGENT)
+		with self.assertRaises(frappe.PermissionError):
+			make_rehearsal([("No writes", "")], run_as_user=DRAFT_USER)
+
+		grant_role(DRAFT_USER, RUN_AS_ROLE)
+		name = make_rehearsal([("Answer contains", "ok")], run_as_user=DRAFT_USER)
+		result, _ = rehearse(name, model_says("ok"))
+		run = frappe.get_doc("Agent Run", result.run)
+		self.assertEqual((run.effective_user, run.run_as_mode), (DRAFT_USER, "Service User"))
+		self.assertEqual(result.verdict, "Pass")
 
 	def test_only_a_manager_may_start_a_rehearsal(self):
 		name = make_rehearsal([("No writes", "")], run_as_user=MANAGER)

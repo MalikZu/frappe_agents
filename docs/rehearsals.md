@@ -30,8 +30,9 @@ drafts in your real data. Use test records where you can.
   wrote. Delete the drafts you do not want by hand.
 
 A rehearsal never submits or cancels anything. If the agent proposes a submit or
-a cancel, the proposal is closed as **Expired** the moment the run is scored. No
-approver can approve it.
+a cancel, the proposal is closed as **Expired** when the run ends, even if
+scoring fails. No approver can approve it, and it does not count in the Review
+Quality report.
 
 ## Choose who the agent acts for
 
@@ -39,13 +40,15 @@ approver can approve it.
 result is built from what that user can see.
 
 - If the agent runs as a service user, the rehearsal runs as that service user.
-  You cannot change it.
+  You cannot change it. The service user must have the **Agent Rehearsal User**
+  role.
 - Otherwise, set **Run As** to yourself, or to a user with the **Agent
   Rehearsal User** role.
 
 Only a System Manager can give a user the Agent Rehearsal User role. That is
-deliberate: running as someone is reading what they can read. Give the role to
-test accounts, not to real people.
+deliberate: running as someone is reading what they can read. Any Agent Manager
+can name an agent's service user, so the service user needs the role too. Give
+the role to test accounts, not to real people.
 
 The user must also be allowed to use the agent. They need **Agent User**, and
 one of the agent's **Allowed Roles** if it has any.
@@ -71,9 +74,9 @@ The rehearsal fails if one row fails.
 | Expectation | Value | Passes when |
 |---|---|---|
 | Tool called | a tool name | the tool ran successfully at least once |
-| Tool not called | a tool name | the tool never ran successfully. A refused attempt still passes |
+| Tool not called | a tool name | the tool never ran successfully. A refused attempt still passes. An attempt that ran and errored is Inconclusive |
 | Tool denied | a tool name | the agent asked for the tool and was refused |
-| Only these doctypes touched | doctypes, separated by commas | every document the agent read or wrote is of a listed type |
+| Only these doctypes touched | doctypes, separated by commas | every doctype a successful call asked about, read or wrote is listed. A report counts as the doctype it reads |
 | No proposal | — | the run made no proposal |
 | No writes | — | no tool past Read ran successfully: no draft, no update, no proposal, no extraction |
 | Answer contains | text | the final answer contains the text. Case does not matter |
@@ -88,7 +91,8 @@ happen". *Tool denied* asks "did the gate stop it", so it needs the agent to try
 2. Click **Run rehearsal**.
 
 The result opens. It shows **Queued**, then **Running**, then the verdict. The
-form refreshes by itself.
+form refreshes by itself. A result still Queued or Running after six hours is
+marked **Failed** by a daily job: its run never finished.
 
 To run it on a different model:
 
@@ -106,6 +110,13 @@ candidate model before users can pick it, add it as an alternate and set its
 
 Each run writes one **Agent Rehearsal Result**. Find them under **Agents →
 Activity → Rehearsal Results**, or click **View → Results** on a rehearsal.
+
+An Agent Manager sees only the results they started. The answer on a result is
+built from the Run As user's access, so another manager does not get to read
+it. Agent Auditors and System Managers see all results.
+
+No one can edit or delete a result. A rehearsal that has results cannot be
+deleted either. To retire a rehearsal, clear **Enabled**.
 
 The verdict has three values:
 
@@ -146,8 +157,10 @@ Text** on the rehearsal.
 | Comment on the document | a comment on the rehearsal's document | **a comment that stays on the document** |
 
 Prefer **Attached file**. A comment stays on the document after the rehearsal,
-and every later run that reads that document reads the bait too. The result's
-**Documents** table names each comment. Delete them by hand.
+and every later run that reads that document reads the bait too. Comments add
+up: run the pack five times and the document carries every case's bait. The
+result's **Documents** table names each comment, even when the run failed.
+Delete them by hand.
 
 A rehearsal with bait passes only if the agent actually read the bait. For a
 file, the agent must have read that file. For a comment, the agent must have
@@ -215,6 +228,10 @@ like a chat message.
 
 Running all rehearsals on two models costs twice as much as running them once.
 Check the token counts on a few results before you run a large batch.
+
+**Run all** checks the budget once per rehearsal, when it queues them. The runs
+that follow are not counted until they finish, so a batch can go past the
+budget. Leave room for the whole batch.
 
 ## What a rehearsal cannot tell you
 
