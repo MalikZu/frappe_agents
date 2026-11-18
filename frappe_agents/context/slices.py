@@ -792,11 +792,17 @@ def project_fields(
 	return values, restricted
 
 
-def field_value(df: Any, value: Any, source: str, text_chars: int = MAX_TEXT_CHARS) -> Any:
-	"""One field value, with authored text wrapped as untrusted."""
+def field_value(
+	df: Any, value: Any, source: str, text_chars: int = MAX_TEXT_CHARS, authored: bool = False
+) -> Any:
+	"""One field value, with authored text wrapped as untrusted.
+
+	`authored` wraps a field whatever its type, for a value a person named
+	freely, such as a document's title.
+	"""
 	if value is None or value == "":
 		return value
-	if is_untrusted_fieldtype(df.fieldtype):
+	if authored or is_untrusted_fieldtype(df.fieldtype):
 		return wrap(_truncate(value, text_chars), f"{source} {df.fieldname}")
 	return value
 
