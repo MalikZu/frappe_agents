@@ -116,16 +116,18 @@ A proposal card follows the proposal to its end. Its title says where it stands:
 | Title | Means |
 |---|---|
 | **Waiting for an approver** | Nobody has decided yet. |
-| **Approved and applied** | An approver approved it, and the submit or cancel went through. |
+| **Approved and applied** | An approver approved it, and the change went through. |
 | **Rejected** | An approver said no. The card shows what they wrote. |
-| **Approved, but it did not go through** | The document refused the submit or cancel. The card shows why. |
+| **Approved, but it did not go through** | The document refused the change. The card shows why. |
 | **Expired with no decision** | Nobody decided in time. |
 
 For a workflow action, the title names the action and the state it was
 proposed from, for example **Rejected: Approve (from Draft)**.
 
 The card changes as soon as the decision is made, while the chat is open. A
-reloaded chat shows the state the proposal is in now.
+reloaded chat shows the state the proposal is in now. A reloaded card for a
+field change names the fields only. The new values show only on the card drawn
+while the agent was proposing, and on the approval form.
 
 **Review the proposal** shows only to a person who could decide the proposal.
 You cannot decide a proposal you asked for, so on your own cards it does not
