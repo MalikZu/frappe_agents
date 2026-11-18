@@ -94,6 +94,10 @@ document the file hangs off. See [Files in chat](files-in-chat.md).
 **Show in Forms** offers the agent from the **Ask Agent** button on documents.
 **Form Doctypes** limits that button to the doctypes you name.
 
+**Allow MCP** lets outside clients such as Claude Code or an IDE call this
+agent's tools. It is off by default, and Agent Settings must allow MCP too. Over
+MCP the agent never goes past Draft. See [Outside clients](mcp.md).
+
 ## Skills
 
 A **skill** is a reusable block of instructions. Write one once, attach it to

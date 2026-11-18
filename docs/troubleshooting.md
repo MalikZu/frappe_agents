@@ -132,6 +132,17 @@ document left the state the agent proposed from, or the workflow decided as you:
 you do not hold the transition's role, its condition no longer holds, or it
 forbids approving a document you own.
 
+**Approve is not offered on a field change.** A field in the change moved after
+the agent proposed it, or you are not allowed to read one of its fields. In the
+first case reject it, or ask the agent to propose again. In the second, another
+approver has to decide it. See [Field changes](approvals.md#field-changes).
+
+**An approved field change failed.** The reason is on the row. You may not write
+a field in the change, a field moved since the proposal, the workflow state
+needs another role to edit, or a link names a record you may not read. If the
+document's own rules refused the save, the row says only that; the message you
+saw when you clicked **Approve** says why.
+
 **Nothing can be approved.** The kill switch is off. Rejecting still works.
 
 ## Still stuck
