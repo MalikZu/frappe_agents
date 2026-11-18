@@ -42,8 +42,9 @@ from frappe_agents.extraction.gate import sensitive_fieldnames
 # Fieldtypes a proposal may change. Each one is a single value that reads the
 # same as plain text as it does in the form.
 TEXT_TYPES = frozenset({"Data", "Select", "Link", "Small Text", "Text", "Long Text"})
-INT_TYPES = frozenset({"Int", "Duration"})
-FLOAT_TYPES = frozenset({"Float", "Currency", "Percent", "Rating"})
+INT_TYPES = frozenset({"Int"})
+# Duration is seconds in a decimal column, so a fraction of a second is a value.
+FLOAT_TYPES = frozenset({"Float", "Currency", "Percent", "Rating", "Duration"})
 ALLOWED_FIELDTYPES = TEXT_TYPES | INT_TYPES | FLOAT_TYPES | {"Check", "Date", "Datetime", "Time"}
 
 # What one proposal may change at once. Past this, it is not a change an
