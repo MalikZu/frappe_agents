@@ -1554,6 +1554,8 @@ frappe_agents.ChatUI = class ChatUI {
 				if (this.conversation !== conversation) return;
 				this.conversation = null;
 				this.show_empty(__("That conversation could not be loaded."));
+				// Nothing is pending on an empty log, so the button is Send again.
+				this.render_send();
 			},
 		});
 	}
@@ -2160,20 +2162,24 @@ frappe_agents.ChatUI = class ChatUI {
 			delete this.stop_timers[run];
 			if (this.destroyed || !this.pending[run] || !this.conversation) return;
 			const conversation = this.conversation;
+			// Not over yet, or the server could not be asked: check again, until
+			// the checks run out. A failed check counts as one, so a server that
+			// stays down still gives the composer back.
+			const again = () => {
+				if (this.conversation !== conversation || !this.pending[run]) return;
+				if (tries + 1 < STOP_CHECK_LIMIT) this.check_stopped(run, STOP_CHECK_MS, tries + 1);
+				else this.let_go(run);
+			};
 			frappe.call({
 				method: "frappe_agents.api.get_conversation",
 				args: { conversation: conversation },
 				callback: (r) => {
 					if (this.conversation !== conversation || !this.pending[run]) return;
 					const found = ((r.message || {}).runs || []).find((one) => one.name === run);
-					if (!found || FINISHED_STATUSES.includes(found.status)) {
-						this.reload_tail();
-					} else if (tries + 1 < STOP_CHECK_LIMIT) {
-						this.check_stopped(run, STOP_CHECK_MS, tries + 1);
-					} else {
-						this.let_go(run);
-					}
+					if (!found || FINISHED_STATUSES.includes(found.status)) this.reload_tail();
+					else again();
 				},
+				error: again,
 			});
 		}, delay);
 	}
