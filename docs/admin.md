@@ -36,6 +36,9 @@ Publishing on save is what crosses that gap. See
 | **Max Extraction File MB** | 10 | Larger files are refused |
 | **PDF Parser Engine** | native | How a PDF reaches the model |
 | **Extractions Per User Per Day** | 50 | Per-person daily cap |
+| **MCP Enabled** | off | Opens the endpoint for outside clients. See [Outside clients](mcp.md) |
+| **MCP Requests per User per Minute** | 60 | Requests past this get a 429 |
+| **MCP Tool Calls per Session** | 50 | A session ends after this many calls |
 
 **Sensitive Fields is empty on a new site, and it is the whole configuration of
 the extraction gate.** Until you fill it in, extraction holds nothing back. On a
@@ -78,6 +81,9 @@ call *did* stays readable — the tool, the doctype, the field names, the outcom
 
 One daily job: **expire stale actions**. It moves proposals nobody decided to
 Expired after the number of days in Agent Settings.
+
+One hourly job: **close idle MCP sessions**. It ends MCP sessions nobody has used
+for 30 minutes. See [Outside clients](mcp.md#sessions-and-limits).
 
 The job is safe to run by hand and safe to run twice. Expiry is the clock, not a
 decision — nobody is recorded as having decided, and the agent may propose the
