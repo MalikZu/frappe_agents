@@ -110,9 +110,11 @@ tool, the doctype, the field names, the outcome. Only values are removed.
 
 The event log applies the same rules as the row, and goes one step further: a
 value it holds back is also taken out of the model's later text in that run,
-because a model that read a value can repeat it. The run's stored answer and
-error follow the same rule, so they match what the log says. A result that is
-too long for the model is cut short, and is redacted before it is cut.
+because a model that read a value can repeat it. A number is taken out only
+where it stands alone: a held-back 2025 stays in the date 2025-01-02. The run's
+stored answer and error follow the same rule, so they match what the log says.
+A result that is too long for the model is cut short, and is redacted before it
+is cut.
 
 A value is treated as sensitive when it is a Password field on the doctype the
 call names, when an administrator marked it sensitive in **Agent Settings**, or
