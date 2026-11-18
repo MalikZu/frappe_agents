@@ -41,6 +41,20 @@ permissions, the agent's rules, the Draft cap below, and the human who approves.
 These limits live in the tool chokepoint, not only in the tool list. A client
 that calls a hidden tool by name is refused, and the refusal is audited.
 
+## Which tools a client is offered
+
+The list is fixed in code. A tool is offered over MCP only when someone decided
+it should be, and a new tool is withheld until then.
+
+| Offered over MCP | Withheld from MCP |
+|---|---|
+| `find_doctypes`, `search_documents`, `summarize_documents`, `get_doctype_meta`, `get_document_context`, `get_document_slice`, `run_report` | `extract_document`, `read_document` |
+| `create_draft`, `create_drafts`, `update_draft` | `list_site_doctypes`, `list_site_reports`, `describe_site_doctype` |
+| `propose_submit`, `propose_cancel`, `propose_transition`, `propose_update` | Every tool another app registered |
+
+A client sees only the offered tools that the agent's access rules and Autonomy
+also allow. See [Built-in tools](tools.md) for what each one does.
+
 | | Chat | MCP |
 |---|---|---|
 | Who the run acts as | The person chatting | The user whose API key the client holds |
@@ -84,16 +98,24 @@ Then open each agent a client may use.
 
 ## Connect a client
 
-Do these steps as the person who will use the client.
+Two people do this. Only a System Manager can generate API keys.
 
-1. Ask an administrator for a user that holds **Agent User** and the roles the
-   work needs.
-2. Open that user in the Desk.
-3. Go to **Settings**, then **API Access**.
-4. Click **Generate Keys**.
-5. Copy the API secret now. Frappe shows it once.
-6. Copy the API key from the form.
-7. Build the endpoint address from your site and the agent's name:
+### The administrator creates the key
+
+1. Create a user for the client, or choose one.
+2. Give the user **Agent User** and the roles the work needs.
+3. Confirm that the user does not hold **Agent Approver**.
+4. Open the user in the Desk.
+5. Go to **Settings**, then **API Access**.
+6. Click **Generate Keys**.
+7. Copy the API secret now. Frappe shows it once.
+8. Copy the API key from the form.
+9. Give the key and the secret to the person who uses the client, through a
+   channel you would trust with a password.
+
+### The person who uses the client connects it
+
+1. Build the endpoint address from your site and the agent's name:
 
    ```text
    https://your.site/api/method/frappe_agents.mcp.server.handle?agent=Site%20Reader
@@ -101,12 +123,12 @@ Do these steps as the person who will use the client.
 
    Write a space in the agent's name as `%20`.
 
-8. Add a server in your client with transport **HTTP** (also called
+2. Add a server in your client with transport **HTTP** (also called
    *Streamable HTTP*).
-9. Set the address to the one from step 7.
-10. Add the header `Authorization: token <api_key>:<api_secret>`.
+3. Set the address to the one from step 1.
+4. Add the header `Authorization: token <api_key>:<api_secret>`.
 
-For Claude Code, steps 8 to 10 are one command:
+For Claude Code, steps 2 to 4 are one command:
 
 ```bash
 claude mcp add --transport http frappe "https://your.site/api/method/frappe_agents.mcp.server.handle?agent=Site%20Reader" --header "Authorization: token <api_key>:<api_secret>"

@@ -82,12 +82,14 @@ call *did* stays readable — the tool, the doctype, the field names, the outcom
 One daily job: **expire stale actions**. It moves proposals nobody decided to
 Expired after the number of days in Agent Settings.
 
-One hourly job: **close idle MCP sessions**. It ends MCP sessions nobody has used
-for 30 minutes. See [Outside clients](mcp.md#sessions-and-limits).
+The expiry job is safe to run by hand and safe to run twice. Expiry is the
+clock, not a decision — nobody is recorded as having decided, and the agent may
+propose the same thing again.
 
-The job is safe to run by hand and safe to run twice. Expiry is the clock, not a
-decision — nobody is recorded as having decided, and the agent may propose the
-same thing again.
+One hourly job: **close idle MCP sessions**. It ends MCP sessions nobody has used
+for 30 minutes. It is also safe to run by hand and safe to run twice: a client
+whose session it ended opens a new one. See
+[Outside clients](mcp.md#sessions-and-limits).
 
 ## Upgrading
 
