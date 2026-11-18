@@ -61,6 +61,22 @@ def grant_role(user: str, role: str) -> None:
 	frappe.clear_cache(user=user)
 
 
+def revoke_role(user: str, role: str) -> None:
+	"""Take a role away and drop the cached roles.
+
+	The cache matters more than the row. Roles are cached in redis, which the
+	rollback after each test does not touch, so a role an earlier test granted is
+	still "held" until the cache is cleared.
+	"""
+	doc = frappe.get_doc("User", user)
+	kept = [row for row in doc.roles if row.role != role]
+	if len(kept) != len(doc.roles):
+		doc.set("roles", kept)
+		doc.flags.ignore_permissions = True
+		doc.save(ignore_permissions=True)
+	frappe.clear_cache(user=user)
+
+
 def make_rehearsal(expectations: list[tuple[str, str]], **values) -> str:
 	values.setdefault("title", "FA rehearsal")
 	values.setdefault("agent", DRAFT_AGENT)
@@ -333,6 +349,7 @@ class TestInjectionPack(AgentTestCase):
 class TestRehearsalPermissions(AgentTestCase):
 	def test_run_as_is_yourself_or_a_rehearsal_user(self):
 		"""Naming another user is reading as them, so it needs a role only a System Manager gives."""
+		revoke_role(RESTRICTED_USER, RUN_AS_ROLE)
 		with self.assertRaises(frappe.PermissionError):
 			make_rehearsal([("No writes", "")], run_as_user=RESTRICTED_USER)
 		make_rehearsal([("No writes", "")], run_as_user=MANAGER)
@@ -349,6 +366,7 @@ class TestRehearsalPermissions(AgentTestCase):
 		"""Any manager may name an agent's service user, so that is no licence to read as it."""
 		frappe.db.set_value("Agent", DRAFT_AGENT, {"run_as": "Service User", "service_user": DRAFT_USER})
 		frappe.clear_document_cache("Agent", DRAFT_AGENT)
+		revoke_role(DRAFT_USER, RUN_AS_ROLE)
 		with self.assertRaises(frappe.PermissionError):
 			make_rehearsal([("No writes", "")], run_as_user=DRAFT_USER)
 
