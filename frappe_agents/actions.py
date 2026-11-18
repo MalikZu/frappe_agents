@@ -78,6 +78,7 @@ ACTION_TRANSITION = "Workflow Transition"
 
 DRAFT = 0
 SUBMITTED = 1
+CANCELLED = 2
 
 DEFAULT_EXPIRY_DAYS = 7
 FAILURE_LIMIT = 500
@@ -98,6 +99,9 @@ NOTICE_FIELDS = (
 	"agent",
 	"requested_by",
 	"action_type",
+	"workflow_action",
+	"workflow_name",
+	"from_workflow_state",
 	"target_doctype",
 	"target_name",
 )
@@ -406,24 +410,80 @@ def notify_approvers(action_name: str) -> None:
 def eligible_approvers(action: Any, target: Any) -> list[str]:
 	"""The approvers who may decide `action` and could carry it through.
 
-	The same three walls `approve_action` puts up, asked ahead of time: the
-	separation-of-duties block, read on the target, and the submit or cancel right
-	the apply will need. An approver who fails any of them would only be told
-	about a proposal they cannot open or cannot apply.
+	The same walls `approve_action` puts up, asked ahead of time: the
+	separation-of-duties block, read on the target, and the right the apply will
+	need. For a submit or a cancel that right is submit or cancel. For a workflow
+	action it is a role the step is open to, plus the right its target state needs.
+	An approver who fails any of them would only be told about a proposal they
+	cannot open or cannot apply. The step's condition and self-approval stay the
+	Workflow's call, made when the approver applies it.
 	"""
-	right = "submit" if action.action_type == ACTION_SUBMIT else "cancel"
+	steps = _approval_steps(action, target)
 	eligible = []
 	for user in sorted(get_users_with_role(APPROVER_ROLE)):
 		if separation_of_duties_block(action, user):
 			continue
 		if not frappe.has_permission(action.target_doctype, "read", doc=target, user=user):
 			continue
-		if not frappe.has_permission(action.target_doctype, right, doc=target, user=user):
+		if not _may_take_a_step(action, target, user, steps):
 			continue
 		eligible.append(user)
 		if len(eligible) >= MAX_NOTIFIED_APPROVERS:
 			break
 	return eligible
+
+
+def _approval_steps(action: Any, target: Any) -> list[tuple[str | None, str]]:
+	"""The ways an approver could apply `action`: (role required, right required).
+
+	A submit or a cancel has one way, open to any role. A workflow action has one
+	per matching transition in the Workflow, and none at all when the Workflow
+	changed or the document left the state the proposal was made from — the apply
+	would fail on those, so nobody is asked to try it.
+	"""
+	if action.action_type == ACTION_SUBMIT:
+		return [(None, "submit")]
+	if action.action_type == ACTION_CANCEL:
+		return [(None, "cancel")]
+	if action.action_type != ACTION_TRANSITION:
+		return []
+
+	if not action.workflow_name or get_workflow_name(action.target_doctype) != action.workflow_name:
+		return []
+	workflow = get_workflow(action.target_doctype)
+	if target.get(workflow.workflow_state_field) != action.from_workflow_state:
+		return []
+
+	docstatus = {row.state: cint(row.doc_status) for row in workflow.states}
+	before = docstatus.get(action.from_workflow_state, DRAFT)
+	steps = []
+	for row in workflow.transitions:
+		if row.state != action.from_workflow_state or row.action != action.workflow_action:
+			continue
+		steps.append((row.allowed, _right_for(before, docstatus.get(row.next_state, before))))
+	return steps
+
+
+def _right_for(before: int, after: int) -> str:
+	"""The document right a workflow step needs, from the docstatus it moves between."""
+	if after == SUBMITTED and before == DRAFT:
+		return "submit"
+	if after == CANCELLED:
+		return "cancel"
+	if before == SUBMITTED:
+		# A step between two submitted states updates a submitted document.
+		return "submit"
+	return "write"
+
+
+def _may_take_a_step(action: Any, target: Any, user: str, steps: list[tuple[str | None, str]]) -> bool:
+	roles = set(frappe.get_roles(user)) if any(role for role, _right in steps) else set()
+	for role, right in steps:
+		if role and role not in roles:
+			continue
+		if frappe.has_permission(action.target_doctype, right, doc=target, user=user):
+			return True
+	return False
 
 
 def _enqueue_approver_notice(action_name: str) -> None:
@@ -486,53 +546,69 @@ def _approver_subject(action: Any) -> str:
 	# Agent, verb and target identity only. The reason is model-written and the
 	# fields are the target's business: both stay on the Agent Action form, behind
 	# its own permission check, and out of the bell.
-	template = (
-		_("{0} proposes to cancel {1} {2}. It needs an approver.")
-		if action.action_type == ACTION_CANCEL
-		else _("{0} proposes to submit {1} {2}. It needs an approver.")
-	)
+	if action.action_type == ACTION_TRANSITION:
+		template = _("{0} proposes the workflow action {3} on {1} {2}. It needs an approver.")
+	elif action.action_type == ACTION_CANCEL:
+		template = _("{0} proposes to cancel {1} {2}. It needs an approver.")
+	else:
+		template = _("{0} proposes to submit {1} {2}. It needs an approver.")
 	return template.format(
 		escape_html(action.agent or _("An agent")),
 		escape_html(_(action.target_doctype)),
 		escape_html(action.target_name),
+		_workflow_step(action),
 	)
+
+
+def _workflow_step(action: Any) -> str:
+	"""The workflow verb with the state it starts from. The same verb can be another
+	step out of another state, so the verb alone does not say which step this is."""
+	if not action.workflow_action:
+		return ""
+	verb = escape_html(_(action.workflow_action))
+	if not action.from_workflow_state:
+		return verb
+	return _("{0} (from {1})").format(verb, escape_html(_(action.from_workflow_state)))
 
 
 def _requester_subject(action: Any, status: str, decider: str | None, note: str | None = None) -> str:
 	# The subject is the whole notice: released frappe shows nothing else in the
 	# bell, and an Alert is never emailed. So a rejection's note rides in it, cut
 	# short, and the full note stays on the Agent Action form.
-	cancel = action.action_type == ACTION_CANCEL
-	templates = {
-		STATUS_APPLIED: (
-			_("{0} approved the proposal to cancel {1} {2}.")
-			if cancel
-			else _("{0} approved the proposal to submit {1} {2}.")
-		),
-		STATUS_REJECTED: (
-			_("{0} rejected the proposal to cancel {1} {2}.")
-			if cancel
-			else _("{0} rejected the proposal to submit {1} {2}.")
-		),
-		STATUS_FAILED: (
-			_("The proposal to cancel {1} {2} failed when {0} approved it.")
-			if cancel
-			else _("The proposal to submit {1} {2} failed when {0} approved it.")
-		),
-		STATUS_EXPIRED: (
-			_("The proposal to cancel {1} {2} expired with no decision.")
-			if cancel
-			else _("The proposal to submit {1} {2} expired with no decision.")
-		),
-	}
+	templates = _requester_templates(action.action_type)
 	subject = templates[status].format(
 		escape_html(get_fullname(decider) if decider else ""),
 		escape_html(_(action.target_doctype)),
 		escape_html(action.target_name),
+		_workflow_step(action),
 	)
 	if note:
 		subject = _("{0} Note: {1}").format(subject, escape_html(_shorten(note, SUBJECT_NOTE_LIMIT)))
 	return subject
+
+
+def _requester_templates(action_type: str) -> dict:
+	# Whole sentences per verb, so a translator never has to glue fragments.
+	if action_type == ACTION_TRANSITION:
+		return {
+			STATUS_APPLIED: _("{0} approved the workflow action {3} on {1} {2}."),
+			STATUS_REJECTED: _("{0} rejected the workflow action {3} on {1} {2}."),
+			STATUS_FAILED: _("The workflow action {3} on {1} {2} failed when {0} approved it."),
+			STATUS_EXPIRED: _("The proposed workflow action {3} on {1} {2} expired with no decision."),
+		}
+	if action_type == ACTION_CANCEL:
+		return {
+			STATUS_APPLIED: _("{0} approved the proposal to cancel {1} {2}."),
+			STATUS_REJECTED: _("{0} rejected the proposal to cancel {1} {2}."),
+			STATUS_FAILED: _("The proposal to cancel {1} {2} failed when {0} approved it."),
+			STATUS_EXPIRED: _("The proposal to cancel {1} {2} expired with no decision."),
+		}
+	return {
+		STATUS_APPLIED: _("{0} approved the proposal to submit {1} {2}."),
+		STATUS_REJECTED: _("{0} rejected the proposal to submit {1} {2}."),
+		STATUS_FAILED: _("The proposal to submit {1} {2} failed when {0} approved it."),
+		STATUS_EXPIRED: _("The proposal to submit {1} {2} expired with no decision."),
+	}
 
 
 def _shorten(text: str, limit: int) -> str:

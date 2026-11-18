@@ -58,6 +58,13 @@ is every enabled user with the Agent Approver role who also:
 - may read the document;
 - may submit it (or cancel it, for a cancel proposal).
 
+For a workflow action, the last line is different. The approver must hold a role
+the step is open to. They also need the right the step needs: submit when the
+step submits the document, cancel when it cancels it, write otherwise. If the
+document has already left the state the agent proposed from, nobody is told:
+the approval would fail. The step's condition and self-approval are still the
+Workflow's call, when the approver applies it.
+
 An approver who fails any of these is not told. They could not approve it, and
 an approver who may not submit the document would only turn the proposal into a
 **Failed** one. At most 20 approvers are told, in alphabetical order; everyone
@@ -69,7 +76,8 @@ else. A rejection carries the start of the approver's note; the full note is on
 the proposal.
 
 A notification names the agent, the verb and the document, and the approver's
-note on a rejection — nothing else. It does not quote the agent's reason or any
+note on a rejection — nothing else. For a workflow action, the verb is the
+workflow's own action and the state it starts from. It does not quote the agent's reason or any
 field of the document. Open the
 proposal to read those, behind the usual permission checks.
 

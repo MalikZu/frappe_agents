@@ -34,11 +34,19 @@ from frappe_agents.tests.fixtures import (
 	APPROVER_USER,
 	BLIND_APPROVER,
 	DRAFT_USER,
+	DRAFTER_ROLE,
 	ORDER_DT,
 	OWNED_AGENT,
+	SUBMITTER_ROLE,
 	WEAK_APPROVER,
+	WORKFLOW_ACTION,
+	WORKFLOW_DRAFT_STATE,
+	WORKFLOW_MIDDLE_STATE,
+	WORKFLOW_NAME,
 	AgentTestCase,
+	active_workflow,
 	as_user,
+	call_tool,
 	make_action,
 	make_order_draft,
 	make_proposal,
@@ -372,3 +380,103 @@ class TestExpiryNotifications(AgentTestCase):
 
 		self.assertEqual(len(notices(self.action)), before)
 		self.assertEqual(frappe.db.get_value("Agent Action", self.action, "status"), "Expired")
+
+
+class TestTransitionNotifications(AgentTestCase):
+	"""A workflow action is open to the roles its transitions name, not to anyone
+	who may submit. The approver told is one the Workflow would let take the step."""
+
+	def propose(self, name: str) -> str:
+		payload, _ = call_tool(
+			DRAFT_USER,
+			"propose_transition",
+			{"doctype": ORDER_DT, "name": name, "action": WORKFLOW_ACTION, "reason": "Signed quote."},
+		)
+		self.assertTrue(payload["ok"], payload["error"])
+		return payload["result"]["action"]
+
+	def test_an_approver_the_step_is_open_to_is_told_and_the_subject_names_it(self):
+		with active_workflow(ORDER_DT, roles=(DRAFTER_ROLE, SUBMITTER_ROLE)):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.propose(order.name)
+
+			rows = notices(action, APPROVER_USER)
+			self.assertEqual(len(rows), 1)
+			self.assertIn(WORKFLOW_ACTION, rows[0].subject)
+			self.assertIn(WORKFLOW_DRAFT_STATE, rows[0].subject)
+			self.assertNotIn(DRAFT_USER, recipients(action))
+
+	def test_an_approver_without_the_steps_role_is_not_told(self):
+		"""May submit the order, but the step is open to drafters alone."""
+		with active_workflow(ORDER_DT, roles=(DRAFTER_ROLE,)):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.propose(order.name)
+
+			self.assertNotIn(APPROVER_USER, recipients(action))
+
+	def test_an_approver_without_the_right_the_step_needs_is_not_told(self):
+		"""The step lands in a submitted state, so it needs submit, not write."""
+		with active_workflow(ORDER_DT, roles=(DRAFTER_ROLE, SUBMITTER_ROLE)):
+			order = make_order_draft(user=DRAFT_USER)
+			action = make_proposal_free_transition(order.name)
+
+			with deny(APPROVER_USER, "submit"):
+				self.assertNotIn(APPROVER_USER, told_after_notify(action))
+			with deny(APPROVER_USER, "cancel"):
+				self.assertIn(APPROVER_USER, told_after_notify(action))
+
+	def test_a_document_that_left_the_proposed_state_tells_nobody(self):
+		with active_workflow(ORDER_DT, roles=(DRAFTER_ROLE, SUBMITTER_ROLE), two_level=True):
+			order = make_order_draft(user=DRAFT_USER)
+			action = make_proposal_free_transition(order.name)
+			self.assertIn(APPROVER_USER, told_after_notify(action))
+
+			frappe.db.set_value(ORDER_DT, order.name, "workflow_state", WORKFLOW_MIDDLE_STATE)
+
+			self.assertEqual(told_after_notify(action), set())
+
+	def test_an_approved_transition_tells_the_requester_with_the_action(self):
+		with active_workflow(ORDER_DT, roles=(DRAFTER_ROLE, SUBMITTER_ROLE)):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.propose(order.name)
+
+			with as_user(APPROVER_USER):
+				result = approve_action(action, frappe.db.get_value(ORDER_DT, order.name, "modified"))
+
+			self.assertEqual(result["status"], "Applied")
+			rows = notices(action, DRAFT_USER)
+			self.assertEqual(len(rows), 1)
+			self.assertIn("approved the workflow action", rows[0].subject)
+			self.assertIn(WORKFLOW_ACTION, rows[0].subject)
+
+	def test_a_failed_transition_tells_the_requester(self):
+		"""The step is open to drafters alone, so the approver's apply fails."""
+		with active_workflow(ORDER_DT, roles=(DRAFTER_ROLE,)):
+			order = make_order_draft(user=DRAFT_USER)
+			action = self.propose(order.name)
+
+			with as_user(APPROVER_USER):
+				result = approve_action(action, frappe.db.get_value(ORDER_DT, order.name, "modified"))
+
+			self.assertEqual(result["status"], "Failed")
+			rows = notices(action, DRAFT_USER)
+			self.assertEqual(len(rows), 1)
+			self.assertIn("failed", rows[0].subject)
+			self.assertIn(WORKFLOW_ACTION, rows[0].subject)
+
+
+def make_proposal_free_transition(order_name: str) -> str:
+	"""A Pending workflow proposal for the step out of Draft, written without notifying."""
+	return make_action(
+		target_name=order_name,
+		action_type="Workflow Transition",
+		workflow_action=WORKFLOW_ACTION,
+		workflow_name=WORKFLOW_NAME,
+		from_workflow_state=WORKFLOW_DRAFT_STATE,
+	).name
+
+
+def told_after_notify(action: str) -> set[str]:
+	frappe.db.delete("Notification Log", {"document_type": "Agent Action", "document_name": action})
+	notify_approvers(action)
+	return recipients(action)
