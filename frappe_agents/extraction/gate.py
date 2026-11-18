@@ -20,9 +20,10 @@ Two details of that comparison are not optional:
   `get_all`. v16 masks fields per user in the query layer — a masked field comes
   back as `"XXXXXXXX"`, which would make every extraction mismatch forever. Alert
   fatigue on the one alert that must never be ignored is worse than no alert.
-* A master value the reviewer is not permitted to see unmasked is not written into
-  the flags. `sensitive_flags` is a field on a document they load; putting a masked
-  value there would leak it through the form, the API and the version history. The
+* A master value the reviewer is not permitted to see is not written into the
+  flags: not one that is masked for them, and not one above their permlevel.
+  `sensitive_flags` is a field on a document they load; putting such a value
+  there would leak it through the form, the API and the version history. The
   boolean is the safety signal, the value is only a convenience.
 
 Sensitivity comes from `Agent Settings` and nowhere else. Core knows no ERPNext
@@ -190,16 +191,25 @@ def _master(target_doctype: str | None, fieldname: str, links: dict) -> tuple | 
 			df.options,
 			name,
 			doc.get(fieldname),
-			fieldname not in _masked_fields(master_meta),
+			_field_visible(master_meta, fieldname),
 			df.fieldname,
 		)
 
 	return None
 
 
-def is_masked(doctype: str, fieldname: str) -> bool:
-	"""Whether this user sees this field masked on this doctype now."""
-	return fieldname in _masked_fields(frappe.get_meta(doctype))
+def _field_visible(meta: Any, fieldname: str) -> bool:
+	"""Whether this user would be shown this field's real value on that record.
+
+	Two framework protections, and both count. A masked field shows "XXXXXXXX";
+	a field above the user's permlevel is not shown at all. `get_doc` honours
+	neither, so a value read through it is only passed on when both say yes. On
+	version-15 there is no masking, and permlevel is the only field protection.
+	"""
+	if fieldname in _masked_fields(meta):
+		return False
+	permitted = meta.get_permitted_fieldnames(user=frappe.session.user, permission_type="read")
+	return fieldname in set(permitted)
 
 
 def _masked_fields(meta: Any) -> set[str]:
