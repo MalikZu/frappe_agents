@@ -29,6 +29,8 @@ from frappe_agents.api import discard_extraction, fill_from_file, get_fill_value
 from frappe_agents.boot import boot_form_agents
 from frappe_agents.extraction.fill import TOKEN_KEY, discard_stale_fills
 from frappe_agents.extraction.pipeline import EXTRACTION, queue_extraction
+from frappe_agents.patches.v0_7_0.scrub_stored_master_values import execute as scrub_master_values
+from frappe_agents.patches.v0_7_0.scrub_stored_master_values import scrub_row
 from frappe_agents.tests.fixtures import (
 	ALTERED_IBAN,
 	DRAFT_USER,
@@ -151,6 +153,21 @@ class FillTestCase(AgentTestCase):
 	def record(self, extraction: str, docname: str, user: str = DRAFT_USER) -> dict:
 		with as_user(user):
 			return record_filled_document(extraction, docname)
+
+	def set_property(self, doctype: str, fieldname: str, prop: str, value, prop_type: str) -> None:
+		"""A Property Setter for the length of the test, removed and uncached after it."""
+		make_property_setter(doctype, fieldname, prop, value, prop_type)
+		self.forget_meta(doctype)
+		self.addCleanup(self.drop_property, doctype, fieldname, prop)
+
+	def drop_property(self, doctype: str, fieldname: str, prop: str) -> None:
+		frappe.db.delete("Property Setter", {"doc_type": doctype, "field_name": fieldname, "property": prop})
+		self.forget_meta(doctype)
+
+	def forget_meta(self, doctype: str) -> None:
+		frappe.clear_cache(doctype=doctype)
+		# Masked fields are cached per doctype and user, apart from the meta.
+		frappe.cache.delete_keys(f"masked_fields::{doctype}")
 
 
 class TestFillFromFile(FillTestCase):
@@ -532,21 +549,6 @@ class TestFillHandoverRechecks(FillTestCase):
 	same handover before the change, so a check that does nothing cannot pass.
 	"""
 
-	def set_property(self, doctype: str, fieldname: str, prop: str, value, prop_type: str) -> None:
-		"""A Property Setter for the length of the test, removed and uncached after it."""
-		make_property_setter(doctype, fieldname, prop, value, prop_type)
-		self.forget_meta(doctype)
-		self.addCleanup(self.drop_property, doctype, fieldname, prop)
-
-	def drop_property(self, doctype: str, fieldname: str, prop: str) -> None:
-		frappe.db.delete("Property Setter", {"doc_type": doctype, "field_name": fieldname, "property": prop})
-		self.forget_meta(doctype)
-
-	def forget_meta(self, doctype: str) -> None:
-		frappe.clear_cache(doctype=doctype)
-		# Masked fields are cached per doctype and user, apart from the meta.
-		frappe.cache.delete_keys(f"masked_fields::{doctype}")
-
 	def unmask_vendor_iban(self) -> None:
 		"""Show the vendor's IBAN unmasked, so masking is not why a value is hidden."""
 		if masking_supported():
@@ -709,6 +711,18 @@ class TestFillHandoverRechecks(FillTestCase):
 		self.assertEqual(flag["mismatch"], 1)
 		self.assertEqual(flag["blocked"], 1)
 
+	def test_the_handover_rechecks_masking(self):
+		"""The same re-check as the test above, with the mask simulated so it runs everywhere."""
+		with patch("frappe_agents.extraction.gate._masked_fields", return_value=set()):
+			extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+			self.assertEqual(self.values(extraction)["sensitive"][IBAN_FIELD]["master_value"], VENDOR_IBAN)
+
+		with patch("frappe_agents.extraction.gate._masked_fields", return_value={IBAN_FIELD}):
+			flag = self.values(extraction)["sensitive"][IBAN_FIELD]
+
+		self.assertIsNone(flag["master_value"])
+		self.assertEqual(flag["mismatch"], 1)
+
 	def test_an_empty_master_is_not_agreement(self):
 		extraction = self.read(
 			extraction_reply(self.fields(vendor=VENDOR_ACME_HOLDINGS, **{IBAN_FIELD: ALTERED_IBAN}))
@@ -783,3 +797,162 @@ class TestFillRecordedBySave(FillTestCase):
 		order = self.save_with_token("FA no such reading")
 
 		self.assertTrue(frappe.db.exists(ORDER_DT, order.name))
+
+	def test_a_token_on_another_doctype_changes_nothing(self):
+		extraction = self.read(extraction_reply(self.fields()))
+		vendor = frappe.get_doc(
+			{
+				"doctype": VENDOR_DT,
+				"vendor_name": f"FA Token Vendor {frappe.generate_hash(length=6)}",
+				TOKEN_KEY: extraction,
+			}
+		)
+		with as_user(DRAFT_USER):
+			vendor.insert()
+
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "status"), READY)
+		self.assertFalse(frappe.db.get_value(EXTRACTION, extraction, "created_doc"))
+
+	def save_draft_with_token(self, name: str, extraction: str) -> None:
+		draft = frappe.get_doc(ORDER_DT, name)
+		draft.update({TOKEN_KEY: extraction, "amount": draft.amount + 1})
+		with as_user(DRAFT_USER):
+			draft.save()
+
+	def test_a_token_on_the_wrong_draft_changes_nothing_and_shows_no_error(self):
+		first = make_order_draft(user=DRAFT_USER)
+		second = make_order_draft(user=DRAFT_USER)
+		started = self.start(docname=first.name)
+		run_extraction_with(started["extraction"], extraction_reply(self.fields()))
+		extraction = started["extraction"]
+
+		# The control: with the clean-up switched off, the refusal does queue a
+		# message. Without this the assertion below would prove nothing.
+		before = len(frappe.local.message_log)
+		with patch("frappe_agents.extraction.fill._drop_messages_since"):
+			self.save_draft_with_token(second.name, extraction)
+		self.assertGreater(len(frappe.local.message_log), before)
+		del frappe.local.message_log[before:]
+
+		self.save_draft_with_token(second.name, extraction)
+
+		self.assertEqual(len(frappe.local.message_log), before)
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "status"), READY)
+		self.assertFalse(frappe.db.get_value(EXTRACTION, extraction, "created_doc"))
+
+	def test_a_reused_token_does_not_move_a_recorded_reading(self):
+		extraction = self.read(extraction_reply(self.fields()))
+		first = self.save_with_token(extraction)
+
+		second = self.save_with_token(extraction)
+
+		self.assertEqual(frappe.db.get_value(EXTRACTION, extraction, "created_doc"), first.name)
+		self.assertFalse(
+			frappe.db.exists(
+				"File",
+				{
+					"file_url": self.file.file_url,
+					"attached_to_doctype": ORDER_DT,
+					"attached_to_name": second.name,
+				},
+			)
+		)
+
+	def test_a_create_only_user_can_record_the_document_they_created(self):
+		"""Creating a doctype does not always come with changing it afterwards."""
+		extraction = self.read(extraction_reply(self.fields()))
+		order = self.save_order()
+
+		with patch("frappe.has_permission", side_effect=_without_write_on_orders()):
+			done = self.record(extraction, order.name)
+
+		self.assertEqual(done["status"], ACCEPTED)
+		self.assertEqual(done["created_doc"], order.name)
+
+	def test_a_saved_draft_still_needs_write_to_be_recorded(self):
+		"""The control: the exception is for a new form's own document only."""
+		order = make_order_draft(user=DRAFT_USER)
+		started = self.start(docname=order.name)
+		run_extraction_with(started["extraction"], extraction_reply(self.fields()))
+
+		with (
+			patch("frappe.has_permission", side_effect=_without_write_on_orders()),
+			self.assertRaises(frappe.PermissionError),
+		):
+			self.record(started["extraction"], order.name)
+
+
+def _without_write_on_orders():
+	"""`frappe.has_permission`, except that nobody may write an order."""
+	real = frappe.has_permission
+
+	def check(doctype=None, ptype="read", doc=None, *args, **kwargs):
+		if doctype == ORDER_DT and ptype == "write":
+			return False
+		return real(doctype, ptype, doc, *args, **kwargs)
+
+	return check
+
+
+class TestScrubStoredMasterValues(FillTestCase):
+	"""Readings stored before the permlevel check may hold a master value nobody may see."""
+
+	def old_row(self) -> str:
+		extraction = self.read(extraction_reply(self.fields(**{IBAN_FIELD: ALTERED_IBAN})))
+		flags = {
+			IBAN_FIELD: {
+				"value": ALTERED_IBAN,
+				"master_doctype": VENDOR_DT,
+				"master_name": VENDOR_ACME,
+				"master_field": "vendor",
+				"master_value": VENDOR_IBAN,
+				"master_visible": 1,
+				"compared": 1,
+				"mismatch": 1,
+			},
+			# The control: a master field nobody restricts keeps its value.
+			"vendor_name": {
+				"value": "FA Acme Trading",
+				"master_doctype": VENDOR_DT,
+				"master_name": VENDOR_ACME,
+				"master_value": VENDOR_ACME,
+				"master_visible": 1,
+				"mismatch": 0,
+			},
+		}
+		frappe.db.set_value(EXTRACTION, extraction, "sensitive_flags", frappe.as_json(flags))
+		return extraction
+
+	def stored(self, extraction: str) -> dict:
+		return frappe.parse_json(frappe.db.get_value(EXTRACTION, extraction, "sensitive_flags"))
+
+	def test_a_master_value_above_permlevel_0_is_blanked(self):
+		self.set_property(VENDOR_DT, IBAN_FIELD, "permlevel", 1, "Int")
+		extraction = self.old_row()
+
+		scrub_master_values()
+
+		flags = self.stored(extraction)
+		self.assertIsNone(flags[IBAN_FIELD]["master_value"])
+		self.assertEqual(flags[IBAN_FIELD]["master_visible"], 0)
+		self.assertEqual(flags[IBAN_FIELD]["mismatch"], 1)
+		self.assertEqual(flags["vendor_name"]["master_value"], VENDOR_ACME)
+
+	def test_a_masked_master_value_is_blanked(self):
+		if not masking_supported():
+			self.skipTest("this Frappe version has no field masking")
+		# The fixture masks the vendor's IBAN; permlevel stays 0.
+		extraction = self.old_row()
+
+		scrub_master_values()
+
+		self.assertIsNone(self.stored(extraction)[IBAN_FIELD]["master_value"])
+
+	def test_running_it_again_changes_nothing(self):
+		self.set_property(VENDOR_DT, IBAN_FIELD, "permlevel", 1, "Int")
+		extraction = self.old_row()
+		scrub_master_values()
+
+		self.assertFalse(
+			scrub_row(extraction, frappe.db.get_value(EXTRACTION, extraction, "sensitive_flags"))
+		)
