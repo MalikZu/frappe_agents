@@ -18,6 +18,10 @@ writes. Three rules shape everything in this package:
 triggered run does inside `execute_run`: read the input, then write the answer.
 """
 
+import frappe
+from frappe.model import no_value_fields, table_fields
+from frappe.model.workflow import get_workflow_name
+
 TRIGGER = "Agent Trigger"
 SURFACE = "Trigger"
 
@@ -36,6 +40,9 @@ WRITES_FILE_TEXT = "File Text"
 TARGET_FIELDTYPES = frozenset({"Small Text", "Text", "Long Text", "Text Editor", "Markdown Editor", "Select"})
 HTML_TARGETS = frozenset({"Text Editor"})
 
+# Values a trigger may not read: they are secrets, or they are not values.
+UNREADABLE_FIELDTYPES = frozenset({"Password", *no_value_fields, *table_fields})
+
 # The only Run As a trigger accepts. A service user fired by somebody else's
 # document is a deputy that document can steer, so it waits for its own design.
 SESSION_USER = "Session User"
@@ -43,3 +50,11 @@ SESSION_USER = "Session User"
 
 class TriggerRefused(Exception):
 	"""A triggered run may not go ahead, or may not write. The message says why."""
+
+
+def workflow_state_field(doctype: str) -> str | None:
+	"""The field a Workflow keeps its state in. A trigger never writes it."""
+	workflow = get_workflow_name(doctype)
+	if not workflow:
+		return None
+	return frappe.get_cached_value("Workflow", workflow, "workflow_state_field")

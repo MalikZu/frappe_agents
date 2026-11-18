@@ -29,6 +29,10 @@ OUTCOME_ERROR = "Error"
 
 RUN_FLAG = "agent_current_run"
 
+# No run acts as these, whatever wrote the run row. Kept here, in a module the
+# save-path hook can import without pulling in the model runtime.
+FORBIDDEN_USERS = ("Administrator", "Guest")
+
 INTERRUPTED = "The tool call was interrupted before it finished."
 TRIGGER_HAS_NO_TOOLS = (
 	"A run a trigger started has no tools. The trigger reads the input and writes the answer itself."

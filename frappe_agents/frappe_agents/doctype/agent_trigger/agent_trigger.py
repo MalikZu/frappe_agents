@@ -11,7 +11,7 @@ not as a Failed run on every document afterwards.
 
 import frappe
 from frappe import _
-from frappe.model import default_fields, no_value_fields, table_fields
+from frappe.model import default_fields
 from frappe.model.document import Document
 from frappe.utils import cint
 
@@ -24,14 +24,12 @@ from frappe_agents.triggers import (
 	EVENT_ATTACHMENT,
 	SESSION_USER,
 	TARGET_FIELDTYPES,
+	UNREADABLE_FIELDTYPES,
 	WRITES_ANSWER,
 	WRITES_FILE_TEXT,
+	workflow_state_field,
 )
-from frappe_agents.triggers.dispatch import clear_index, skips_today
-from frappe_agents.triggers.execution import workflow_state_field
-
-# Values a trigger may not read: they are secrets, or they are not values.
-UNREADABLE_FIELDTYPES = frozenset({"Password", *no_value_fields, *table_fields})
+from frappe_agents.triggers.dispatch import clear_index_after_commit, skips_today
 
 
 class AgentTrigger(Document):
@@ -43,13 +41,13 @@ class AgentTrigger(Document):
 		self.validate_conditions()
 
 	def on_update(self) -> None:
-		clear_index()
+		clear_index_after_commit()
 
 	def on_trash(self) -> None:
-		clear_index()
+		clear_index_after_commit()
 
 	def after_rename(self, old: str, new: str, merge: bool = False) -> None:
-		clear_index()
+		clear_index_after_commit()
 
 	def onload(self) -> None:
 		# Said on the form, because a trigger that stopped firing has no other place

@@ -33,7 +33,7 @@ from frappe.query_builder.functions import Sum
 from frappe.utils import cint, cstr, now_datetime, today
 from frappe.utils.data import cast
 
-from frappe_agents.tools.base import RUN_FLAG, runtime_enabled
+from frappe_agents.tools.base import FORBIDDEN_USERS, RUN_FLAG, runtime_enabled
 from frappe_agents.triggers import (
 	EVENT_ATTACHMENT,
 	EVENT_CHANGED,
@@ -44,6 +44,11 @@ from frappe_agents.triggers import (
 )
 
 INDEX_KEY = "frappe_agents:trigger_index"
+INDEX_SECONDS = 10 * 60
+# How many waiting uploads one insert may pick up. A form is not a bulk import.
+MAX_RELINKED = 20
+# How many files one document may have waiting behind a run in flight.
+MAX_WAITING_FILES = 20
 KEY_PREFIX = "frappe_agents:trigger"
 
 DEFAULT_RUNS_PER_HOUR = 30
@@ -92,9 +97,13 @@ def on_update(doc: Any, method: str | None = None) -> None:
 	One hook, not two: `insert` runs `after_insert` and then `on_update` with
 	`flags.in_insert` set, so this one hook sees both and tells them apart.
 	"""
+	said = len(frappe.local.message_log or [])
 	try:
 		_on_update(doc)
 	except Exception:
+		# A throw leaves its message queued for the person's screen even when it is
+		# caught. Their save worked; the trigger's trouble is not theirs to read.
+		del frappe.local.message_log[said:]
 		frappe.logger("frappe_agents").error(
 			f"agent trigger dispatch failed for {doc.doctype} {doc.name}", exc_info=True
 		)
@@ -110,13 +119,42 @@ def _on_update(doc: Any) -> None:
 
 	if doc.doctype == FILE:
 		rows = [row for row in index.get(doc.get("attached_to_doctype") or "", []) if _file_fires(doc, row)]
-		if rows:
+		# An upload made before its document was saved hangs off a temporary name.
+		# It is picked up when the document is inserted, below.
+		if rows and frappe.db.exists(doc.attached_to_doctype, doc.attached_to_name):
 			_fire(rows, doc.attached_to_doctype, doc.attached_to_name, file=doc.name)
 		return
 
-	rows = [row for row in index.get(doc.doctype, []) if _doc_fires(doc, row)]
+	watched = index.get(doc.doctype, [])
+	rows = [row for row in watched if _doc_fires(doc, row)]
 	if rows:
 		_fire(rows, doc.doctype, doc.name, doc=doc)
+
+	if doc.flags.get("in_insert"):
+		attachment_rows = [row for row in watched if row.get("event") == EVENT_ATTACHMENT]
+		if attachment_rows:
+			_fire_relinked(doc, attachment_rows)
+
+
+def _fire_relinked(doc: Any, rows: list[dict]) -> None:
+	"""Files uploaded while the document was still unsaved, now attached to it.
+
+	frappe moves them onto the new name with a direct update, which no hook sees,
+	so the document's own insert is where they are noticed.
+	"""
+	# Runtime code: which files hang off a document this person just created.
+	files = frappe.get_all(
+		FILE,
+		filters={"attached_to_doctype": doc.doctype, "attached_to_name": doc.name, "is_folder": 0},
+		fields=["name", "file_name", "file_url"],
+		limit_page_length=MAX_RELINKED,
+	)
+	for file in files:
+		if not cstr(file.file_url).startswith(LOCAL_FILE_PREFIXES):
+			continue
+		matching = [row for row in rows if _extension_allowed(file, row.get("file_extensions"))]
+		if matching:
+			_fire(matching, doc.doctype, doc.name, doc=doc, file=file.name)
 
 
 def _suppressed() -> bool:
@@ -156,8 +194,9 @@ def _doc_fires(doc: Any, row: dict) -> bool:
 def _file_fires(file: Any, row: dict) -> bool:
 	"""A file that has just come to hang off a document of this doctype.
 
-	Both shapes count: a File inserted already attached, and an upload made
-	before its document existed that is attached to it afterwards.
+	A File inserted already attached, or one whose attachment was changed by a
+	save. An upload made before its document existed is picked up by the
+	document's insert instead.
 	"""
 	if row.get("event") != EVENT_ATTACHMENT:
 		return False
@@ -180,20 +219,27 @@ def _extension_allowed(file: Any, allowed: str | None) -> bool:
 
 
 def _fire(rows: list[dict], doctype: str, docname: str, doc: Any = None, file: str | None = None) -> None:
-	from frappe_agents.runner.run import FORBIDDEN_USERS
-
 	user = frappe.session.user
 	for row in rows:
-		trigger = frappe.get_cached_doc(TRIGGER, row["name"])
-		if doc is not None and not conditions_hold(trigger, doc):
+		# A trigger deleted since the index was built is simply not there.
+		if not frappe.db.exists(TRIGGER, row["name"]):
 			continue
-		if not user or user in FORBIDDEN_USERS:
-			count_skip(trigger.name, SKIP_NO_USER)
-			continue
-		if not take_slot(trigger, user):
-			count_skip(trigger.name, SKIP_RATE)
-			continue
-		enqueue_run(trigger.name, doctype, docname, user, file)
+		try:
+			_fire_one(frappe.get_cached_doc(TRIGGER, row["name"]), user, doctype, docname, doc, file)
+		except Exception:
+			frappe.logger("frappe_agents").error(f"trigger {row['name']} could not fire", exc_info=True)
+
+
+def _fire_one(trigger: Any, user: str, doctype: str, docname: str, doc: Any, file: str | None) -> None:
+	if doc is not None and not conditions_hold(trigger, doc):
+		return
+	if not user or user in FORBIDDEN_USERS:
+		count_skip(trigger.name, SKIP_NO_USER)
+		return
+	if not take_slot(trigger, user):
+		count_skip(trigger.name, SKIP_RATE)
+		return
+	enqueue_run(trigger.name, doctype, docname, user, file)
 
 
 def enqueue_run(trigger: str, doctype: str, docname: str, user: str, file: str | None = None) -> None:
@@ -253,12 +299,26 @@ def _holds(actual: Any, condition: str, expected: Any, fieldtype: str | None) ->
 
 
 def trigger_index() -> dict:
-	"""Enabled triggers, by the doctype they watch. Cached until a trigger is saved."""
-	return frappe.cache.get_value(INDEX_KEY, generator=_build_index) or {}
+	"""Enabled triggers, by the doctype they watch.
+
+	Cleared when a trigger is saved, and again once that save commits: a save on
+	another worker in between would otherwise rebuild it from the rows as they were
+	before the commit. It expires on its own as well, as the floor under both.
+	"""
+	index = frappe.cache.get_value(INDEX_KEY)
+	if index is None:
+		index = _build_index()
+		frappe.cache.set_value(INDEX_KEY, index, expires_in_sec=INDEX_SECONDS)
+	return index or {}
 
 
 def clear_index() -> None:
 	frappe.cache.delete_value(INDEX_KEY)
+
+
+def clear_index_after_commit() -> None:
+	clear_index()
+	frappe.db.after_commit.add(clear_index)
 
 
 def _build_index() -> dict:
@@ -294,8 +354,6 @@ def run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: s
 
 
 def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: str | None) -> None:
-	from frappe_agents.runner.run import FORBIDDEN_USERS
-
 	if not frappe.db.exists(TRIGGER, trigger):
 		return
 	doc = frappe.get_doc(TRIGGER, trigger)
@@ -326,10 +384,18 @@ def _run_trigger(trigger: str, doctype: str, docname: str, fired_by: str, file: 
 		return
 
 	if not take_lock(doc.name, doctype, docname):
-		# A run is already working on this document. Remember the newest event;
-		# the run in flight queues one more when it ends.
+		# A run is already working on this document. Leave this event for it; the
+		# run in flight queues one more when it ends.
 		mark_dirty(doc.name, doctype, docname, fired_by, file)
-		return
+		if not take_lock(doc.name, doctype, docname):
+			return
+		# That run ended between the two asks and found nothing waiting. This
+		# event is the one to run, so take it back, and leave the rest waiting.
+		pending = take_dirty(doc.name, doctype, docname) or {}
+		rest = [other for other in pending.get("files") or [] if other != file]
+		if rest:
+			for other in rest:
+				mark_dirty(doc.name, doctype, docname, pending.get("user") or fired_by, other)
 
 	try:
 		run = _insert_run(doc, agent, doctype, docname, fired_by, file)
@@ -400,8 +466,15 @@ def release(run: Any) -> None:
 			return
 		release_lock(trigger, doctype, docname)
 		missed = take_dirty(trigger, doctype, docname)
-		if missed:
-			enqueue_run(trigger, doctype, docname, missed.get("user"), missed.get("file"))
+		if not missed:
+			return
+		files = missed.get("files") or []
+		user = missed.get("user")
+		# One more run: the newest field event, or the oldest waiting file. Any other
+		# files stay waiting for the run after that.
+		enqueue_run(trigger, doctype, docname, user, files[0] if files else None)
+		for file in files[1:]:
+			mark_dirty(trigger, doctype, docname, user, file)
 	except Exception:
 		frappe.logger("frappe_agents").error(f"could not release trigger run {run.name}", exc_info=True)
 
@@ -450,9 +523,15 @@ def take_slot(trigger: Any, user: str) -> bool:
 	hour = now_datetime().strftime("%Y%m%d%H")
 	per_trigger = cint(trigger.get("max_runs_per_hour")) or DEFAULT_RUNS_PER_HOUR
 	per_user = cint(trigger.get("max_runs_per_user_per_hour")) or DEFAULT_RUNS_PER_USER_PER_HOUR
-	if _incr(f"rate:{trigger.name}:{hour}", 3600) > per_trigger:
+	# The person's own cap first. Only an event they are still allowed spends the
+	# trigger's shared one, so one busy person cannot use up everyone's hour.
+	mine = _key(f"rate:{trigger.name}:{user}:{hour}")
+	if _incr_key(mine, 3600) > per_user:
 		return False
-	return _incr(f"rate:{trigger.name}:{user}:{hour}", 3600) <= per_user
+	if _incr(f"rate:{trigger.name}:{hour}", 3600) > per_trigger:
+		_raw().decr(mine)
+		return False
+	return True
 
 
 def count_skip(trigger: str, reason: str) -> None:
@@ -484,17 +563,24 @@ def release_lock(trigger: str, doctype: str, docname: str) -> None:
 
 
 def mark_dirty(trigger: str, doctype: str, docname: str, user: str, file: str | None) -> None:
-	value = json.dumps({"user": user, "file": file})
-	_raw().set(_key(_doc_key("dirty", trigger, doctype, docname)), value, ex=LOCK_SECONDS)
+	"""Leave an event for the run in flight. The newest person, every waiting file.
+
+	A field event needs remembering once: the run it queues reads the newest state.
+	Files are different — three uploaded together are three files to read.
+	"""
+	key = _key(_doc_key("dirty", trigger, doctype, docname))
+	raw = _raw().get(key)
+	pending = json.loads(raw) if raw else {}
+	files = pending.get("files") or []
+	if file and file not in files and len(files) < MAX_WAITING_FILES:
+		files.append(file)
+	_raw().set(key, json.dumps({"user": user, "files": files}), ex=LOCK_SECONDS)
 
 
 def take_dirty(trigger: str, doctype: str, docname: str) -> dict | None:
-	key = _key(_doc_key("dirty", trigger, doctype, docname))
-	value = _raw().get(key)
-	if value is None:
-		return None
-	_raw().delete(key)
-	return json.loads(value)
+	"""Read and clear what was left waiting, in one step."""
+	value = _raw().pop(_key(_doc_key("dirty", trigger, doctype, docname)))
+	return json.loads(value) if value else None
 
 
 def _doc_key(kind: str, trigger: str, doctype: str, docname: str) -> str:
@@ -527,8 +613,19 @@ class _RawRedis:
 	def delete(self, key: str) -> Any:
 		return redis.Redis.delete(self.cache, key)
 
+	def pop(self, key: str) -> Any:
+		"""GET and DELETE as one transaction, for servers older than GETDEL."""
+		pipe = redis.Redis.pipeline(self.cache, transaction=True)
+		pipe.get(key)
+		pipe.delete(key)
+		value, _ = pipe.execute()
+		return value
+
 	def incr(self, key: str) -> int:
 		return redis.Redis.incr(self.cache, key)
+
+	def decr(self, key: str) -> int:
+		return redis.Redis.decr(self.cache, key)
 
 	def expire(self, key: str, seconds: int) -> Any:
 		return redis.Redis.expire(self.cache, key, seconds)
@@ -539,7 +636,10 @@ def _key(name: str) -> str:
 
 
 def _incr(name: str, seconds: int) -> int:
-	key = _key(name)
+	return _incr_key(_key(name), seconds)
+
+
+def _incr_key(key: str, seconds: int) -> int:
 	value = _raw().incr(key)
 	if value == 1:
 		_raw().expire(key, seconds)
@@ -547,7 +647,8 @@ def _incr(name: str, seconds: int) -> int:
 
 
 def _is_empty(value: Any) -> bool:
-	if value is None:
+	"""Nothing worth reacting to. A 0 in a number or check field is its default."""
+	if value is None or value == 0:
 		return True
 	if isinstance(value, str):
 		return not value.strip()
@@ -567,8 +668,6 @@ def run_now(trigger: str, docname: str) -> dict:
 	trigger did. It is the same job a real event queues, with the same checks and
 	the same caps, run as the session user — never as anyone else.
 	"""
-	from frappe_agents.runner.run import FORBIDDEN_USERS
-
 	frappe.has_permission(TRIGGER, "write", doc=trigger, throw=True)
 	doc = frappe.get_doc(TRIGGER, trigger)
 	if not cint(doc.enabled):
