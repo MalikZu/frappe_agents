@@ -28,6 +28,7 @@ from frappe_agents.rehearsals.runner import (
 	execute_rehearsal,
 	fail_stale_results,
 	queue_rehearsal,
+	run_all,
 	start_rehearsal,
 )
 from frappe_agents.tests.fixtures import (
@@ -38,12 +39,15 @@ from frappe_agents.tests.fixtures import (
 	DRAFT_USER,
 	ORDER_DT,
 	PROFILE,
+	PROJECT_BETA,
+	PROJECT_DT,
 	RESTRICTED_USER,
 	SKILL_APPROVER,
 	SKILL_AUTHOR,
 	AgentTestCase,
 	FakeProvider,
 	as_user,
+	make_run,
 	make_submitted_order,
 	model_calls,
 	model_says,
@@ -477,3 +481,89 @@ class TestRehearsalPermissions(AgentTestCase):
 		row = next(row for row in table["rows"] if row["rehearsal"] == name)
 		self.assertEqual(row["cells"][PROFILE]["verdict"], "Pass")
 		self.assertEqual(row["cells"][ALT_PROFILE]["verdict"], "Fail")
+
+
+class TestRehearsalGuardrails(AgentTestCase):
+	"""Each door a rehearsal passes, shown shut."""
+
+	def setUp(self) -> None:
+		super().setUp()
+		grant_role(DRAFT_USER, RUN_AS_ROLE)
+
+	def test_run_all_reports_a_refused_rehearsal_and_runs_the_rest(self):
+		runs = make_rehearsal([("No writes", "")], title="FA runs")
+		grant_role(RESTRICTED_USER, RUN_AS_ROLE)
+		refused = make_rehearsal([("No writes", "")], title="FA refused", run_as_user=RESTRICTED_USER)
+		revoke_role(RESTRICTED_USER, RUN_AS_ROLE)
+
+		frappe.clear_messages()
+		with as_user(MANAGER), patch("frappe.enqueue"):
+			reply = run_all(DRAFT_AGENT)
+
+		self.assertEqual([frappe.db.get_value(RESULT, r, "rehearsal") for r in reply["results"]], [runs])
+		self.assertEqual([row["rehearsal"] for row in reply["refused"]], [refused])
+		# The refusal is in the reply only, not left behind as an error message.
+		self.assertFalse(frappe.message_log)
+
+	def test_a_scorer_that_dies_still_closes_the_proposal(self):
+		order = make_submitted_order()
+		name = make_rehearsal([("No proposal", "")])
+		with patch("frappe_agents.rehearsals.runner.scoring.score", side_effect=RuntimeError("scorer down")):
+			result, _ = rehearse(
+				name,
+				[
+					model_calls(
+						tool_request(
+							"propose_cancel", {"doctype": ORDER_DT, "name": order.name, "reason": "duplicate"}
+						)
+					),
+					model_says("Proposed."),
+				],
+			)
+
+		self.assertEqual(result.status, "Failed")
+		self.assertIn("scorer down", result.error)
+		statuses = frappe.get_all("Agent Action", filters={"run": result.run}, pluck="status")
+		self.assertEqual(statuses, ["Expired"])
+
+	def test_a_manager_cannot_aim_a_rehearsal_at_a_document_they_cannot_read(self):
+		order = make_submitted_order()
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": MANAGER,
+				"allow": PROJECT_DT,
+				"for_value": PROJECT_BETA,
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+		frappe.clear_cache(user=MANAGER)
+		# The permission row rolls back with the test; the cached copy does not.
+		self.addCleanup(frappe.clear_cache, user=MANAGER)
+
+		with self.assertRaises(frappe.PermissionError):
+			make_rehearsal(
+				[("No writes", "")],
+				context_doctype=ORDER_DT,
+				context_name=order.name,
+				bait_vector="Comment on the document",
+				bait_text="Note.",
+			)
+
+	def test_a_spent_budget_stops_a_rehearsal_at_the_door(self):
+		name = make_rehearsal([("No writes", "")])
+		frappe.db.set_value("Agent", DRAFT_AGENT, "daily_token_budget", 10, update_modified=False)
+		frappe.clear_document_cache("Agent", DRAFT_AGENT)
+		spent = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
+		spent.db_set("tokens_in", 100, update_modified=False)
+
+		with (
+			as_user(MANAGER),
+			patch("frappe.enqueue") as enqueue,
+			self.assertRaises(frappe.ValidationError) as caught,
+		):
+			queue_rehearsal(frappe.get_doc(REHEARSAL, name))
+
+		self.assertIn("budget", str(caught.exception))
+		enqueue.assert_not_called()
+		self.assertFalse(frappe.db.exists(RESULT, {"rehearsal": name}))
