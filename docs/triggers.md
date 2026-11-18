@@ -97,7 +97,8 @@ These never fire a trigger:
 - a save made inside an agent tool call, including the trigger's own write. One
   trigger never starts another;
 - installing, migrating and patching;
-- a data import, while **Suppress On Import** in Agent Settings is on.
+- a data import, while **Suppress On Import** in Agent Settings is on;
+- the bait comment a rehearsal puts on a document.
 
 ## The limits
 
@@ -107,7 +108,7 @@ These never fire a trigger:
 | **Max Runs Per User Per Hour** | 10 | Same, per person. An event past a person's own cap does not count against the trigger's cap |
 | **Daily Token Budget** on the trigger | empty | The trigger stops for the day |
 | **Daily Token Budget** on the agent | Agent Settings | The trigger stops for the day |
-| **Global Enabled** in Agent Settings | on | No trigger fires, and a queued run is cancelled |
+| **Global Enabled** in Agent Settings | on | No trigger fires, and a queued or running run is cancelled |
 
 The hourly caps count events, not runs. Every event that matches uses a place,
 including an event that waits and is merged into another run.
