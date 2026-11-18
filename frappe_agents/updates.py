@@ -52,6 +52,22 @@ STATUS_PENDING = "Pending"
 FIELD_SEPARATOR = ", "
 
 
+class UpdateNotKept(frappe.ValidationError):
+	"""The save went through but did not keep an approved value. Names no value."""
+
+
+def refused_on_save() -> str:
+	"""What the row says when the save itself refused.
+
+	The controller's own words go to the approver only: they may quote values the
+	row keeps at permlevel 1, and the row's failure text is level 0.
+	"""
+	return _(
+		"The document's own rules refused the change when it was saved, so nothing was changed. "
+		"The approver was shown why."
+	)
+
+
 def stored_change(action: Any) -> tuple[dict, dict]:
 	"""The proposed values and the values the agent saw, as dicts."""
 	return loads(action.get("proposed_values")), loads(action.get("seen_values"))
@@ -100,6 +116,11 @@ def _field_problem(meta: Any, target: Any, fieldname: str, value: Any, seen: dic
 
 	df = meta.get_field(fieldname)
 	label = _(df.label or fieldname)
+	# Read before write: an approver who cannot see a field is approving it blind.
+	if not has_field_access(target, df, "read"):
+		return _("You are not allowed to read {0} on {1}, so you cannot approve a change to it.").format(
+			label, action_target(target)
+		)
 	if not has_field_access(target, df, "write"):
 		return _("You are not allowed to change {0} on {1}, so approving cannot change it either.").format(
 			label, action_target(target)
@@ -150,6 +171,9 @@ def apply_update(action: Any, target: Any) -> None:
 	"""
 	meta = frappe.get_meta(action.target_doctype)
 	proposed, _seen = stored_change(action)
+	proposed = {
+		fieldname: _resolved(meta.get_field(fieldname), value) for fieldname, value in proposed.items()
+	}
 
 	target.update(proposed)
 	# No ignore_permissions: save runs the write check itself, as the approver.
@@ -159,7 +183,7 @@ def apply_update(action: Any, target: Any) -> None:
 	for fieldname, value in proposed.items():
 		df = meta.get_field(fieldname)
 		if not same_value(df, saved.get(fieldname), value, precision_of(saved, df)):
-			frappe.throw(
+			raise UpdateNotKept(
 				_(
 					"{0} did not keep the approved value: the document's own rules changed it while "
 					"saving. Nothing was changed."
@@ -187,6 +211,7 @@ def update_diff(action: Any) -> dict:
 	order = {df.fieldname: index for index, df in enumerate(meta.fields)}
 
 	result["target_readable"] = 1
+	result["unreadable"] = 0
 	for fieldname in sorted(proposed, key=lambda name: order.get(name, len(order))):
 		df = meta.get_field(fieldname)
 		row = {
@@ -197,6 +222,8 @@ def update_diff(action: Any) -> dict:
 			"readable": 0,
 		}
 		readable = df is not None and fieldname not in hidden and has_field_access(target, df, "read")
+		if not readable:
+			result["unreadable"] = 1
 		if readable:
 			precision = precision_of(target, df)
 			now = _shown(df, target.get(fieldname), precision)
@@ -222,6 +249,9 @@ def pending_update_fields(doctype: str, name: str) -> dict[str, set[str]]:
 	two proposals racing on one field can both land, and the per-field stale check
 	fails whichever is approved second.
 	"""
+	# Imported here: actions imports this module.
+	from frappe_agents.actions import expiry_cutoff
+
 	rows = frappe.get_all(
 		"Agent Action",
 		filters={
@@ -229,6 +259,9 @@ def pending_update_fields(doctype: str, name: str) -> dict[str, set[str]]:
 			"target_name": name,
 			"action_type": ACTION_UPDATE,
 			"status": STATUS_PENDING,
+			# One past its window can no longer be approved; the daily sweep has
+			# only not written Expired on it yet. It blocks nothing.
+			"creation": (">=", expiry_cutoff()),
 		},
 		fields=["name", "update_fields"],
 		limit_page_length=0,
@@ -244,6 +277,17 @@ def field_names(stored: Any) -> set[str]:
 
 def action_target(target: Any) -> str:
 	return f"{_(target.doctype)} {target.name}"
+
+
+def _resolved(df: Any, value: Any) -> Any:
+	"""A link as the record's own name, case included. Anything else as stored.
+
+	`update_problem` has already proved the record exists and the approver may
+	read it; the agent may not have been able to resolve it when proposing.
+	"""
+	if df is None or df.fieldtype != "Link" or is_blank(value):
+		return value
+	return frappe.db.get_value(df.options, value, "name") or value
 
 
 def _shown(df: Any, value: Any, precision: int | None) -> Any:

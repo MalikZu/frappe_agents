@@ -53,7 +53,7 @@ from frappe.model import table_fields
 from frappe.model.workflow import WorkflowStateError, get_transitions, get_workflow, get_workflow_name
 from frappe.utils import cint, strip_html
 
-from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_UPDATE_DRAFT
+from frappe_agents.access.grants import VERB_CREATE_DRAFT, VERB_PROPOSE, VERB_READ, VERB_UPDATE_DRAFT
 from frappe_agents.actions import pending_action_for, record_proposal
 from frappe_agents.field_changes import (
 	MAX_FIELDS,
@@ -69,6 +69,7 @@ from frappe_agents.tools.base import (
 	CAPABILITY_DRAFT,
 	ToolDenied,
 	current_run,
+	has_grant,
 	require_draft_ownership,
 	require_grant,
 	row_cap,
@@ -480,6 +481,10 @@ def propose_update(payload: dict) -> dict:
 	run = _require_run("propose_update")
 
 	require_grant(doctype, VERB_PROPOSE)
+	# Read too: the tool compares each value with the stored one and says when they
+	# match, so without it Propose alone would be a way to read fields one guess at
+	# a time.
+	require_grant(doctype, VERB_READ)
 	meta = _meta(doctype)
 	problem = live_problem(meta)
 	if problem:
@@ -598,6 +603,11 @@ def _checked_value(df: Any, value: Any) -> Any:
 		if value not in options:
 			raise UnusableValue(f"expected one of {', '.join(options)}")
 	if df.fieldtype == "Link" and value:
+		# Only on a doctype the agent may read. Elsewhere the value is kept as given
+		# and the approval decides: it checks the record exists and the approver may
+		# read it, and resolves its real name then.
+		if not has_grant(df.options, VERB_READ):
+			return value
 		# Through the run user's own list permissions, so the answer is the record's
 		# real name — case included — or nothing, and never "it exists but you
 		# cannot see it".

@@ -73,8 +73,10 @@ from frappe_agents.tools.base import runtime_enabled
 from frappe_agents.updates import (
 	ACTION_UPDATE,
 	FIELD_SEPARATOR,
+	UpdateNotKept,
 	apply_update,
 	field_names,
+	refused_on_save,
 	update_diff,
 	update_problem,
 	workflow_edit_problem,
@@ -192,6 +194,13 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 		# Undo whatever the half-finished transition wrote — a cancel that trips on a
 		# back-link has already written docstatus 2 by the time it throws.
 		frappe.db.rollback(save_point=SAVEPOINT)
+		if doc_action.action_type == ACTION_UPDATE and not isinstance(exc, UpdateNotKept):
+			# A controller's own message may quote the values the row hides at
+			# permlevel 1, and `failure` is level 0. The approver gets the detail in
+			# this response; the row and the requester get a sentence with no values.
+			result = _record_failure(doc_action, note, edited, refused_on_save())
+			result["detail"] = _failure_text(exc)
+			return result
 		return _record_failure(doc_action, note, edited, _failure_text(exc))
 
 	_write(
@@ -415,6 +424,11 @@ def separation_of_duties_block(action: Any, user: str | None = None) -> str | No
 	return None
 
 
+def expiry_cutoff() -> Any:
+	"""The creation time before which a Pending proposal can no longer be decided."""
+	return _cutoff(_expiry_days())
+
+
 def is_stale(action: Any) -> bool:
 	"""True when a Pending proposal is already past the expiry window."""
 	created = get_datetime(action.creation)
@@ -478,6 +492,8 @@ def eligible_approvers(action: Any, target: Any) -> list[str]:
 		if not frappe.has_permission(action.target_doctype, "read", doc=target, user=user):
 			continue
 		if not _may_take_a_step(action, target, user, steps):
+			continue
+		if levels and not levels <= set(meta.get_permlevel_access("read", user=user)):
 			continue
 		if levels and not levels <= set(meta.get_permlevel_access("write", user=user)):
 			continue
