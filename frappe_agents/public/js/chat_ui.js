@@ -537,6 +537,15 @@ function server_message(response, fallback) {
 	return lines.filter(Boolean).join(" ") || fallback;
 }
 
+// The statuses a run ends in.
+const FINISHED_STATUSES = ["Completed", "Failed", "Cancelled"];
+// How long a Stop waits for the run's own last frame before asking the server:
+// briefly when the server already said the run is over, otherwise long enough
+// for a run to reach the turn boundary it stops at. Eight checks is two minutes.
+const STOP_SETTLE_MS = 2000;
+const STOP_CHECK_MS = 15000;
+const STOP_CHECK_LIMIT = 8;
+
 /**
  * Whether the main pointer is a finger. A phone has no Shift to hold for a new
  * line, so there Enter is the new-line key and only the button sends. Asked at
@@ -690,6 +699,9 @@ frappe_agents.ChatUI = class ChatUI {
 	/** Forget everything drawn for a conversation. Called wherever the log is emptied. */
 	clear_state() {
 		this.pending = {};
+		// The checks a Stop schedules in case the run's last frame never arrives.
+		Object.values(this.stop_timers || {}).forEach((timer) => clearTimeout(timer));
+		this.stop_timers = {};
 		// The turns already asked to stop, so a second press asks nothing twice.
 		this.stopping = new Set();
 		// What each failed turn would be retried with: the message it was started
@@ -814,6 +826,9 @@ frappe_agents.ChatUI = class ChatUI {
 				// An open popover takes Escape first; its own handler closes it.
 				if (this.pop_owner || !this.running_turns().length) return;
 				e.preventDefault();
+				// Not the dialog around the chat as well: on a form, the chat sits
+				// in a dialog that closes on Escape.
+				e.stopPropagation();
 				this.stop();
 				return;
 			}
@@ -2109,6 +2124,14 @@ frappe_agents.ChatUI = class ChatUI {
 				frappe.call({
 					method: "frappe_agents.api.stop_run",
 					args: { run: run },
+					callback: (r) => {
+						// The run's own frames are what land it. A finished status
+						// means they should already be here, so the check is soon;
+						// otherwise it waits for the turn boundary the run stops at.
+						const status = r.message && r.message.status;
+						const settled = FINISHED_STATUSES.includes(status);
+						this.check_stopped(run, settled ? STOP_SETTLE_MS : STOP_CHECK_MS, 0);
+					},
 					error: (response) => {
 						this.stopping.delete(run);
 						this.add_failure(server_message(response, __("The turn was not stopped.")));
@@ -2118,6 +2141,62 @@ frappe_agents.ChatUI = class ChatUI {
 			});
 		this.announce(__("Stopping…"));
 		this.render_send();
+	}
+
+	/**
+	 * Ask the server whether a stopped run has ended, if this page never heard it.
+	 *
+	 * A run is landed by its last realtime frame. A dropped socket, or a worker
+	 * that died, means that frame never comes — and the composer stays Stop for
+	 * as long as the run looks pending. So a Stop checks back: a run the server
+	 * says is over is redrawn from the server; one that is still going is asked
+	 * about again; and one that never answers lets go of the composer.
+	 */
+	check_stopped(run, delay, tries) {
+		clearTimeout(this.stop_timers[run]);
+		this.stop_timers[run] = setTimeout(() => {
+			delete this.stop_timers[run];
+			if (this.destroyed || !this.pending[run] || !this.conversation) return;
+			const conversation = this.conversation;
+			frappe.call({
+				method: "frappe_agents.api.get_conversation",
+				args: { conversation: conversation },
+				callback: (r) => {
+					if (this.conversation !== conversation || !this.pending[run]) return;
+					const found = ((r.message || {}).runs || []).find((one) => one.name === run);
+					if (!found || FINISHED_STATUSES.includes(found.status)) {
+						this.reload_tail();
+					} else if (tries + 1 < STOP_CHECK_LIMIT) {
+						this.check_stopped(run, STOP_CHECK_MS, tries + 1);
+					} else {
+						this.let_go(run);
+					}
+				},
+			});
+		}, delay);
+	}
+
+	/** Draw the conversation again from the server, keeping what the composer holds. */
+	reload_tail() {
+		const uploads = this.uploads;
+		this.load_conversation(this.conversation);
+		this.uploads = uploads;
+		this.render_files();
+	}
+
+	/**
+	 * A stopped run that has not reported back after every check. The composer is
+	 * given back, and the line says so: the run's outcome lands on the run row
+	 * either way, and a reload draws it.
+	 */
+	let_go(run) {
+		const $pending = this.pending[run];
+		const text = __("This turn has not reported back. Reload the page to see how it ended.");
+		if ($pending) $pending.text(text);
+		delete this.pending[run];
+		this.stopping.delete(run);
+		this.update_busy();
+		this.announce(text);
 	}
 
 	on_run_update(data) {
@@ -2241,7 +2320,7 @@ frappe_agents.ChatUI = class ChatUI {
 	render_status(data) {
 		const status = data.status || data.value || "";
 		const $pending = this.pending[data.run];
-		if (["Completed", "Failed", "Cancelled"].includes(status)) {
+		if (FINISHED_STATUSES.includes(status)) {
 			if ($pending) {
 				if (status === "Completed") {
 					$pending.remove();
