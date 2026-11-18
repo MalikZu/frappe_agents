@@ -818,8 +818,8 @@ frappe_agents.ChatUI = class ChatUI {
 		this.$send.on("click", () => (this.running_turns().length ? this.stop() : this.send()));
 		this.$attach.on("click", () => this.attach());
 		this.$input.on("keydown", (e) => {
-			// An input method is still composing — Arabic, Chinese, Japanese,
-			// Korean. Enter there picks a word or ends the composition; it is not
+			// An input method (for example Chinese, Japanese or Korean) is still
+			// composing. Enter there picks a word or ends the composition; it is not
 			// the person asking to send. 229 is what older browsers report instead.
 			// Read off the native event: jQuery does not copy `isComposing`.
 			const native = e.originalEvent || e;
@@ -2962,7 +2962,9 @@ frappe_agents.ChatUI = class ChatUI {
 		if (input && status !== "Cancelled") this.add_retry($row, input);
 		this.insert_before_pending(run, $row);
 		this.clear_pending(run);
-		this.announce(__("The run failed."));
+		// A stopped turn is not a failure, and the reason says which stop it was:
+		// the person's own, or the site's switch.
+		this.announce(status === "Cancelled" && error ? error : __("The run failed."));
 	}
 
 	/**

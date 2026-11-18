@@ -19,9 +19,8 @@ from here: an approval record links back to the run that asked for it.
 ## The composer
 
 On a desktop keyboard, Enter sends the message and Shift+Enter starts a new
-line. Enter never sends while an input method is still composing a word — the
-Arabic, Chinese, Japanese and Korean keyboards — so a half-written word is not
-sent. On a phone or tablet, Enter starts a new line, and only the **Send**
+line. Enter never sends while an input method (for example Chinese, Japanese
+or Korean) is still composing a word, so a half-written word is not sent. On a phone or tablet, Enter starts a new line, and only the **Send**
 button sends.
 
 The paperclip attaches a file. It is uploaded privately and kept on the
