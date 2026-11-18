@@ -417,5 +417,6 @@ def _see_latest() -> None:
 	progress so far durable, which is no loss. Tests hold one transaction they roll
 	back, so they keep it.
 	"""
-	if not frappe.flags.in_test:
+	# v16 names it frappe.in_test and keeps the flag for older callers; v15 has the flag.
+	if not (getattr(frappe, "in_test", False) or frappe.flags.in_test):
 		frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit
