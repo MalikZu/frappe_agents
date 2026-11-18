@@ -154,6 +154,19 @@ instruction: Text, Small Text, Long Text, Text Editor, HTML Editor, Markdown
 Editor and Code. Data and Select values are short and structured and are not
 wrapped.
 
+Every read tool that returns this text wraps it:
+
+- `search_documents` wraps each free-text field in each row, the title field
+  too.
+- `get_document_context`, `get_document_slice` and `read_document` wrap fields,
+  comments, emails and file text.
+- `run_report` wraps each cell in a free-text column. A report column can have
+  no type, or be typed Data and still hold a paragraph. In those columns, a
+  string longer than 120 characters is wrapped too.
+
+`search_documents` and `run_report` cut wrapped text to 2,000 characters. That
+is the limit a document's fields slice uses.
+
 Be clear about what this is: it is a strong, structural mitigation against
 prompt injection, and it is **not a proof**. A model can still be talked into
 proposing something foolish by text it was handed. That is why the draft/submit

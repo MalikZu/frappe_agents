@@ -29,7 +29,14 @@ from frappe_agents.access.grants import (
 	compiled_grants,
 	current_agent,
 )
-from frappe_agents.context.slices import has_row_permission_hook, may_read, status_word
+from frappe_agents.context.slices import (
+	MAX_TEXT_CHARS,
+	field_value,
+	has_row_permission_hook,
+	may_read,
+	status_word,
+)
+from frappe_agents.context.untrusted import is_untrusted_fieldtype, wrap
 from frappe_agents.documents import reader
 from frappe_agents.tools.base import (
 	CAPABILITY_READ,
@@ -44,6 +51,12 @@ DEFAULT_LIMIT = 20
 MAX_REPORT_ROWS = 200
 MAX_LISTED_DOCS = 20
 MAX_FOUND_DOCTYPES = 50
+# A report column with no fieldtype, or typed Data, can still carry a paragraph a
+# person wrote. Past this length a string cell is treated as authored text.
+UNTYPED_WRAP_CHARS = 120
+# What a malformed report column raises while it is parsed. Named, so neither
+# branch's formatter rewrites the tuple.
+REPORT_COLUMN_ERRORS = (AttributeError, KeyError, TypeError, ValueError)
 RESTRICTED = "<restricted>"
 
 STANDARD_FIELDS = (
@@ -98,7 +111,13 @@ def search_documents(payload: dict) -> dict:
 		filtered = len(rows) - len(permitted)
 		rows = permitted
 
+	# Authored text reaches the model wrapped, the same way a document read does.
+	# Only fields with a docfield qualify: the standard columns are not authored.
+	docfields = [df for df in (meta.get_field(fieldname) for fieldname in fields) if df]
 	for row in rows:
+		source = f"{doctype} {row.get('name')}"
+		for df in docfields:
+			row[df.fieldname] = field_value(df, row.get(df.fieldname), source)
 		# Restricted fields come back marked, never silently dropped: the model has
 		# to be able to tell "you cannot see this" from "this is empty".
 		for fieldname in restricted:
@@ -201,14 +220,66 @@ def run_report(payload: dict) -> dict:
 	total_rows = len(result)
 	truncated = total_rows > MAX_REPORT_ROWS
 
+	columns = response.get("columns") or []
 	return {
 		"report": report_name,
-		"columns": response.get("columns") or [],
-		"rows": result[:MAX_REPORT_ROWS],
+		"columns": columns,
+		"rows": _wrap_report_rows(report_name, columns, result[:MAX_REPORT_ROWS]),
 		"total_rows": total_rows,
 		"truncated": truncated,
 		"_docs_touched": f"Report: {report_name}",
 	}
+
+
+def _wrap_report_rows(report_name: str, columns: list, rows: list) -> list:
+	"""Wrap the cells of report rows that hold text a person wrote.
+
+	Columns come as dicts or as 'Label:Fieldtype/Options:Width' strings. Rows come
+	as dicts keyed by fieldname or as lists in column order, the total row too.
+	A cell is wrapped when its column holds free text, or when it has no type to
+	go on (no column, no fieldtype, or Data) and the string is long. Numbers,
+	dates and short labels are left alone.
+	"""
+	parsed = [_report_column(column) for column in columns or []]
+	by_fieldname = {column.get("fieldname"): column for column in parsed if column.get("fieldname")}
+
+	def cell(column: dict, value: Any) -> Any:
+		if not isinstance(value, str) or not value:
+			return value
+		fieldtype = column.get("fieldtype")
+		if not is_untrusted_fieldtype(fieldtype):
+			if fieldtype not in (None, "", "Data") or len(value) <= UNTYPED_WRAP_CHARS:
+				return value
+		label = column.get("fieldname") or column.get("label") or ""
+		text = value if len(value) <= MAX_TEXT_CHARS else value[: MAX_TEXT_CHARS - 3] + "..."
+		return wrap(text, f"Report {report_name} {label}")
+
+	wrapped = []
+	for row in rows:
+		if isinstance(row, dict):
+			row = {
+				key: cell(by_fieldname.get(key) or {"fieldname": key}, value) for key, value in row.items()
+			}
+		elif isinstance(row, list | tuple):
+			row = [
+				cell(parsed[index] if index < len(parsed) else {}, value) for index, value in enumerate(row)
+			]
+		wrapped.append(row)
+	return wrapped
+
+
+def _report_column(column: Any) -> dict:
+	"""One report column as a dict, the way the report view reads it.
+
+	A column the framework cannot parse still has a position, so it comes back
+	empty rather than failing the report: its cells fall under the length rule.
+	"""
+	from frappe.desk.query_report import get_column_as_dict
+
+	try:
+		return get_column_as_dict(column)
+	except REPORT_COLUMN_ERRORS:
+		return {}
 
 
 def read_document(payload: dict) -> dict:
