@@ -117,6 +117,9 @@ A proposal card follows the proposal to its end. Its title says where it stands:
 | **Approved, but it did not go through** | The document refused the submit or cancel. The card shows why. |
 | **Expired with no decision** | Nobody decided in time. |
 
+For a workflow action, the title names the action and the state it was
+proposed from, for example **Rejected: Approve (from Draft)**.
+
 The card changes as soon as the decision is made, while the chat is open. A
 reloaded chat shows the state the proposal is in now.
 
