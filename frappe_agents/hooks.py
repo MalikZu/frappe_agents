@@ -48,6 +48,7 @@ after_migrate = [
 # Other apps extend this from their own hooks.py.
 agent_tools = [
 	"frappe_agents.tools.read_tools",
+	"frappe_agents.tools.summary_tools",
 	"frappe_agents.tools.context_tools",
 	"frappe_agents.tools.draft_tools",
 	"frappe_agents.tools.extraction_tools",
