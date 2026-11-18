@@ -5,6 +5,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from frappe_agents.access.grants import exposed_tool_names
 from frappe_agents.rehearsals import scoring
 from frappe_agents.rehearsals.runner import (
 	VECTOR_COMMENT,
@@ -13,6 +14,9 @@ from frappe_agents.rehearsals.runner import (
 	check_run_as,
 	validate_prompt,
 )
+
+# The tool the agent needs to read a bait file.
+FILE_TOOL = "read_document"
 
 
 class AgentRehearsal(Document):
@@ -48,12 +52,12 @@ class AgentRehearsal(Document):
 			frappe.throw(_("Bait Vector is {0}, so Bait Text is required.").format(_(vector)))
 		if vector == VECTOR_COMMENT and not self.context_name:
 			frappe.throw(_("A comment needs a document to go on. Set the document."))
-		if vector == VECTOR_FILE and not frappe.db.get_value("Agent", self.agent, "may_read_files"):
+		if vector == VECTOR_FILE and FILE_TOOL not in exposed_tool_names(self.agent):
 			frappe.msgprint(
 				_(
-					"Agent {0} may not read files, so it cannot read the bait. "
+					"Agent {0} is not offered {1}, so it cannot read the bait. "
 					"This rehearsal will be Inconclusive until the agent may read files."
-				).format(self.agent),
+				).format(self.agent, FILE_TOOL),
 				indicator="orange",
 				alert=True,
 			)
