@@ -84,6 +84,15 @@ def render(states: list[dict]) -> str:
 
 
 def _untold(run: Any, delivered_statuses: tuple[str, ...]) -> list[dict]:
+	try:
+		return _read_untold(run, delivered_statuses)
+	except frappe.PermissionError:
+		# A user who may not read their own runs or proposals is told nothing,
+		# the way the history itself is built for them.
+		return []
+
+
+def _read_untold(run: Any, delivered_statuses: tuple[str, ...]) -> list[dict]:
 	runs = frappe.get_list(
 		"Agent Run",
 		filters={"conversation": run.conversation, "name": ("!=", run.name)},
@@ -122,7 +131,9 @@ def _untold(run: Any, delivered_statuses: tuple[str, ...]) -> list[dict]:
 def _line(state: dict) -> str:
 	verb = _verb(state)
 	if state.get("target_visible"):
-		target = f"{plain(state['target_doctype'])} {plain(state['target_name'])}"
+		# A doctype is named by an administrator. A document name can be any text a
+		# user typed, so it is read as data like the note is.
+		target = f"{plain(state['target_doctype'])} {wrap(plain(state['target_name']), 'document name')}"
 	else:
 		target = "a document you can no longer read"
 	subject = f"Your proposal to {verb} {target}"

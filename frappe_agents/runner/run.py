@@ -788,7 +788,9 @@ def _note_proposal_updates(run: Any) -> None:
 	goes on — the decisions wait for the next turn.
 	"""
 	try:
-		values = note_for(run, REPLAYABLE_STATUSES)
+		# A run still going has told its note to the model already. Counting it
+		# keeps two turns running side by side from telling the same decision.
+		values = note_for(run, (*REPLAYABLE_STATUSES, "Running"))
 		if values:
 			_update(run, values)
 	except Exception:
@@ -911,7 +913,7 @@ def _build_messages(profile: str, run: Any, system: str = "") -> list[AgentMessa
 
 	messages: list[AgentMessage] = []
 	for prior in history:
-		if prior.get("input_message"):
+		if prior.get("input_message") or prior.get("proposal_updates"):
 			messages.append(
 				UserMessage(content=with_note(prior.get("proposal_updates"), prior["input_message"]))
 			)
