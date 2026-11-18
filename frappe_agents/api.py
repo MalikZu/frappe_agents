@@ -52,6 +52,8 @@ MAX_PENDING_LIMIT = 200
 
 # The turns a person can still stop. A finished one has nothing left to stop.
 STOPPABLE_STATUSES = ("Queued", "Running")
+# The surface a chat turn runs on. Stop is a chat control and reaches nothing else.
+CHAT_SURFACE = "Desk Chat"
 
 AGENT_USER = "Agent User"
 MANAGER_ROLE = "Agent Manager"
@@ -355,7 +357,7 @@ def start_run(
 			"conversation": conversation_doc.name,
 			"effective_user": frappe.session.user,
 			"run_as_mode": "Session User",
-			"surface": "Desk Chat",
+			"surface": CHAT_SURFACE,
 			"status": "Queued",
 			"depth": 0,
 			"input_message": message,
@@ -397,13 +399,21 @@ def stop_run(run: str) -> dict:
 	worker's — its Running is not committed yet — and `cancel_queued_run` tells
 	the two apart without waiting on that worker.
 
-	A finished run is answered with its status and left alone.
+	A finished run is answered with its status and left alone. Only a chat turn
+	(surface Desk Chat) can be stopped; any other surface is refused.
 
 	Stopping a turn is not cancelling a document. Nothing the run drafted changes.
 	"""
-	values = frappe.db.get_value("Agent Run", run, ["name", "effective_user", "status"], as_dict=True)
+	values = frappe.db.get_value(
+		"Agent Run", run, ["name", "effective_user", "status", "surface"], as_dict=True
+	)
 	if not values or values.effective_user != frappe.session.user:
 		frappe.throw(_("You can only stop your own turns."), frappe.PermissionError)
+	if values.surface != CHAT_SURFACE:
+		# An MCP session, a rehearsal or a triggered run is the caller's too, but
+		# it is not a chat turn, and nothing that runs it expects a person's Stop:
+		# an MCP session would read the refusal as the runtime switching off.
+		frappe.throw(_("Only a chat turn can be stopped here."))
 	if values.status not in STOPPABLE_STATUSES:
 		# Nothing left to stop, and nothing is written. The status is the answer:
 		# a chat still showing Stop missed the run's last frame, and this is how

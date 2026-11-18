@@ -164,6 +164,20 @@ class TestStopRun(AgentTestCase):
 		self.assertIsNone(stop_requested(run.name))
 		self.assertEqual(frappe.db.get_value("Agent Run", run.name, "status"), "Queued")
 
+	def test_only_a_chat_turn_can_be_stopped(self):
+		"""An MCP session is the caller's own Running run, and still not Stop's to end."""
+		for surface in ("MCP", "Rehearsal", "Trigger"):
+			with self.subTest(surface=surface):
+				run = self.make_run("Running")
+				run.db_set("surface", surface, update_modified=False)
+
+				with as_user(RESTRICTED_USER):
+					with self.assertRaises(frappe.ValidationError):
+						stop_run(run.name)
+
+				self.assertIsNone(stop_requested(run.name))
+				self.assertEqual(frappe.db.get_value("Agent Run", run.name, "status"), "Running")
+
 	def test_a_run_that_does_not_exist_is_refused_the_same_way(self):
 		with as_user(RESTRICTED_USER):
 			with self.assertRaises(frappe.PermissionError):
