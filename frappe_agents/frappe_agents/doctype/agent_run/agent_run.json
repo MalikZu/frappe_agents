@@ -66,7 +66,7 @@
    "fieldname": "surface",
    "fieldtype": "Select",
    "label": "Surface",
-   "options": "Desk Chat"
+   "options": "Desk Chat\nRehearsal"
   },
   {
    "description": "The model profile this run actually used. Empty on a run that never started.",
@@ -172,7 +172,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 18:00:00.000000",
+ "modified": "2026-11-18 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Run",

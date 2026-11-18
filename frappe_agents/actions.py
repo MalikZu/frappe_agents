@@ -66,6 +66,8 @@ DRAFT = 0
 SUBMITTED = 1
 
 DEFAULT_EXPIRY_DAYS = 7
+# The Agent Run surface a rehearsal runs on. Proposals from it are never applied.
+REHEARSAL_SURFACE = "Rehearsal"
 FAILURE_LIMIT = 500
 NOTE_LIMIT = 1000
 SAVEPOINT = "agent_action_apply"
@@ -89,6 +91,7 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	_check_kill_switch()
 	_require_pending(doc_action)
+	_refuse_rehearsal(doc_action)
 	_check_expiry(doc_action)
 	_require_separation_of_duties(doc_action)
 
@@ -263,6 +266,28 @@ def record_proposal(
 	return action
 
 
+def close_rehearsal_proposals(run: str, note: str) -> list[str]:
+	"""Close every Pending proposal a rehearsal run made. Returns their names.
+
+	A rehearsal tests whether an agent proposes; it must never leave a proposal a
+	person could approve. Closing reuses Expired, the status for a proposal nobody
+	will decide, and keeps the row: what the agent asked for is the evidence.
+	Closing it at once also frees the document for a real proposal, which
+	`pending_action_for` would otherwise refuse as a duplicate.
+	"""
+	names = frappe.get_all(
+		"Agent Action",
+		filters={"run": run, "status": STATUS_PENDING},
+		pluck="name",
+	)
+	for name in names:
+		_write(
+			frappe.get_doc("Agent Action", name),
+			{"status": STATUS_EXPIRED, "decided_at": now_datetime(), "decision_note": note},
+		)
+	return names
+
+
 def expire_stale_actions() -> int:
 	"""Expire proposals nobody decided. Daily job, and safe to run by hand.
 
@@ -351,6 +376,16 @@ def _require_pending(action: Any) -> None:
 				_(action.status)
 			)
 		)
+
+
+def _refuse_rehearsal(action: Any) -> None:
+	"""A proposal made during a rehearsal is evidence, never a request.
+
+	The scorer closes these as soon as the run ends. This is the second wall, for
+	the moment between the proposal and the scorer, and for a scorer that died.
+	"""
+	if frappe.db.get_value("Agent Run", action.run, "surface") == REHEARSAL_SURFACE:
+		frappe.throw(_("This proposal was made during a rehearsal. It cannot be approved."))
 
 
 def _check_expiry(action: Any) -> None:

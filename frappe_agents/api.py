@@ -172,7 +172,9 @@ def list_conversations() -> list[dict]:
 
 	rows = frappe.get_list(
 		"Agent Conversation",
-		filters={"user": frappe.session.user},
+		# A rehearsal's bait conversation belongs to its test user but is not theirs
+		# to chat in.
+		filters={"user": frappe.session.user, "rehearsal": 0},
 		fields=["name", "agent", "title", "last_activity", "modified"],
 		order_by="last_activity desc, modified desc",
 		limit_page_length=CONVERSATION_LIMIT,

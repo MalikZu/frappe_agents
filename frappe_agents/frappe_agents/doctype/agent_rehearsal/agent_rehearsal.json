@@ -1,0 +1,183 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-11-18 12:00:00.000000",
+ "description": "A saved test case: a prompt, a test user and what the agent must and must not do.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "agent",
+  "enabled",
+  "column_break_main",
+  "run_as_user",
+  "pack_case",
+  "last_verdict",
+  "last_result",
+  "prompt_section",
+  "prompt",
+  "context_doctype",
+  "context_name",
+  "bait_section",
+  "bait_vector",
+  "bait_text",
+  "expectations_section",
+  "expectations"
+ ],
+ "fields": [
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title",
+   "reqd": 1
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Agent",
+   "options": "Agent",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "description": "Run all rehearsals skips a rehearsal that is not enabled.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Yourself, or a user with the Agent Rehearsal User role. An agent that runs as a service user always runs as that user.",
+   "fieldname": "run_as_user",
+   "fieldtype": "Link",
+   "label": "Run As",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "description": "Set when this rehearsal came from the injection pack.",
+   "fieldname": "pack_case",
+   "fieldtype": "Data",
+   "label": "Pack Case",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_verdict",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Last Verdict",
+   "options": "\nPass\nFail\nInconclusive",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_result",
+   "fieldtype": "Link",
+   "label": "Last Result",
+   "options": "Agent Rehearsal Result",
+   "read_only": 1
+  },
+  {
+   "fieldname": "prompt_section",
+   "fieldtype": "Section Break",
+   "label": "Prompt"
+  },
+  {
+   "description": "What the test user types to the agent.",
+   "fieldname": "prompt",
+   "fieldtype": "Long Text",
+   "label": "Prompt",
+   "reqd": 1
+  },
+  {
+   "description": "Optional. The run opens on this document, the way a form button does.",
+   "fieldname": "context_doctype",
+   "fieldtype": "Link",
+   "label": "Document Type",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "context_name",
+   "fieldtype": "Dynamic Link",
+   "label": "Document",
+   "options": "context_doctype"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "bait_section",
+   "fieldtype": "Section Break",
+   "label": "Bait"
+  },
+  {
+   "default": "None",
+   "description": "Where the bait text is placed before the run. A comment stays on the document after the rehearsal.",
+   "fieldname": "bait_vector",
+   "fieldtype": "Select",
+   "label": "Bait Vector",
+   "options": "None\nAttached file\nComment on the document"
+  },
+  {
+   "depends_on": "eval:doc.bait_vector && doc.bait_vector != 'None'",
+   "description": "Text the agent reads as document content. The rehearsal passes only if the agent read it.",
+   "fieldname": "bait_text",
+   "fieldtype": "Long Text",
+   "label": "Bait Text"
+  },
+  {
+   "fieldname": "expectations_section",
+   "fieldtype": "Section Break",
+   "label": "Expectations"
+  },
+  {
+   "fieldname": "expectations",
+   "fieldtype": "Table",
+   "label": "Expectations",
+   "options": "Agent Rehearsal Expectation",
+   "reqd": 1
+  }
+ ],
+ "icon": "flask-conical",
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-18 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Rehearsal",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Agent Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "show_title_field_in_link": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 1
+}

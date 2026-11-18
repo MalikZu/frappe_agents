@@ -1,0 +1,233 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-11-18 12:00:00.000000",
+ "description": "One run of one rehearsal, scored. Written by framework code only.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "rehearsal",
+  "agent",
+  "model_profile",
+  "batch",
+  "column_break_head",
+  "status",
+  "verdict",
+  "run",
+  "run_as_user",
+  "started_by",
+  "cost_section",
+  "tokens_in",
+  "tokens_out",
+  "column_break_cost",
+  "cost",
+  "run_status",
+  "error",
+  "checks_section",
+  "checks",
+  "answer_section",
+  "answer",
+  "evidence_section",
+  "documents",
+  "calls"
+ ],
+ "fields": [
+  {
+   "fieldname": "rehearsal",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Rehearsal",
+   "options": "Agent Rehearsal",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Agent",
+   "options": "Agent",
+   "read_only": 1
+  },
+  {
+   "fieldname": "model_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Model Profile",
+   "options": "LLM Model Profile",
+   "read_only": 1
+  },
+  {
+   "description": "Results started together by Run all rehearsals share a batch.",
+   "fieldname": "batch",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Batch",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Queued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Queued\nRunning\nScored\nFailed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "verdict",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Verdict",
+   "options": "\nPass\nFail\nInconclusive",
+   "read_only": 1
+  },
+  {
+   "fieldname": "run",
+   "fieldtype": "Link",
+   "label": "Agent Run",
+   "options": "Agent Run",
+   "read_only": 1
+  },
+  {
+   "fieldname": "run_as_user",
+   "fieldtype": "Link",
+   "label": "Run As",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "started_by",
+   "fieldtype": "Link",
+   "label": "Started By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cost_section",
+   "fieldtype": "Section Break",
+   "label": "Cost"
+  },
+  {
+   "fieldname": "tokens_in",
+   "fieldtype": "Int",
+   "label": "Tokens In",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tokens_out",
+   "fieldtype": "Int",
+   "label": "Tokens Out",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_cost",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Tokens priced at the model profile's rates when the rehearsal ran. Empty when the profile has no rates.",
+   "fieldname": "cost",
+   "fieldtype": "Float",
+   "label": "Cost",
+   "precision": "6",
+   "read_only": 1
+  },
+  {
+   "fieldname": "run_status",
+   "fieldtype": "Data",
+   "label": "Run Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "checks_section",
+   "fieldtype": "Section Break",
+   "label": "Checks"
+  },
+  {
+   "fieldname": "checks",
+   "fieldtype": "Table",
+   "label": "Checks",
+   "options": "Agent Rehearsal Check",
+   "read_only": 1
+  },
+  {
+   "fieldname": "answer_section",
+   "fieldtype": "Section Break",
+   "label": "Answer"
+  },
+  {
+   "fieldname": "answer",
+   "fieldtype": "Long Text",
+   "label": "Answer",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "evidence_section",
+   "fieldtype": "Section Break",
+   "label": "Evidence"
+  },
+  {
+   "description": "Bait the rehearsal placed, drafts the agent wrote and proposals it made. Review and remove them by hand.",
+   "fieldname": "documents",
+   "fieldtype": "Table",
+   "label": "Documents",
+   "options": "Agent Rehearsal Document",
+   "read_only": 1
+  },
+  {
+   "fieldname": "calls",
+   "fieldtype": "Table",
+   "label": "Tool Calls",
+   "options": "Agent Rehearsal Call",
+   "read_only": 1
+  }
+ ],
+ "icon": "clipboard-check",
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-18 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Rehearsal Result",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Agent Manager"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Agent Auditor"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
