@@ -13,10 +13,11 @@ from unittest.mock import patch
 
 import frappe
 
+from frappe_agents import redaction
 from frappe_agents.api import get_conversation
 from frappe_agents.harness.messages import message_text
 from frappe_agents.patches.v0_7_0 import redact_stored_event_logs
-from frappe_agents.redaction import REDACTED, redact_json_text
+from frappe_agents.redaction import REDACTED, EventRedactor, redact, redact_json_text
 from frappe_agents.runner.providers import ProviderError
 from frappe_agents.runner.run import EVENT
 from frappe_agents.tests.fixtures import (
@@ -40,11 +41,22 @@ from frappe_agents.tests.fixtures import (
 
 PASSWORD = "portal-pass-never-in-the-log"
 IBAN = "AE070331234567890123456789"
+# A number marked sensitive for one test. Numbers are secrets too: a salary is.
+AMOUNT = 98765
 DEAD = ProviderError("The provider is unreachable.")
 
 
 def stored_log(run_name: str) -> str:
 	return frappe.db.get_value("Agent Run", run_name, "event_log") or ""
+
+
+def amount_is_sensitive():
+	"""Mark the order's amount sensitive, on top of whatever the site marks."""
+	original = redaction.doctype_sensitive_keys
+	return patch(
+		"frappe_agents.redaction.doctype_sensitive_keys",
+		side_effect=lambda doctype: original(doctype) | {"amount"},
+	)
 
 
 def live(frames: list[dict], kind: str) -> list[dict]:
@@ -74,13 +86,13 @@ class TestEventLogRedaction(AgentTestCase):
 		frames = [call.args[1] for call in publish.call_args_list if call.args[0] == EVENT]
 		return run.name, frames
 
-	def order_with_iban(self) -> str:
+	def order_with_iban(self, amount: int = 10) -> str:
 		order = frappe.get_doc(
 			{
 				"doctype": ORDER_DT,
 				"order_title": f"FA Redact Log {frappe.generate_hash(length=8)}",
 				"project": PROJECT_ALPHA,
-				"amount": 10,
+				"amount": amount,
 				IBAN_FIELD: IBAN,
 				"items": [{"item": "FA Widget", "qty": 1}],
 			}
@@ -166,6 +178,55 @@ class TestEventLogRedaction(AgentTestCase):
 
 		self.assertNotIn(IBAN, stored_log(run))
 
+	def test_a_result_cut_at_the_model_limit_keeps_no_secret_of_any_type(self):
+		"""The cut lands mid-JSON, so the stored copy is redacted before the cut."""
+		order = self.order_with_iban(amount=AMOUNT)
+
+		with amount_is_sensitive(), patch("frappe_agents.runner.run.TOOL_RESULT_LIMIT", 400):
+			run, frames = self.turn(self.read_script(order, model_says("Read it.")))
+
+		sent = live(frames, "tool_execution_end")[0]["result"]["content"][0]["text"]
+		self.assertIn("result truncated", sent)
+		self.assertIn(str(AMOUNT), sent)
+
+		events = run_events(run)
+		ended = next(event for event in events if event["type"] == "tool_execution_end")
+		text = ended["result"]["content"][0]["text"]
+		self.assertIn("result truncated", text)
+		self.assertIn(REDACTED, text)
+		log = stored_log(run)
+		self.assertNotIn(str(AMOUNT), log)
+		self.assertNotIn(IBAN, log)
+
+	def test_an_answer_that_repeats_a_secret_is_stored_without_it(self):
+		order = self.order_with_iban()
+		answer = f"The order pays into {IBAN}."
+
+		run, frames = self.turn(self.read_script(order, model_says(answer)))
+
+		# Live, the person who ran the turn reads what the model wrote.
+		said = [frame for frame in frames if frame.get("type") == "message"]
+		self.assertEqual(said[-1]["message"], answer)
+
+		stored = frappe.db.get_value("Agent Run", run, ["status", "output_message"], as_dict=True)
+		self.assertEqual(stored.status, "Completed")
+		self.assertEqual(stored.output_message, f"The order pays into {REDACTED}.")
+		self.assertNotIn(IBAN, stored_log(run))
+
+		with as_user(DRAFT_USER):
+			reopened = next(
+				item for item in get_conversation(self.conversation)["runs"] if item["name"] == run
+			)
+		self.assertNotIn(IBAN, frappe.as_json(reopened))
+		# The chat draws the answer once: the column matches the log's last answer.
+		last = [
+			event["message"]
+			for event in reopened["event_log"]
+			if event.get("type") == "message_end" and event["message"].get("role") == "assistant"
+		][-1]
+		text = "".join(block.get("text") or "" for block in last["content"] if block.get("type") == "text")
+		self.assertEqual(text, reopened["output_message"])
+
 	def test_a_reopened_conversation_shows_the_marker(self):
 		order = self.order_with_iban()
 		self.turn(self.read_script(order, model_says("Read it.")))
@@ -216,6 +277,52 @@ class TestEventLogRedaction(AgentTestCase):
 		)
 
 
+class TestVersionChanges(AgentTestCase):
+	"""A version names the field as a value, so the walk reads the name."""
+
+	def versions(self) -> dict:
+		# The shape `get_document_slice` returns for slice="versions".
+		return {
+			"versions": [
+				{
+					"changes": [
+						{"field": IBAN_FIELD, "from": "AE0100000000", "to": IBAN},
+						{"field": f"items[0].{IBAN_FIELD}", "from": None, "to": "AE0200000000"},
+						{"field": "order_title", "from": "Old title", "to": "New title"},
+					],
+				}
+			]
+		}
+
+	def test_a_sensitive_field_change_holds_back_from_and_to(self):
+		clean, secrets = redact(self.versions(), {IBAN_FIELD})
+
+		changes = clean["versions"][0]["changes"]
+		self.assertEqual(changes[0], {"field": IBAN_FIELD, "from": REDACTED, "to": REDACTED})
+		self.assertEqual(changes[1]["to"], REDACTED)
+		self.assertEqual(changes[2]["to"], "New title")
+		self.assertEqual(secrets, {"AE0100000000", IBAN, "AE0200000000"})
+
+	def test_a_stored_versions_result_keeps_no_changed_secret(self):
+		args = {"doctype": ORDER_DT, "name": "FA-1", "slice": "versions"}
+		text = frappe.as_json({"ok": True, "result": self.versions(), "error": None})
+		redactor = EventRedactor()
+		redactor.event({"type": "tool_execution_start", "toolCallId": "call_1", "args": args})
+
+		stored = redactor.event(
+			{
+				"type": "tool_execution_end",
+				"toolCallId": "call_1",
+				"result": {"content": [{"type": "text", "text": text}]},
+			}
+		)
+
+		stored_text = stored["result"]["content"][0]["text"]
+		self.assertNotIn(IBAN, stored_text)
+		self.assertNotIn("AE0100000000", stored_text)
+		self.assertIn("New title", stored_text)
+
+
 class TestRedactJsonText(AgentTestCase):
 	def test_text_with_nothing_to_hold_back_keeps_every_byte(self):
 		text = '{"ok": true,   "rows": []}'
@@ -230,6 +337,28 @@ class TestRedactJsonText(AgentTestCase):
 		self.assertNotIn(IBAN, clean)
 		self.assertIn(REDACTED, clean)
 		self.assertEqual(secrets, {IBAN})
+
+	def test_a_cut_text_holds_back_numbers_objects_and_a_value_the_cut_is_inside(self):
+		keys = {"amount", "bank", IBAN_FIELD}
+		whole = frappe.as_json(
+			{"rows": [{"amount": AMOUNT, "bank": {"code": "BANKCODE1"}, IBAN_FIELD: IBAN}]}
+		)
+		cut = whole[: whole.index(IBAN) + 6]
+
+		clean, secrets = redact_json_text(cut, keys)
+
+		self.assertNotIn(str(AMOUNT), clean)
+		self.assertNotIn("BANKCODE1", clean)
+		self.assertNotIn(IBAN[:6], clean)
+		self.assertIn(str(AMOUNT), secrets)
+		self.assertEqual(redact_json_text(clean, keys)[0], clean)
+
+	def test_a_key_inside_a_string_is_not_a_key(self):
+		text = '{"notes": "the \\"iban\\": 1234 is fine", "rows": [' + "1" * 5
+
+		clean, _ = redact_json_text(text, {IBAN_FIELD})
+
+		self.assertEqual(clean, text)
 
 
 class TestRedactStoredEventLogs(AgentTestCase):
@@ -289,6 +418,54 @@ class TestRedactStoredEventLogs(AgentTestCase):
 		redact_stored_event_logs.execute()
 
 		self.assertEqual(stored_log(run.name), log)
+
+	def test_an_old_cut_result_with_no_start_event_is_redacted(self):
+		"""A long log drops its middle, start events and all. The result names its doctype."""
+		whole = frappe.as_json(
+			{
+				"ok": True,
+				"result": {
+					"doctype": ORDER_DT,
+					"fields": {"amount": AMOUNT, IBAN_FIELD: IBAN, "notes": "x" * 400},
+				},
+				"error": None,
+			}
+		)
+		cut = whole[:200] + "\n... (result truncated)"
+		self.assertIn(IBAN, cut)
+		events = [
+			{
+				"type": "tool_execution_end",
+				"seq": 30,
+				"toolCallId": "call_9",
+				"toolName": "get_document_slice",
+				"result": {"content": [{"type": "text", "text": cut}], "details": None},
+				"isError": False,
+			},
+			{
+				"type": "message_end",
+				"seq": 33,
+				"message": {"role": "assistant", "content": [{"type": "text", "text": f"It is {IBAN}."}]},
+			},
+		]
+		run = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
+		frappe.db.set_value(
+			"Agent Run",
+			run.name,
+			{
+				"event_log": frappe.as_json({"events": events, "truncated": True}),
+				"output_message": f"It is {IBAN}.",
+			},
+			update_modified=False,
+		)
+
+		with amount_is_sensitive():
+			redact_stored_event_logs.execute()
+
+		log = stored_log(run.name)
+		self.assertNotIn(str(AMOUNT), log)
+		self.assertNotIn(IBAN, log)
+		self.assertEqual(frappe.db.get_value("Agent Run", run.name, "output_message"), f"It is {REDACTED}.")
 
 	def test_an_unreadable_log_is_left_as_it_was(self):
 		run = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
