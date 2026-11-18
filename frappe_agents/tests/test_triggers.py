@@ -642,12 +642,15 @@ class TestWaitingFiles(TriggerCase):
 		order = make_order_draft()
 		mark_dirty(trigger.name, ORDER_DT, order.name, DRAFT_USER, "fa-file-one")
 		self.addCleanup(release_lock, trigger.name, ORDER_DT, order.name)
+		# A real File: a job whose file is gone is skipped before it gets this far.
+		with as_user(SECOND_DRAFTER):
+			file = make_pdf_attachment(name=order.name)
 
 		with patch("frappe_agents.triggers.dispatch.take_lock", side_effect=[False, True]):
-			run = self.start(trigger, order, user=SECOND_DRAFTER, file="fa-file-two")
+			run = self.start(trigger, order, user=SECOND_DRAFTER, file=file.name)
 
 		self.assertEqual(frappe.db.get_value("Agent Run", run, "effective_user"), SECOND_DRAFTER)
-		self.assertEqual(frappe.db.get_value("Agent Run", run, "trigger_file"), "fa-file-two")
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "trigger_file"), file.name)
 		waiting = take_dirty(trigger.name, ORDER_DT, order.name)
 		self.assertEqual(waiting["files"], [{"file": "fa-file-one", "user": DRAFT_USER}])
 
