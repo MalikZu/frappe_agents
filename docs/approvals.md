@@ -58,7 +58,8 @@ is every enabled user with the Agent Approver role who also:
 - is none of the three people above, who may not decide it;
 - may read the document;
 - may submit it (or cancel it, for a cancel proposal, or change it, for a field
-  change — at the permission level of every field the change touches).
+  change — at the permission level of every field the change touches, and with
+  the role the workflow state allows to edit, if a Workflow governs it).
 
 For a workflow action, the last line is different. The approver must hold a role
 the step is open to. They also need the right the step needs: submit when the
@@ -183,15 +184,22 @@ from. On those records the agent proposes a **field change** with the
 The proposal stores two values for each field: the new one, and the one the
 field held when the agent looked. Both are hidden from the Agent Action form's
 fields and from reports. The approval screen shows them to an approver who may
-read the document and the field, and to nobody else.
+read the document and the field.
+
+The new values also appear where every agent call appears: in the agent's own
+tool call under **Agents → Activity → Tool Calls**, in the run's log, and on the
+chat card of the person who asked. Agent Auditors read those. The values the
+field held before are on the approval screen only.
 
 ### What the agent may propose
 
 Plain fields only: text, numbers, dates, times, checkboxes, selects and links.
+Dates and times are local, with no time zone.
 The agent cannot propose a change to:
 
 - a table, rich text, an attachment or any other structured field;
-- a read-only, hidden or computed field;
+- a read-only, hidden or computed field, a field with a **Read Only Depends On**
+  condition, or any field of a read-only doctype;
 - a sensitive field — a Password, a masked field, or a field listed under
   **Agent Settings → Sensitive Fields**;
 - the workflow state — the agent proposes a [workflow action](#workflow-actions)
@@ -211,13 +219,17 @@ A record with a submit step is refused. The agent changes a draft with
 
 One proposal changes at most 20 fields. Two pending proposals may not change the
 same field on one record, and one record carries at most five pending field
-changes.
+changes. Two proposals sent at the same moment can both land; the second one
+approved then fails, because its field moved.
 
 ### What you see
 
 The proposal opens with a table: each field, its value **when proposed**, its
 value **now**, and the **proposed** value. A field you may not read shows its
 label and nothing else. The rest of the document follows under the table.
+
+The save is an ordinary one. If the change sets a link, the fields the document
+fills in from that link follow it, as they would in the form.
 
 If a field changed after the agent proposed, its row is red and **Approve** is
 not offered. Reject the proposal, or ask the agent to propose again.
@@ -242,9 +254,10 @@ The change is saved as you, with an ordinary save. Every check in
   changed a value while saving, the whole change is rolled back and the proposal
   is **Failed**.
 
-A rollback undoes what was written to the database. An email or background job
-that the document's code started without waiting for the save to finish may
-already be on its way.
+A rollback undoes what was written to the database. It does not undo work the
+document's code queued to run once the request finishes — a webhook, a
+notification, a background job. Those can still run, and carry the values that
+were rolled back. Submit and cancel proposals have the same limit.
 
 ### Edits that skip approval
 

@@ -400,7 +400,7 @@ function render_update(frm, $body) {
 	$("<div class='agent-action-note'></div>")
 		.text(
 			__(
-				"Approving changes only the fields below, under your own permissions. The rest of the document is shown under the change."
+				"Approving saves the fields below under your own permissions. A field the document fills in from a changed link follows it, as it would in the form. The rest of the document is shown under the change."
 			)
 		)
 		.appendTo($body);

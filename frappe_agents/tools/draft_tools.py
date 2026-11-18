@@ -59,6 +59,7 @@ from frappe_agents.field_changes import (
 	MAX_FIELDS,
 	UnusableValue,
 	field_refusal,
+	has_field_access,
 	live_problem,
 	normalise,
 	precision_of,
@@ -81,6 +82,10 @@ ACTION_UPDATE = "Update"
 # Pending field changes one record may carry at once. Disjoint changes compose,
 # because each is checked field by field; past this, the record is a queue.
 MAX_PENDING_UPDATES = 5
+# Fields stored as varchar, and frappe's default width for them. A longer value
+# would fail the approval's save; refusing it now tells the agent while it can fix it.
+LENGTH_LIMITED = frozenset({"Data", "Link", "Select"})
+DEFAULT_LENGTH = 140
 STATUS_PENDING = "Pending"
 
 REASON_LIMIT = 2000
@@ -536,7 +541,7 @@ def _refuse_fields(meta: Any, doc: Any, values: dict) -> None:
 	refusals = []
 	for fieldname in values:
 		refusal = field_refusal(meta, fieldname, doc)
-		if not refusal and not doc.has_permlevel_access_to(fieldname, meta.get_field(fieldname), "read"):
+		if not refusal and not has_field_access(doc, meta.get_field(fieldname), "read"):
 			refusal = f"You are not allowed to read {fieldname} on {meta.name}."
 		if refusal:
 			refusals.append(refusal)
@@ -559,7 +564,13 @@ def _proposed_change(meta: Any, doc: Any, values: dict) -> tuple[dict, dict]:
 		except UnusableValue as exc:
 			problems.append(f"{fieldname}: {exc}.")
 			continue
-		current = normalise(df, doc.get(fieldname), precision)
+		try:
+			current = normalise(df, doc.get(fieldname), precision)
+		except UnusableValue:
+			# What the database holds is not a value the field's type allows, so it
+			# cannot be compared against; the proposal would fail as stale anyway.
+			problems.append(f"{fieldname}: the stored value cannot be read as a {df.fieldtype}.")
+			continue
 		if value == current:
 			unchanged.append(fieldname)
 			continue
@@ -578,6 +589,10 @@ def _proposed_change(meta: Any, doc: Any, values: dict) -> tuple[dict, dict]:
 
 def _checked_value(df: Any, value: Any) -> Any:
 	"""A Select value from its options, a Link value as the record's own name."""
+	if df.fieldtype in LENGTH_LIMITED and isinstance(value, str):
+		limit = cint(df.length) or DEFAULT_LENGTH
+		if len(value) > limit:
+			raise UnusableValue(f"too long: at most {limit} characters")
 	if df.fieldtype == "Select" and value:
 		options = [option for option in (df.options or "").split("\n") if option]
 		if value not in options:

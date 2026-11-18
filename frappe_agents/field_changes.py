@@ -56,6 +56,8 @@ MAX_FIELDS = 20
 FORBIDDEN_FIELDS = frozenset(default_fields) | {"naming_series", "amended_from", "workflow_state"}
 
 INTEGER = re.compile(r"^[+-]?\d+$")
+# What a Float, Currency or Percent column keeps: decimal(21,9).
+STORED_DECIMALS = 9
 # Named so the formatter cannot rewrite the except clause into syntax version-15 cannot parse.
 NOT_A_NUMBER = (TypeError, ValueError)
 
@@ -70,6 +72,8 @@ def live_problem(meta: Any) -> str | None:
 		return f"{meta.name} is a child table. Propose a change to the parent document instead."
 	if cint(meta.issingle):
 		return f"{meta.name} is a single settings document, not a record to change."
+	if cint(meta.read_only):
+		return f"{meta.name} is read-only. Its records are not changed by hand, so not by a proposal either."
 	if cint(meta.is_submittable):
 		return (
 			f"{meta.name} has a submit step, so its drafts are edited with update_draft and its "
@@ -99,19 +103,35 @@ def field_refusal(meta: Any, fieldname: Any, doc: Any) -> str | None:
 			f"{fieldname} is a {df.fieldtype} field. A proposal can change plain values only: "
 			"text, numbers, dates, checkboxes, selects and links."
 		)
-	if cint(df.get("is_virtual")):
-		return f"{fieldname} is computed, not stored. There is nothing to change."
-	if cint(df.hidden) or cint(df.read_only):
-		return f"{fieldname} is not editable on the form, so a proposal cannot change it either."
-	if fieldname in sensitive_fields(meta):
-		return f"{fieldname} is marked sensitive. A person changes it by hand."
+	# Before the editability checks: the field a Workflow creates for its state is
+	# hidden, and "not editable" would send the agent nowhere useful.
 	if fieldname == workflow_state_field(meta.name):
 		return (
 			f"{fieldname} is the workflow state. Propose a workflow action with propose_transition instead."
 		)
+	if cint(df.get("is_virtual")):
+		return f"{fieldname} is computed, not stored. There is nothing to change."
+	# A condition that makes a field read-only is evaluated in the browser, against
+	# the form; the server cannot tell whether it holds, so it assumes it might.
+	if cint(df.hidden) or cint(df.read_only) or df.get("read_only_depends_on"):
+		return f"{fieldname} is not editable on the form, so a proposal cannot change it either."
+	if fieldname in sensitive_fields(meta):
+		return f"{fieldname} is marked sensitive. A person changes it by hand."
 	if cint(df.set_only_once) and not is_blank(doc.get(fieldname)):
 		return f"{fieldname} can only be set once, and it is already set."
 	return None
+
+
+def has_field_access(doc: Any, df: Any, permission_type: str) -> bool:
+	"""Whether the session user may read or write this field, beyond the document.
+
+	Permlevel 0 is the document's own right, already proved by `has_permission`
+	— which also counts shares and permission hooks. Asking the role table about
+	level 0 would refuse a user whose access comes from a share.
+	"""
+	if not cint(df.permlevel):
+		return True
+	return doc.has_permlevel_access_to(df.fieldname, df, permission_type)
 
 
 def sensitive_fields(meta: Any) -> set[str]:
@@ -167,10 +187,14 @@ def same_value(df: Any, left: Any, right: Any, precision: int | None = None) -> 
 
 
 def precision_of(doc: Any, df: Any) -> int | None:
-	"""The rounding the framework applies to this field, for number fields only."""
+	"""The decimals a number field keeps: its own precision, else the column's nine.
+
+	Not the system's display precision: frappe does not round a float to it when
+	saving, so rounding to it here would refuse 3.6725 against 3.67251 as no change.
+	"""
 	if df.fieldtype not in FLOAT_TYPES:
 		return None
-	return cint(doc.precision(df.fieldname)) or None
+	return cint(df.precision) or STORED_DECIMALS
 
 
 def is_blank(value: Any) -> bool:
@@ -229,12 +253,20 @@ def _parsed(fieldtype: str, value: Any) -> Any:
 		text = value.strip()
 		try:
 			if fieldtype == "Date":
-				return datetime.date.fromisoformat(text[:10])
-			if fieldtype == "Datetime":
-				return datetime.datetime.fromisoformat(text)
-			return datetime.time.fromisoformat(text)
+				parsed = datetime.date.fromisoformat(text)
+			elif fieldtype == "Datetime":
+				parsed = datetime.datetime.fromisoformat(text)
+			else:
+				parsed = datetime.time.fromisoformat(text)
 		except ValueError:
 			raise UnusableValue("expected a date or time in ISO form, such as 2026-11-18 or 14:30:00")
+		# frappe stores local wall-clock time with no zone. An offset would be
+		# written as text the column cannot hold, or silently mean another hour.
+		if getattr(parsed, "tzinfo", None) is not None:
+			raise UnusableValue(
+				"expected a local date or time with no time zone, such as 2026-11-18 14:30:00"
+			)
+		return parsed
 	if fieldtype == "Date" and isinstance(value, datetime.date):
 		return getdate(value)
 	if fieldtype == "Datetime" and isinstance(value, datetime.date):

@@ -62,7 +62,7 @@ def rewrite_priority(doc, method=None):
 
 
 @contextmanager
-def case_workflow(allow_edit: str):
+def case_workflow(allow_edit: str, state_field: str = "workflow_state"):
 	"""An active Workflow on FA Test Case whose only states are editable by `allow_edit`.
 
 	Named like the fixture Workflow on purpose: the base setUp purges that name
@@ -76,7 +76,7 @@ def case_workflow(allow_edit: str):
 			"workflow_name": WORKFLOW_NAME,
 			"document_type": CASE_DT,
 			"is_active": 1,
-			"workflow_state_field": "workflow_state",
+			"workflow_state_field": state_field,
 			"states": [
 				{"state": WORKFLOW_DRAFT_STATE, "doc_status": "0", "allow_edit": allow_edit},
 				{"state": WORKFLOW_APPROVED_STATE, "doc_status": "0", "allow_edit": allow_edit},
@@ -278,6 +278,19 @@ class TestProposeUpdate(AgentTestCase):
 		self.assertIn("not allowed to change", result["failure"])
 		self.assertEqual(self.value(case.name, "status"), "Open")
 
+	def test_write_through_a_share_is_enough(self):
+		"""Level-0 access is the document's own right, and a share grants it too."""
+		case = make_case()
+		action = self.proposed(case.name, {"status": "Working"})
+		frappe.share.add_docshare(
+			CASE_DT, case.name, WEAK_APPROVER, read=1, write=1, flags={"ignore_share_permission": True}
+		)
+
+		result = self.approve(action, user=WEAK_APPROVER)
+
+		self.assertEqual(result["status"], "Applied", result.get("failure"))
+		self.assertEqual(self.value(case.name, "status"), "Working")
+
 	def test_an_approver_who_may_not_write_one_field_changes_nothing(self):
 		"""save() would quietly keep the old rate and write the notes. Neither happens."""
 		case = make_case(internal_rate=SECRET_RATE)
@@ -363,18 +376,24 @@ class TestProposeUpdate(AgentTestCase):
 	# -- workflows -----------------------------------------------------------
 
 	def test_a_workflow_state_field_is_refused(self):
+		"""Under a name of the Workflow's choosing, not only the conventional one."""
 		case = make_case()
-		with case_workflow("System Manager"):
-			payload = self.propose(case.name, {"workflow_state": WORKFLOW_APPROVED_STATE})
+		with case_workflow("System Manager", state_field="case_stage"):
+			payload = self.propose(case.name, {"case_stage": WORKFLOW_APPROVED_STATE})
 		self.assertFalse(payload["ok"])
-		self.assertIn("system field", payload["error"])
+		self.assertIn("is the workflow state", payload["error"])
+		self.assertIn("propose_transition", payload["error"])
 
 	def test_an_approver_without_the_states_edit_role_fails_the_action(self):
 		case = make_case()
 		with case_workflow("System Manager"):
 			action = self.proposed(case.name, {"priority": "High"})
+			told = eligible_approvers(
+				frappe.get_doc("Agent Action", action), frappe.get_doc(CASE_DT, case.name)
+			)
 			result = self.approve(action)
 
+		self.assertNotIn(APPROVER_USER, told)
 		self.assertEqual(result["status"], "Failed")
 		self.assertIn("only the System Manager role may edit", result["failure"])
 		self.assertNotIn("submit or cancel", result["failure"])
@@ -475,9 +494,28 @@ class TestNormalise(AgentTestCase):
 				normalise(self.df(fieldtype), left), normalise(self.df(fieldtype), right), fieldtype
 			)
 
+	def test_a_float_keeps_the_decimals_the_column_keeps(self):
+		"""Not the system's display precision: 3.6725 and 3.67251 are different values."""
+		from frappe_agents.field_changes import STORED_DECIMALS
+
+		df = self.df("Float")
+		self.assertNotEqual(
+			normalise(df, "3.6725", STORED_DECIMALS), normalise(df, "3.67251", STORED_DECIMALS)
+		)
+
 	def test_a_word_is_not_a_number(self):
 		from frappe_agents.field_changes import UnusableValue
 
-		for fieldtype, value in (("Int", "ten"), ("Check", "yes"), ("Float", "nan"), ("Date", "soon")):
+		refused = (
+			("Int", "ten"),
+			("Check", "yes"),
+			("Float", "nan"),
+			("Date", "soon"),
+			("Date", "2026-11-18garbage"),
+			# A zone would be stored as text the column cannot hold, or mean another hour.
+			("Datetime", "2026-11-18T10:00:00Z"),
+			("Datetime", "2026-11-18 10:00:00+04:00"),
+		)
+		for fieldtype, value in refused:
 			with self.assertRaises(UnusableValue, msg=fieldtype):
 				normalise(self.df(fieldtype), value)

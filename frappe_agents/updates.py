@@ -37,6 +37,7 @@ from frappe.utils import cint
 from frappe_agents.field_changes import (
 	UnusableValue,
 	field_refusal,
+	has_field_access,
 	is_blank,
 	live_problem,
 	loads,
@@ -99,7 +100,7 @@ def _field_problem(meta: Any, target: Any, fieldname: str, value: Any, seen: dic
 
 	df = meta.get_field(fieldname)
 	label = _(df.label or fieldname)
-	if not target.has_permlevel_access_to(fieldname, df, "write"):
+	if not has_field_access(target, df, "write"):
 		return _("You are not allowed to change {0} on {1}, so approving cannot change it either.").format(
 			label, action_target(target)
 		)
@@ -122,8 +123,8 @@ def _field_problem(meta: Any, target: Any, fieldname: str, value: Any, seen: dic
 	return None
 
 
-def workflow_edit_problem(target: Any) -> str | None:
-	"""Why the session user may not edit `target` in its workflow state, if they may not."""
+def workflow_edit_problem(target: Any, user: str | None = None) -> str | None:
+	"""Why `user` — the session user by default — may not edit `target` in its workflow state."""
 	if not get_workflow_name(target.doctype):
 		return None
 	workflow = get_workflow(target.doctype)
@@ -135,7 +136,7 @@ def workflow_edit_problem(target: Any) -> str | None:
 		return _("{0} is in a state its Workflow does not list, so it cannot be changed this way.").format(
 			action_target(target)
 		)
-	if row.allow_edit and row.allow_edit not in frappe.get_roles():
+	if row.allow_edit and row.allow_edit not in frappe.get_roles(user):
 		return _("In the workflow state {0}, only the {1} role may edit {2}.").format(
 			_(state), _(row.allow_edit), action_target(target)
 		)
@@ -195,11 +196,7 @@ def update_diff(action: Any) -> dict:
 			"options": df.options if df and df.fieldtype in ("Link", "Select") else None,
 			"readable": 0,
 		}
-		readable = (
-			df is not None
-			and fieldname not in hidden
-			and target.has_permlevel_access_to(fieldname, df, "read")
-		)
+		readable = df is not None and fieldname not in hidden and has_field_access(target, df, "read")
 		if readable:
 			precision = precision_of(target, df)
 			now = _shown(df, target.get(fieldname), precision)
@@ -218,7 +215,13 @@ def update_diff(action: Any) -> dict:
 
 
 def pending_update_fields(doctype: str, name: str) -> dict[str, set[str]]:
-	"""Each pending Update on one document, and the fields it would change."""
+	"""Each pending Update on one document, and the fields it would change.
+
+	Reads the app's own Agent Action rows, never the target's data — the same kind
+	of bookkeeping lookup as `pending_action_for`. Check-then-insert with no lock:
+	two proposals racing on one field can both land, and the per-field stale check
+	fails whichever is approved second.
+	"""
 	rows = frappe.get_all(
 		"Agent Action",
 		filters={
