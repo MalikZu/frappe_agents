@@ -39,9 +39,14 @@ broad rights. This app is built the other way around:
   duties and an edited-before-approval quality metric.
 - **Document extraction**: an attached PDF or image becomes a draft for human
   review, with bank and payment details held back until confirmed by hand.
+- **Fill from file** on a form: a PDF or image fills the open form for you to
+  check and save, with the same checks and the same payment details held back.
 - **Any model provider** over three wire formats (OpenAI-compatible, OpenAI
   Responses and Anthropic) — OpenRouter, Ollama and friends included. The
   provider is a config field, not a dependency.
+- **A governed MCP endpoint**, off by default: outside assistants that can send
+  an API key call the same tools as the same user, capped at drafts, with every
+  call audited. See [Outside clients](docs/mcp.md).
 - **Zero pip dependencies.** The agent loop is a vendored, tested harness;
   nothing new enters your bench's shared environment.
 
@@ -73,8 +78,8 @@ workspace is at `/app/agents`), and fields your administrator masked are not
 automatically redacted from audit rows. See
 [Running the app](docs/admin.md).
 
-Installing creates the four roles (Agent Manager, Agent User, Agent Approver,
-Agent Auditor) and registers the built-in tools. Then, in the Desk: create an
+Installing creates the roles (Agent Manager, Agent User, Agent Approver,
+Agent Auditor, Agent Rehearsal User) and registers the built-in tools. Then, in the Desk: create an
 LLM Provider, a Model Profile, and an Agent — and open Agent Chat.
 
 A new agent reaches nothing until you give it **access rules**: per doctype, may
@@ -94,7 +99,7 @@ before every request. Redirects are never followed.
 
 **Start here**
 
-- [Getting started](docs/getting-started.md) — install, the four roles, and the
+- [Getting started](docs/getting-started.md) — install, the roles, and the
   path from an empty site to an agent that answers.
 - [How the agent is held to account](docs/governance.md) — identity binding, the
   draft/submit wall, the audit trail, the kill switch, and where each guarantee
@@ -108,6 +113,8 @@ before every request. Redirects are never followed.
   autonomy, skills, alternates, and the two cost stops.
 - [Providers and models](docs/models.md) — the three wire formats, the
   self-hosted trust boundary, and the shipped catalog.
+- [Rehearsals](docs/rehearsals.md) — saved test cases an agent must pass before
+  go-live and after a model change, and the prompt-injection pack.
 
 **Using it**
 
@@ -121,6 +128,8 @@ before every request. Redirects are never followed.
   the sensitive-field gate that holds payment details back.
 - [Agent triggers](docs/triggers.md) — an agent that runs when a file is
   attached or a field changes, and writes one field, as the person who acted.
+- [Outside clients (MCP)](docs/mcp.md) — let Claude Code or an IDE call an
+  agent's tools through the same permission wall, and what changes when you do.
 
 **Running it**
 
@@ -128,7 +137,7 @@ before every request. Redirects are never followed.
   and upgrading.
 - [Troubleshooting](docs/troubleshooting.md) — what to check when an agent is
   silent, denied, or refusing a file.
-- [Built-in tools](docs/tools.md) — the seventeen tools, their capability
+- [Built-in tools](docs/tools.md) — the nineteen tools, their capability
   classes, and how to read a tool call.
 - [The agent harness](docs/harness.md) — the vendored run loop.
 

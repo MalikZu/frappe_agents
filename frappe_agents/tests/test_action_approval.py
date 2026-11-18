@@ -61,8 +61,12 @@ class TestActionApproval(AgentTestCase):
 	def test_the_user_the_run_acted_as_cannot_approve(self):
 		"""The run's effective user is the one the agent borrowed, so they are out too."""
 		order = make_order_draft(user=DRAFT_USER)
-		run = make_run(effective_user=APPROVER_USER, agent=DRAFT_AGENT)
+		run = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
 		action = make_proposal(order.name, user=DRAFT_USER, run=run)
+		# A tool call only ever runs as its run's own user, so the requester and the
+		# run's user cannot differ at proposal time. Moving the run afterwards is
+		# the one way to reach the state this rule guards against.
+		run.db_set("effective_user", APPROVER_USER, update_modified=False)
 
 		self.assertEqual(self.action(action).requested_by, DRAFT_USER)
 

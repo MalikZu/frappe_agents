@@ -24,6 +24,9 @@
 	// The one role the server lets review somebody else's extraction.
 	const SYSTEM_MANAGER = "System Manager";
 	const NEEDS_REVIEW = "Needs Review";
+	// A Fill from file reading waiting for the form that asked for it.
+	const READY = "Ready";
+	const FILL_FORM = "Fill Form";
 
 	// The desk bundle defines it; the literal keeps this form working if the
 	// bundle ever stops being loaded on every page.
@@ -788,6 +791,22 @@
 			);
 			return;
 		}
+		if (frm.doc.status === READY) {
+			frm.set_intro(
+				__(
+					"Read for Fill from file. The values wait for the form that asked for them; nothing is written until that form is saved."
+				),
+				"blue"
+			);
+			return;
+		}
+		if (frm.doc.status === "Accepted" && frm.doc.purpose === FILL_FORM) {
+			frm.set_intro(
+				__("Filled into a form and saved by {0}.", [frm.doc.reviewed_by || ""]),
+				"green"
+			);
+			return;
+		}
 		if (frm.doc.status === "Accepted") {
 			frm.set_intro(
 				__("Accepted by {0}. The draft still has to be submitted by a person.", [frm.doc.reviewed_by || ""]),
@@ -875,9 +894,13 @@
 			if (state.editable) {
 				frm.page.set_primary_action(__("Accept"), () => accept(frm));
 				frm.add_custom_button(__("Discard"), () => discard(frm));
+			} else if (frm.doc.status === READY && may_review(frm)) {
+				// Nothing to accept here: a fill is accepted by saving the form.
+				frm.add_custom_button(__("Discard"), () => discard(frm));
 			}
 			if (frm.doc.created_doc && frm.doc.target_doctype) {
-				frm.add_custom_button(__("Open Draft"), () =>
+				const label = frm.doc.purpose === FILL_FORM ? __("Open Document") : __("Open Draft");
+				frm.add_custom_button(label, () =>
 					frappe.set_route("Form", frm.doc.target_doctype, frm.doc.created_doc)
 				);
 			}

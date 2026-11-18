@@ -6,7 +6,7 @@ Agent Tool Call row — success, denial or error — before it returns.
 The row is durable and Agent Auditor reads it, so it is written with sensitive
 values held back. What a tool *did* stays fully legible — the tool, the doctype,
 the field names, the outcome — and only the values that must not become audit
-content are replaced with `[redacted]`. See `_sensitive_keys` for what counts.
+content are replaced with `[redacted]`. See `frappe_agents.redaction` for what counts.
 Redaction happens here, at the write, and nowhere else: the tool's own return
 value is handed to the model untouched.
 """
@@ -17,6 +17,15 @@ from typing import Any
 
 import frappe
 from frappe.utils import cint
+
+# REDACTED and masking_supported are re-exported: callers import them from here.
+from frappe_agents.redaction import (
+	REDACTED,
+	masking_supported,
+	redact,
+	scrub,
+	sensitive_keys,
+)
 
 CAPABILITY_READ = "Read"
 CAPABILITY_DRAFT = "Draft"
@@ -29,9 +38,20 @@ OUTCOME_ERROR = "Error"
 
 RUN_FLAG = "agent_current_run"
 
-# No run acts as these, whatever wrote the run row. Kept here, in a module the
-# save-path hook can import without pulling in the model runtime.
+# Nobody a tool call may run as, whoever wrote the run row. The runner refuses
+# them before a run starts; `execute_tool` refuses them again, because it now has
+# a caller that is not the runner. Kept here, in a module the save-path trigger
+# hook can import without pulling in the model runtime.
 FORBIDDEN_USERS = ("Administrator", "Guest")
+
+# The run surface an outside MCP client drives. A run on it is offered fewer
+# tools and never more than Draft, whatever the agent's autonomy says: the model
+# on the other end is one the site did not choose and cannot instruct.
+SURFACE_MCP = "MCP"
+MCP_CAPABILITIES = frozenset({CAPABILITY_READ, CAPABILITY_DRAFT})
+# Rolled back to when an MCP tool call does not succeed, so a handler that wrote
+# half of something and then failed leaves nothing behind but its audit row.
+MCP_SAVEPOINT = "frappe_agents_mcp_call"
 
 INTERRUPTED = "The tool call was interrupted before it finished."
 TRIGGER_HAS_NO_TOOLS = (
@@ -47,19 +67,6 @@ ARGS_JSON_LIMIT = 10_000
 RESULT_SUMMARY_LIMIT = 500
 DOCS_TOUCHED_LIMIT = 500
 ERROR_LIMIT = 500
-
-REDACTED = "[redacted]"
-
-# Key names redacted whatever doctype is in play — the answer for arguments that
-# name no doctype at all. Deliberately tiny and exact: a rule wide enough to
-# catch every secret by its name would redact half the audit trail, and a row an
-# auditor cannot read is its own kind of failure.
-FALLBACK_SENSITIVE_KEYS = frozenset({"password", "api_key", "token", "secret"})
-
-# Below this length a redacted value is not worth removing from prose. "12" or
-# "abc" appears inside ordinary words, and replacing every occurrence would
-# corrupt the sentence that tells an auditor what happened.
-SCRUB_MIN_LENGTH = 4
 
 # What each autonomy level may do. Submit is never granted to an agent:
 # agents draft, humans submit.
@@ -121,12 +128,18 @@ def _grants() -> Any:
 	return grants
 
 
-def execute_tool(run: Any, tool_name: str, args: dict | None = None, *, by_runtime: bool = False) -> dict:
+def execute_tool(
+	run: Any, tool_name: str, args: dict | None = None, atomic: bool = False, *, by_runtime: bool = False
+) -> dict:
 	"""Run one tool for one Agent Run and log it.
 
 	`run` is an Agent Run document or its name. Returns
 	`{"ok": bool, "result": any, "error": str | None}`. Handler failures come back
 	as data so the model can react; only the kill switch is raised.
+
+	`atomic` undoes whatever the handler wrote when the call does not succeed.
+	The audit row is written after the undo, so it survives it. It undoes rows,
+	not callbacks: anything the handler queued to run after commit still runs.
 
 	`by_runtime` says the runtime itself is calling, not the model. Only a run a
 	trigger started cares: its model holds no tools, and the trigger's own read
@@ -137,6 +150,11 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, *, by_runti
 
 	run_doc = frappe.get_doc("Agent Run", run) if isinstance(run, str) else run
 	run_name = run_doc.name
+
+	refusal = _identity_refusal(run_doc)
+	if refusal:
+		_log_call(run_name, tool_name, args, OUTCOME_DENIED, _elapsed_ms(started), error=refusal)
+		return {"ok": False, "result": None, "error": refusal}
 
 	try:
 		_check_kill_switch()
@@ -159,6 +177,8 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, *, by_runti
 	# travels beside the call rather than inside the model's payload.
 	previous_run = frappe.flags.get(RUN_FLAG)
 	frappe.flags[RUN_FLAG] = run_doc
+	if atomic:
+		frappe.db.savepoint(MCP_SAVEPOINT)
 	try:
 		if run_doc.get("trigger") and not by_runtime:
 			raise ToolDenied(TRIGGER_HAS_NO_TOOLS)
@@ -177,6 +197,9 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None, *, by_runti
 		frappe.logger("frappe_agents").warning(f"tool {tool_name} failed on run {run_name}: {error}")
 	finally:
 		frappe.flags[RUN_FLAG] = previous_run
+
+	if atomic and outcome != OUTCOME_SUCCESS:
+		_undo_call(tool_name, run_name)
 
 	_log_call(
 		run_name,
@@ -322,6 +345,39 @@ def _accepts(method: Any, name: str) -> bool:
 		return False
 
 
+def _undo_call(tool_name: str, run_name: str) -> None:
+	"""Roll a failed atomic call back, and never let the rollback cost the audit row.
+
+	The savepoint can already be gone: a deadlock rolls the whole transaction
+	back, and so does a handler that rolled back itself. Then the only undo left
+	is the whole transaction, and the row below is still written.
+	"""
+	try:
+		frappe.db.rollback(save_point=MCP_SAVEPOINT)
+	except Exception:
+		frappe.logger("frappe_agents").warning(
+			f"savepoint for tool {tool_name} on run {run_name} was gone; rolled back the transaction",
+			exc_info=True,
+		)
+		frappe.db.rollback()
+
+
+def _identity_refusal(run_doc: Any) -> str | None:
+	"""Why this call may not run as the current user, or None if it may.
+
+	A tool call runs with the permissions of whoever is logged in, and the run
+	says who that must be. The runner binds the two before it calls a tool; any
+	other caller has to have bound them too, and this is where that is checked
+	rather than trusted.
+	"""
+	user = frappe.session.user
+	if user in FORBIDDEN_USERS:
+		return f"Tool calls never run as {user}."
+	if user != run_doc.get("effective_user"):
+		return f"This run acts for {run_doc.get('effective_user') or 'nobody'}, not for {user}."
+	return None
+
+
 def _check_kill_switch() -> None:
 	if not runtime_enabled():
 		raise KillSwitchActive("The agent runtime is switched off.")
@@ -339,6 +395,10 @@ def _resolve_handler(run_doc: Any, tool_name: str):
 		if tool_name not in get_agent_tool_names(agent):
 			raise ToolDenied(f"Tool {tool_name} is not enabled for agent {agent.name}.")
 
+	on_mcp = run_doc.get("surface") == SURFACE_MCP
+	if on_mcp and tool_name not in _grants().MCP_TOOLS:
+		raise ToolDenied(f"Tool {tool_name} is not offered to MCP clients.")
+
 	try:
 		tool = frappe.get_cached_doc("Agent Tool", tool_name)
 	except frappe.DoesNotExistError:
@@ -349,6 +409,10 @@ def _resolve_handler(run_doc: Any, tool_name: str):
 
 	if agent is not None:
 		allowed = AUTONOMY_CAPABILITIES.get(agent.autonomy, {CAPABILITY_READ})
+		if on_mcp and tool.capability in allowed and tool.capability not in MCP_CAPABILITIES:
+			raise ToolDenied(
+				f"Tool {tool_name} needs {tool.capability} capability, and MCP clients never go past Draft."
+			)
 		if tool.capability not in allowed:
 			raise ToolDenied(
 				f"Tool {tool_name} needs {tool.capability} capability, agent autonomy is {agent.autonomy}."
@@ -377,15 +441,15 @@ def _log_call(
 	the arguments no longer carry.
 	"""
 	try:
-		keys = _sensitive_keys(args)
-		safe_args, secrets = _redact(args, keys)
+		keys = sensitive_keys(args)
+		safe_args, secrets = redact(args, keys)
 
 		summary = None
 		if outcome == OUTCOME_SUCCESS:
 			if result_summary:
 				summary = result_summary
 			else:
-				safe_result, result_secrets = _redact(result, keys)
+				safe_result, result_secrets = redact(result, keys)
 				secrets |= result_secrets
 				summary = _summarise(safe_result)
 
@@ -396,10 +460,10 @@ def _log_call(
 				"tool": tool_name or "unknown",
 				"args_json": _truncate(_as_json(safe_args), ARGS_JSON_LIMIT),
 				"outcome": outcome,
-				"result_summary": _truncate(_scrub(summary, secrets), RESULT_SUMMARY_LIMIT),
+				"result_summary": _truncate(scrub(summary, secrets), RESULT_SUMMARY_LIMIT),
 				"docs_touched": _truncate(docs_touched, DOCS_TOUCHED_LIMIT),
 				"duration_ms": duration_ms,
-				"error": _truncate(_scrub(error, secrets), ERROR_LIMIT),
+				"error": _truncate(scrub(error, secrets), ERROR_LIMIT),
 			}
 		)
 		call.flags.ignore_permissions = True
@@ -408,129 +472,6 @@ def _log_call(
 		frappe.logger("frappe_agents").error(
 			f"could not log tool call {tool_name} for run {run_name}", exc_info=True
 		)
-
-
-def _sensitive_keys(payload: Any) -> set[str]:
-	"""Argument keys whose values must not become audit content, lowercased.
-
-	Three sources, in the order they are trusted:
-
-	1. **Password fields** on the doctype the call names. A fieldtype the
-	   framework itself refuses to hand back in a query is not something to
-	   copy into an audit row.
-	2. **Masked and administrator-marked fields** on that same doctype — the
-	   extraction gate's own configuration, read through `sensitive_fieldnames`
-	   so there is one registry of what an administrator called sensitive and
-	   not two that can disagree.
-	3. **A fallback by name** for arguments tied to no doctype at all.
-
-	Child tables count: a payment detail hidden in a line item is the same
-	value with more steps, and the keys are matched at any depth.
-	"""
-	keys = set(FALLBACK_SENSITIVE_KEYS)
-	doctype = payload.get("doctype") if isinstance(payload, dict) else None
-	if not isinstance(doctype, str) or not doctype.strip():
-		return keys
-
-	try:
-		keys |= _doctype_sensitive_keys(doctype.strip())
-	except frappe.DoesNotExistError:
-		# The call named a doctype that does not exist — the tool is about to say
-		# so. The fallback keys still apply.
-		pass
-	except Exception:
-		frappe.logger("frappe_agents").warning(
-			f"could not resolve sensitive fields on {doctype}", exc_info=True
-		)
-	return keys
-
-
-def _doctype_sensitive_keys(doctype: str) -> set[str]:
-	from frappe.model import table_fields
-
-	from frappe_agents.extraction.gate import sensitive_fieldnames
-
-	meta = frappe.get_meta(doctype)
-	metas = [meta]
-	metas += [
-		frappe.get_meta(df.options) for df in meta.fields if df.fieldtype in table_fields and df.options
-	]
-
-	keys: set[str] = set()
-	for one in metas:
-		keys |= {df.fieldname for df in one.fields if df.fieldtype == "Password"}
-		keys |= _masked_fieldnames(one)
-		keys |= sensitive_fieldnames(one.name)
-	return {key.lower() for key in keys if key}
-
-
-def masking_supported() -> bool:
-	"""Whether this framework masks fields per user.
-
-	frappe_agents patch (version-15): `Meta.get_masked_fields` arrived in v16.
-	Where it is missing, a field an administrator masked is not automatically
-	held out of an audit row, and the extraction gate has one fewer source for
-	what to withhold. Nothing crashes — the protection is simply not there, and
-	`docs/admin.md` says so. Agent Settings' own sensitive-field list works on
-	both and is what to lean on.
-	"""
-	from frappe.model.meta import Meta
-
-	return hasattr(Meta, "get_masked_fields")
-
-
-def _masked_fieldnames(meta: Any) -> set[str]:
-	try:
-		return {df.fieldname for df in meta.get_masked_fields()}
-	except AttributeError:
-		return set()
-
-
-def _redact(value: Any, keys: set[str]) -> tuple[Any, set[str]]:
-	"""A copy with sensitive values replaced, and the raw values that were removed.
-
-	Recursive over dicts and lists, so a draft's child rows and a filter object
-	are covered by the same pass. Key names survive: what the call touched is the
-	part an auditor needs.
-	"""
-	secrets: set[str] = set()
-	return _walk(value, keys, secrets), secrets
-
-
-def _walk(value: Any, keys: set[str], secrets: set[str]) -> Any:
-	if isinstance(value, dict):
-		clean = {}
-		for key, item in value.items():
-			if isinstance(key, str) and key.lower() in keys:
-				_collect(item, secrets)
-				clean[key] = REDACTED
-				continue
-			clean[key] = _walk(item, keys, secrets)
-		return clean
-	if isinstance(value, (list, tuple)):
-		return [_walk(item, keys, secrets) for item in value]
-	return value
-
-
-def _collect(value: Any, secrets: set[str]) -> None:
-	"""Every string under a redacted key, so prose can be scrubbed of it later."""
-	if isinstance(value, str):
-		secrets.add(value)
-	elif isinstance(value, dict):
-		for item in value.values():
-			_collect(item, secrets)
-	elif isinstance(value, (list, tuple)):
-		for item in value:
-			_collect(item, secrets)
-
-
-def _scrub(text: str | None, secrets: set[str]) -> str | None:
-	if not text or not secrets:
-		return text
-	for secret in secrets:
-		if len(secret) >= SCRUB_MIN_LENGTH and secret in text:
-			text = text.replace(secret, REDACTED)
-	return text
 
 
 def _summarise(result: Any) -> str:

@@ -64,7 +64,7 @@
   {
    "default": "0",
    "depends_on": "eval:doc.target_type==\"DocType\"",
-   "description": "Ask a human to submit, cancel or take a workflow action. The agent never does any of these itself.",
+   "description": "Ask a human to submit, cancel, take a workflow action, or change fields on a record with no submit step. The agent never does any of these itself.",
    "fieldname": "can_propose",
    "fieldtype": "Check",
    "label": "Propose"

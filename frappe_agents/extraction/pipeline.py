@@ -19,8 +19,10 @@ row says so. The runtime switch is read the same way at the same points, from
 **The rule this file exists to keep: nothing in here writes a sensitive field.**
 The draft is created from `gate.withhold`'s first return value, which cannot
 contain one. The extracted sensitive values go onto the extraction row, flagged,
-and the only code in the app that can write them into a document is
-`api.apply_extraction`, from a list of fieldnames a person named by hand.
+and the only server code that can write them into a document is
+`api.apply_extraction`, from a list of fieldnames a person named by hand. A Fill
+Form reading creates no document at all: it stops at Ready, and the person types
+or chooses each sensitive value in their own form and saves it themselves.
 
 `resolve_file` sits here too, immediately above the permission check it hands
 every answer to, and `require_provenance` immediately below it. Any tool that
@@ -52,6 +54,7 @@ from frappe_agents.runner.providers import (
 	ExtractionRefused,
 	ProviderError,
 	call_model_extract,
+	check_extract_capability,
 )
 from frappe_agents.tools.base import current_run, runtime_enabled
 
@@ -61,6 +64,7 @@ EVENT = "frappe_agents:extraction_update"
 STATUS_PENDING = "Pending"
 STATUS_RUNNING = "Running"
 STATUS_NEEDS_REVIEW = "Needs Review"
+STATUS_READY = "Ready"
 STATUS_ACCEPTED = "Accepted"
 STATUS_DISCARDED = "Discarded"
 STATUS_FAILED = "Failed"
@@ -74,6 +78,12 @@ LATE_RESULT = "This reading finished after the extraction was {0}, so its result
 LATE_DRAFT = " The draft it had already created is {0}; delete it if it should not exist."
 
 KILL_SWITCH_MESSAGE = "The agent runtime is switched off."
+
+# What an extraction is for. A Draft reading ends in a new draft and the review
+# screen; a Fill Form reading ends in values handed to a form somebody has open,
+# and they save it themselves. Everything before that last step is shared.
+PURPOSE_DRAFT = "Draft"
+PURPOSE_FILL = "Fill Form"
 
 FORBIDDEN_USERS = ("Administrator", "Guest")
 
@@ -96,24 +106,45 @@ EXTERNAL_REFERENCE = "Only files already in this system can be read. Upload it o
 MAX_FILE_CANDIDATES = 20
 
 
-def queue_extraction(file_name: str, target_doctype: str, model_profile: str | None = None) -> str:
+def queue_extraction(
+	file_name: str,
+	target_doctype: str,
+	model_profile: str | None = None,
+	*,
+	purpose: str = PURPOSE_DRAFT,
+	target_name: str | None = None,
+	agent: str | None = None,
+) -> str:
 	"""Record one extraction request and queue it. Returns the extraction name.
 
 	Every refusal happens here, in the request, where the caller gets a sentence
 	back instead of a status field to go and read later. The job checks the same
 	things again as the user it runs as — a queued row is not a promise.
+
+	`purpose`, `target_name` and `agent` are for Fill from file. A fill of a saved
+	draft asks for write permission on that draft instead of create permission on
+	the doctype; nothing else about the gates changes.
 	"""
 	settings = frappe.get_cached_doc("Agent Settings")
 	if not runtime_enabled():
 		frappe.throw(_(KILL_SWITCH_MESSAGE))
+	if purpose not in (PURPOSE_DRAFT, PURPOSE_FILL):
+		frappe.throw(_("Unknown extraction purpose: {0}").format(purpose))
+	if target_name and purpose != PURPOSE_FILL:
+		frappe.throw(_("Only Fill from file reads into an existing document."))
 
 	file_doc = readable_file(file_name)
-	target_doctype = validate_target(target_doctype)
+	target_doctype = validate_target(target_doctype, target_name)
 	profile = pick_profile(model_profile)
 	check_daily_cap(settings)
 	# Reads the bytes and throws them away: the size, type and page caps should be
 	# a sentence to the person who asked, not a Failed row they find later.
-	read_source(file_doc, settings)
+	source = read_source(file_doc, settings)
+	if purpose == PURPOSE_FILL:
+		# The same for the profile. A person waiting at a form should hear that this
+		# model cannot read this kind of file now, not from a Failed row later. The
+		# job still refuses it either way: `call_model_extract` makes the same check.
+		check_profile_reads(profile, source["media_type"])
 
 	extraction = frappe.get_doc(
 		{
@@ -126,6 +157,9 @@ def queue_extraction(file_name: str, target_doctype: str, model_profile: str | N
 			# the chat that started it cannot find it again after a reload, and an
 			# auditor reading the row cannot get back to the conversation.
 			"agent_run": _asking_run(),
+			"purpose": purpose,
+			"target_name": target_name or None,
+			"agent": agent,
 		}
 	)
 	extraction.insert()
@@ -319,8 +353,13 @@ def require_provenance(file_doc: Any) -> None:
 		)
 
 
-def validate_target(target_doctype: str) -> str:
-	"""The doctype, if this user may create one. Checked before any model is called."""
+def validate_target(target_doctype: str, target_name: str | None = None) -> str:
+	"""The doctype, if this user may create one. Checked before any model is called.
+
+	With `target_name` the question is a different one: may this user change that
+	document, and is it still a draft. Fill from file on a saved draft writes into
+	it, so create permission would be the wrong check in both directions.
+	"""
 	target_doctype = (target_doctype or "").strip()
 	if not target_doctype or not frappe.db.exists("DocType", target_doctype):
 		frappe.throw(_("No such DocType: {0}").format(target_doctype))
@@ -331,6 +370,10 @@ def validate_target(target_doctype: str) -> str:
 	if cint(meta.issingle):
 		frappe.throw(_("{0} is a settings document, not something to extract into.").format(target_doctype))
 
+	if target_name:
+		_require_open_draft(target_doctype, target_name)
+		return target_doctype
+
 	if not frappe.has_permission(target_doctype, "create"):
 		raise frappe.PermissionError(
 			_("You are not allowed to create {0}, so there is nothing to extract into.").format(
@@ -338,6 +381,32 @@ def validate_target(target_doctype: str) -> str:
 			)
 		)
 	return target_doctype
+
+
+def _require_open_draft(target_doctype: str, target_name: str) -> None:
+	# Missing and not writable answer alike, so the check cannot be used to ask
+	# whether a record somebody else holds exists.
+	if not frappe.db.exists(target_doctype, target_name) or not frappe.has_permission(
+		target_doctype, "write", doc=target_name
+	):
+		raise frappe.PermissionError(
+			_("You are not allowed to change {0} {1}.").format(target_doctype, target_name)
+		)
+	doc = frappe.get_doc(target_doctype, target_name)
+	if cint(doc.docstatus) != 0:
+		frappe.throw(
+			_("{0} {1} is no longer a draft, so it cannot be filled from a file.").format(
+				target_doctype, target_name
+			)
+		)
+
+
+def check_profile_reads(profile: str, media_type: str) -> None:
+	"""Refuse now when the profile is not declared able to read this kind of file."""
+	try:
+		check_extract_capability(profile, media_type)
+	except ProviderError as exc:
+		frappe.throw(_text(exc))
 
 
 def pick_profile(model_profile: str | None) -> str:
@@ -449,7 +518,7 @@ def _run(doc: Any) -> None:
 
 	try:
 		file_doc = readable_file(doc.source_file)
-		target_doctype = validate_target(doc.target_doctype)
+		target_doctype = validate_target(doc.target_doctype, _fill_target(doc))
 		source = read_source(file_doc, settings, doc)
 		if not doc.model_profile:
 			record_fields(doc, {"model_profile": pick_profile(None)})
@@ -519,6 +588,19 @@ def _run(doc: Any) -> None:
 	if not runtime_enabled():
 		return _fail(doc, KILL_SWITCH_MESSAGE)
 
+	if doc.get("purpose") == PURPOSE_FILL:
+		# Fill from file stops here. Nothing is inserted: the values wait on this row
+		# for the form that asked, and the person saves under their own permission.
+		if not _claim(doc, (STATUS_RUNNING,), STATUS_READY):
+			return _drop_late_result(doc)
+		publish_extraction(
+			doc,
+			status=STATUS_READY,
+			sensitive_count=len(flags),
+			mismatch_count=sum(1 for flag in flags.values() if cint(flag.get("mismatch"))),
+		)
+		return
+
 	try:
 		created = _create_draft(target_doctype, draft_values)
 	except Exception as exc:
@@ -542,6 +624,13 @@ def _run(doc: Any) -> None:
 		sensitive_count=len(flags),
 		mismatch_count=sum(1 for flag in flags.values() if cint(flag.get("mismatch"))),
 	)
+
+
+def _fill_target(doc: Any) -> str | None:
+	"""The saved draft a fill was asked for, and only for a fill."""
+	if doc.get("purpose") != PURPOSE_FILL:
+		return None
+	return doc.get("target_name") or None
 
 
 def _ask(doc: Any, spec: dict, source: dict, file_doc: Any, instructions: str) -> dict:

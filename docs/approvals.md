@@ -1,8 +1,9 @@
 # Approvals
 
 An agent can build a document. It cannot commit one. When an agent decides
-something should be submitted or cancelled, or that a workflow should move on,
-it writes a proposal and stops, and a person decides.
+something should be submitted or cancelled, that a workflow should move on, or
+that fields on a live record should change, it writes a proposal and stops, and
+a person decides.
 
 ```mermaid
 flowchart TD
@@ -12,7 +13,7 @@ flowchart TD
     C -- "nobody, for 7 days" --> X["Expired"]
     C -- approves --> D{"Read permission · timestamp lock<br/>workflow · document state · kill switch"}
     D -- "a check fails" --> F["Failed<br/>reason on the row"]
-    D -- "all pass" --> G["Submit, cancel or workflow action<br/>runs as the approver"]
+    D -- "all pass" --> G["Submit, cancel, workflow action<br/>or field change runs as the approver"]
     G -- "the document refuses it" --> F
     G -- succeeds --> S["Applied"]
 ```
@@ -20,8 +21,8 @@ flowchart TD
 ## What a proposal is
 
 A proposal is an **Agent Action** row: a request, not an act. It names the
-document, what it wants — a submit, a cancel, or a workflow action — and the
-agent's reason. It also
+document, what it wants — a submit, a cancel, a workflow action, or a field
+change — and the agent's reason. It also
 stores the document's timestamp at the moment it was proposed — that snapshot
 does more work than it looks like, below.
 
@@ -56,7 +57,9 @@ is every enabled user with the Agent Approver role who also:
 
 - is none of the three people above, who may not decide it;
 - may read the document;
-- may submit it (or cancel it, for a cancel proposal).
+- may submit it (or cancel it, for a cancel proposal, or change it, for a field
+  change — at the permission level of every field the change touches, and with
+  the role the workflow state allows to edit, if a Workflow governs it).
 
 For a workflow action, the last line is different. The approver must hold a role
 the step is open to. They also need the right the step needs: submit when the
@@ -171,6 +174,114 @@ permission, the timestamp lock and the kill switch. Then two more:
 
 The agent never applies a workflow action itself. No tool can.
 
+## Field changes
+
+A ticket, a lead, a task or a job applicant has no submit step. It stays a
+draft for its whole life, so every save changes the record the business works
+from. On those records the agent proposes a **field change** with the
+`propose_update` tool: the fields, their new values, and its reason.
+
+The proposal stores two values for each field: the new one, and the one the
+field held when the agent looked. Both are hidden from the Agent Action form's
+fields and from reports. The approval screen shows them to an approver who may
+read the document and the field.
+
+The new values also appear where every agent call appears: in the agent's own
+tool call under **Agents → Activity → Tool Calls**, in the run's log, and on the
+chat card of the person who asked. Agent Auditors read those. The values the
+field held before are on the approval screen only.
+
+### What the agent may propose
+
+Plain fields only: text, numbers, dates, times, checkboxes, selects and links.
+Dates and times are local, with no time zone.
+The agent cannot propose a change to:
+
+- a table, rich text, an attachment or any other structured field;
+- a read-only, hidden or computed field, a field with a **Read Only Depends On**
+  condition, or any field of a read-only doctype;
+- a sensitive field — a Password, a masked field, or a field listed under
+  **Agent Settings → Sensitive Fields**;
+- the workflow state — the agent proposes a [workflow action](#workflow-actions)
+  instead;
+- a set-once field that is already set;
+- a system field, such as the owner or the name.
+
+One refused field refuses the whole proposal. The approver approves one exact
+set of changes, so nothing is dropped quietly.
+
+The agent needs **read** on the document and on each field's permission level,
+and its access rule must tick **Read** as well as **Propose**. It does not need
+write: writing is the approver's job. A link must name a record the agent's user
+may read. When the agent's rules do not let it read the linked doctype, the link
+is kept as written and checked at approval.
+
+A record with a submit step is refused. The agent changes a draft with
+`update_draft`. A submitted document is changed by cancelling and amending it.
+
+One proposal changes at most 20 fields. Two pending proposals may not change the
+same field on one record, and one record carries at most five pending field
+changes. Two proposals sent at the same moment can both land; the second one
+approved then fails, because its field moved.
+
+### What you see
+
+The proposal opens with a table: each field, its value **when proposed**, its
+value **now**, and the **proposed** value. A field you may not read shows its
+label and nothing else. The rest of the document follows under the table.
+
+The save is an ordinary one. If the change sets a link, the fields the document
+fills in from that link follow it, as they would in the form.
+
+If a field changed after the agent proposed, its row is red and **Approve** is
+not offered. Reject the proposal, or ask the agent to propose again.
+
+If you may not read one of the fields, **Approve** is not offered either. You
+would be approving a value you cannot see, so another approver has to decide.
+
+### What approving checks
+
+The change is saved as you, with an ordinary save. Every check in
+[Approving](#approving) runs first. Then:
+
+- **You need read and write** on the document, and at the permission level of
+  every field in the change. Frappe's own save would quietly keep the old value of a
+  field you may not write and save the rest. The app refuses the whole change
+  instead.
+- **Each field must still hold the value the agent saw.** A change to a field
+  the proposal does not touch does not block it. It is recorded as
+  **Edited Before Approval**.
+- **On a doctype with an active Workflow,** you need the role the current
+  state names under **Only Allow Edit For**. Frappe checks that role in the form
+  only, so the app checks it here.
+- **A link must name a record that exists and that you may read.**
+- **Every value is read back after the save.** If the document's own rules
+  changed a value while saving, the whole change is rolled back and the proposal
+  is **Failed**.
+
+If the document's own rules refuse the save, the row says so and nothing more.
+Their message can quote field values, and the row is readable by people who may
+not read those fields. You see the message when you click **Approve**.
+
+A rollback undoes what was written to the database. It does not undo work the
+document's code queued to run once the request finishes — a webhook, a
+notification, a background job. Those can still run, and carry the values that
+were rolled back. Submit and cancel proposals have the same limit.
+
+### Edits that skip approval
+
+`propose_update` adds a governed path. It does not close the direct one. An
+agent with **Draft Edit** on a doctype with no submit step can still change its
+records with `update_draft`, without approval: the records its user created, or
+any record with **Any Draft** ticked.
+
+To send every change on such a doctype through a person:
+
+1. Open the access rule for that doctype.
+2. Clear **Draft Edit**.
+3. Tick **Propose**.
+4. Save the rule.
+
 ## Rejecting
 
 Rejecting requires a note. That is deliberate — the note is the answer to the
@@ -193,7 +304,7 @@ free to propose the same thing again.
 | Status | Means |
 |---|---|
 | **Pending** | Waiting for a person |
-| **Applied** | Approved, and the submit, cancel or workflow action went through |
+| **Applied** | Approved, and the submit, cancel, workflow action or field change went through |
 | **Failed** | Approved, but the document refused it — reason on the row |
 | **Rejected** | A person said no, with a note |
 | **Expired** | Nobody decided in time |
