@@ -22,12 +22,14 @@ from frappe.utils import add_to_date, now_datetime
 from frappe.utils import set_request as build_request
 from frappe.utils.password import set_encrypted_password
 
+from frappe_agents.access.grants import GENERIC_TOOLS, MCP_HIDDEN_TOOLS, MCP_TOOLS
 from frappe_agents.mcp import server
 from frappe_agents.mcp.server import (
 	INVALID_PARAMS,
 	INVALID_REQUEST,
 	METHOD_NOT_FOUND,
 	PARSE_ERROR,
+	REFUSED,
 	SESSION_HEADER,
 	handle,
 )
@@ -320,6 +322,21 @@ class TestMCPEndpoint(AgentTestCase):
 
 		self.assertEqual(response.status_code, 404)
 
+	def test_a_session_ends_at_its_lifetime_however_busy(self):
+		session = self.open_session()
+		frappe.db.set_value(
+			"Agent Run",
+			session,
+			"started_at",
+			add_to_date(now_datetime(), hours=-(server.LIFETIME_HOURS + 1)),
+			update_modified=False,
+		)
+
+		response, _ = self.rpc("tools/list", session=session)
+
+		self.assertEqual(response.status_code, 404)
+		self.assertEqual(frappe.db.get_value("Agent Run", session, "status"), "Completed")
+
 	def test_a_session_belongs_to_its_agent(self):
 		make_mcp_agent(name=SECOND_MCP_AGENT)
 		session = self.open_session()
@@ -504,6 +521,30 @@ class TestMCPEndpoint(AgentTestCase):
 		calls = tool_calls_for(session)
 		self.assertEqual([(c.tool, c.outcome) for c in calls], [("extract_document", "Denied")])
 
+	def test_a_call_past_the_daily_token_budget_is_refused(self):
+		session = self.open_session()
+		self.agent.db_set("daily_token_budget", 10, update_modified=False)
+		frappe.clear_document_cache("Agent", MCP_AGENT)
+		spent = make_run(effective_user=DRAFT_USER, agent=MCP_AGENT)
+		spent.db_set("tokens_in", 100, update_modified=False)
+
+		_, body = self.call(session, "search_documents", {"doctype": ORDER_DT})
+
+		self.assertEqual(body["error"]["code"], REFUSED)
+		self.assertIn("budget", body["error"]["message"])
+		self.assertEqual(tool_calls_for(session), [])
+
+	def test_the_instructions_are_written_for_mcp_not_borrowed_from_chat(self):
+		"""Chat's prompt describes notes only chat adds. A client told to trust them would."""
+		from frappe_agents.runner import run
+
+		text = server.instructions(self.agent)
+
+		self.assertIn("<untrusted>", text)
+		self.assertIn("propose_", text)
+		self.assertNotIn(run.TOOL_DISCIPLINE, text)
+		self.assertNotIn(run.DRAFT_DISCIPLINE, text)
+
 	def test_an_agent_blueprint_cannot_be_drafted_over_mcp(self):
 		session = self.open_session()
 
@@ -608,6 +649,16 @@ class TestToolChokepointIdentity(AgentTestCase):
 		self.assertIn("acts for", payload["error"])
 		self.assertEqual([c.outcome for c in tool_calls_for(run.name)], ["Denied"])
 
+	def test_a_call_as_administrator_is_denied_and_audited(self):
+		run = make_run(effective_user="Administrator")
+
+		with as_user("Administrator"):
+			payload = execute_tool(run, "search_documents", {"doctype": ORDER_DT})
+
+		self.assertFalse(payload["ok"])
+		self.assertIn("Administrator", payload["error"])
+		self.assertEqual([c.outcome for c in tool_calls_for(run.name)], ["Denied"])
+
 	def test_an_mcp_run_never_goes_past_draft_even_for_a_write_agent(self):
 		"""Nothing that ships is Write class, so one tool is made Write for this test."""
 		make_mcp_agent(autonomy="Write")
@@ -649,3 +700,19 @@ class TestToolChokepointIdentity(AgentTestCase):
 		self.assertFalse(payload["ok"])
 		self.assertFalse(frappe.db.exists("ToDo", {"description": marker}))
 		self.assertEqual([c.outcome for c in tool_calls_for(run.name)], ["Error"])
+
+
+class TestMCPToolDecision(AgentTestCase):
+	"""Every generic tool is offered to MCP or withheld from it, on purpose."""
+
+	def test_every_generic_tool_has_an_mcp_decision(self):
+		undecided = GENERIC_TOOLS - MCP_TOOLS - MCP_HIDDEN_TOOLS
+		self.assertEqual(
+			undecided,
+			set(),
+			"Add each new tool to MCP_TOOLS or MCP_HIDDEN_TOOLS in access/grants.py, "
+			"and to the list in docs/mcp.md.",
+		)
+
+	def test_no_tool_is_both_offered_and_withheld(self):
+		self.assertEqual(MCP_TOOLS & MCP_HIDDEN_TOOLS, set())
