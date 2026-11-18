@@ -311,6 +311,10 @@ const STYLES = `
 	.agent-chat-action-target { font-size: var(--text-sm); color: var(--text-muted); }
 	.agent-chat-action-reason { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 	.agent-chat-action-link { display: inline-block; margin-top: 6px; font-size: var(--text-sm); }
+	.agent-chat-action.is-applied { border-inline-start-color: var(--green-500, var(--border-color)); }
+	.agent-chat-action.is-rejected, .agent-chat-action.is-failed { border-inline-start-color: var(--red-500, var(--border-color)); }
+	.agent-chat-action.is-expired { border-inline-start-color: var(--gray-500, var(--border-color)); }
+	.agent-chat-action-note { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 	.agent-chat-action.is-extraction { border-inline-start-color: var(--blue-500, var(--border-color)); }
 	.agent-chat-action.is-extraction.is-review { border-inline-start-color: var(--orange-500, var(--border-color)); }
 	.agent-chat-action.is-extraction.is-failed { border-inline-start-color: var(--red-500, var(--border-color)); }
@@ -325,6 +329,11 @@ function add_styles() {
 
 frappe_agents.RUN_UPDATE_EVENT = "frappe_agents:run_update";
 frappe_agents.EXTRACTION_UPDATE_EVENT = "frappe_agents:extraction_update";
+// Published by the approval engine when a proposal is applied, rejected, fails
+// or expires. It carries the proposal's name, status and run, and nothing about
+// the document: the card reads the rest through `get_action_state`.
+frappe_agents.ACTION_DECIDED_EVENT = "agent_action_decided";
+const ACTION_STATE_METHOD = "frappe_agents.api.get_action_state";
 
 // Tools whose result is a proposal waiting for a person. Their finished event is
 // what a reopened conversation redraws its approval cards from.
@@ -556,6 +565,49 @@ function doc_icon() {
 	);
 }
 
+/** The verb a proposal asks for, as a person reads it. */
+function action_verb(state) {
+	if (state.action_type === "Workflow Transition" && state.workflow_action) {
+		// The state goes with the verb: the same verb can be another step elsewhere.
+		return state.from_workflow_state
+			? __("{0} (from {1})", [__(state.workflow_action), __(state.from_workflow_state)])
+			: __(state.workflow_action);
+	}
+	return state.action_type === "Cancel" ? __("Cancel") : __("Submit");
+}
+
+/** Where a proposal stands, as the title of its card. */
+function action_title(state) {
+	const verb = action_verb(state);
+	switch (state.status) {
+		case "Applied":
+			return __("Approved and applied: {0}", [verb]);
+		case "Rejected":
+			return __("Rejected: {0}", [verb]);
+		case "Failed":
+			return __("Approved, but it did not go through: {0}", [verb]);
+		case "Expired":
+			return __("Expired with no decision: {0}", [verb]);
+		case "Pending":
+		case undefined:
+		case null:
+		case "":
+			return __("Waiting for an approver: {0}", [verb]);
+		default:
+			// A status this browser was not built to know. Say it as it is.
+			return __("{0}: {1}", [__(state.status), verb]);
+	}
+}
+
+/** The keys of `data` that carry a value, null included: null is the server redacting. */
+function defined_keys(data) {
+	const out = {};
+	Object.keys(data || {}).forEach((key) => {
+		if (data[key] !== undefined) out[key] = data[key];
+	});
+	return out;
+}
+
 /** Extraction status as a line a person can read. */
 function extraction_title(status) {
 	switch (status) {
@@ -635,7 +687,8 @@ frappe_agents.ChatUI = class ChatUI {
 		this.older_loading = false;
 		// One card per extraction, redrawn in place as its status moves.
 		this.extractions = {};
-		// One card per proposal, so replaying a log cannot draw a second one.
+		// One card per proposal, redrawn in place as its status moves: the card's
+		// node and everything known about the proposal so far.
 		this.actions = {};
 		// Tool lines drawn when the tool started, keyed by run and tool call id,
 		// plus the queue the finished event finds them by.
@@ -763,6 +816,17 @@ frappe_agents.ChatUI = class ChatUI {
 		// and usually after the run that asked for it has already finished.
 		this.extraction_update_handler = (data) => this.on_extraction_update(data);
 		on_realtime(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler, alive);
+
+		// A proposal is decided by somebody else, in another tab or another day,
+		// so its card hears about it on an event of its own.
+		this.action_decided_handler = (data) => this.on_action_decided(data);
+		on_realtime(frappe_agents.ACTION_DECIDED_EVENT, this.action_decided_handler, alive);
+		// The event is sent once. A tab that was asleep, or a socket that dropped,
+		// missed it, so the waiting cards ask again when the tab comes back.
+		this.visibility_handler = () => {
+			if (document.visibilityState === "visible") this.refresh_waiting_actions();
+		};
+		document.addEventListener("visibilitychange", this.visibility_handler);
 	}
 
 	destroy() {
@@ -775,6 +839,14 @@ frappe_agents.ChatUI = class ChatUI {
 		if (this.extraction_update_handler) {
 			frappe.realtime.off(frappe_agents.EXTRACTION_UPDATE_EVENT, this.extraction_update_handler);
 			this.extraction_update_handler = null;
+		}
+		if (this.action_decided_handler) {
+			frappe.realtime.off(frappe_agents.ACTION_DECIDED_EVENT, this.action_decided_handler);
+			this.action_decided_handler = null;
+		}
+		if (this.visibility_handler) {
+			document.removeEventListener("visibilitychange", this.visibility_handler);
+			this.visibility_handler = null;
 		}
 		if (this.pop_dismiss_handler) {
 			$(document).off("click", this.pop_dismiss_handler);
@@ -1618,6 +1690,22 @@ frappe_agents.ChatUI = class ChatUI {
 		}
 
 		this.replay_extractions(run);
+		this.replay_actions(run);
+	}
+
+	/**
+	 * The proposal cards for this run, in the state the proposals are in now.
+	 *
+	 * The log says a proposal was made. Whether it was applied, rejected, failed
+	 * or expired was decided later by somebody else, so the server says that, and
+	 * it says it as this user may see it: a proposal about a document they can no
+	 * longer read comes back with its status and nothing about the document.
+	 */
+	replay_actions(run) {
+		(run.actions || []).forEach((state) => {
+			if (!state || !state.action) return;
+			this.render_action_proposed(Object.assign({ run: run.name }, state));
+		});
 	}
 
 	/**
@@ -2004,6 +2092,9 @@ frappe_agents.ChatUI = class ChatUI {
 				break;
 			case "action_proposed":
 				this.render_action_proposed(data);
+				// The event says what the agent asked for. Whether this user could
+				// decide it is the server's answer, so the card asks once.
+				this.refresh_action(data.action);
 				break;
 			default:
 				this.render_status(data);
@@ -2322,48 +2413,124 @@ frappe_agents.ChatUI = class ChatUI {
 	/**
 	 * The agent has asked for a submit or a cancel. That is not a message and not
 	 * a tool result — it is a thing waiting for a person, so it gets a card with
-	 * the agent's stated reason and a way through to the approval form.
+	 * the agent's stated reason, and the card follows the proposal to its end.
+	 *
+	 * The same proposal arrives here several times: from the live event, from the
+	 * run's log, from the server's state of it, and again when it is decided. Each
+	 * one adds what it knows and the card is redrawn in place, so one proposal is
+	 * always one card.
 	 */
 	render_action_proposed(data) {
-		if (!data.action) return;
-		// The same proposal reaches here twice when a run that is still going is
-		// also replayed from its log. One proposal is one card.
-		if (this.actions[data.action]) return;
+		if (!data || !data.action) return;
+		const known = this.actions[data.action];
+		const state = Object.assign({}, known ? known.state : {}, defined_keys(data));
 		this.clear_empty();
 
-		let verb = data.action_type === "Cancel" ? __("Cancel") : __("Submit");
-		if (data.action_type === "Workflow Transition" && data.workflow_action) {
-			// The state goes with the verb: the same verb can be another step elsewhere.
-			verb = data.from_workflow_state
-				? __("{0} (from {1})", [__(data.workflow_action), __(data.from_workflow_state)])
-				: __(data.workflow_action);
+		const $card = this.make_action_card(state);
+		if (known && known.$card.parent().length) {
+			known.$card.replaceWith($card);
+		} else {
+			this.insert_before_pending(state.run, $card);
 		}
-		const $card = $("<div class='agent-chat-action'></div>");
-		$("<div class='agent-chat-action-title'></div>")
-			.text(__("Waiting for an approver: {0}", [verb]))
-			.appendTo($card);
+		this.actions[data.action] = { $card: $card, state: state };
+	}
 
-		if (data.target_doctype && data.target_name) {
+	/**
+	 * Everything on this card came from the model, the document or the approver,
+	 * so it is written with .text().
+	 */
+	make_action_card(state) {
+		const status = state.status || "Pending";
+		const $card = $("<div class='agent-chat-action'></div>").addClass(`is-${status.toLowerCase()}`);
+		$("<div class='agent-chat-action-title'></div>").text(action_title(state)).appendTo($card);
+
+		// The server's redaction wins over anything the log said: a person who can
+		// no longer read the document is not shown what it was, or what was said
+		// about it.
+		const visible = state.target_visible !== 0;
+		if (!visible) {
 			$("<div class='agent-chat-action-target'></div>")
-				.text(`${__(data.target_doctype)}: ${data.target_name}`)
+				.text(__("About a document you cannot read."))
+				.appendTo($card);
+		} else if (state.target_doctype && state.target_name) {
+			$("<div class='agent-chat-action-target'></div>")
+				.text(`${__(state.target_doctype)}: ${state.target_name}`)
 				.appendTo($card);
 		}
-		if (data.reason) {
-			$("<div class='agent-chat-action-reason'></div>").text(data.reason).appendTo($card);
+		if (visible && state.reason) {
+			$("<div class='agent-chat-action-reason'></div>").text(state.reason).appendTo($card);
+		}
+		if (visible && status === "Rejected" && state.decision_note) {
+			$("<div class='agent-chat-action-note'></div>")
+				.text(__("The approver said: {0}", [state.decision_note]))
+				.appendTo($card);
+		}
+		if (visible && status === "Failed" && state.failure) {
+			$("<div class='agent-chat-action-note'></div>")
+				.text(__("Why: {0}", [state.failure]))
+				.appendTo($card);
 		}
 
-		// A plain desk link: the router picks it up, so it works in the page and
-		// in the form panel without either of them knowing about routes.
-		$("<a class='agent-chat-action-link'></a>")
-			.attr("href", `/app/agent-action/${encodeURIComponent(data.action)}`)
-			.text(__("Review the proposal"))
-			// Mounted in the form panel the route changes behind the dialog, so
-			// step out of the way and let the router carry on.
-			.on("click", () => this.$body.closest(".modal").modal("hide"))
-			.appendTo($card);
+		// The approval form is for the people who can decide. The person who asked
+		// never can, so while it waits they get the title and no way in; once it is
+		// decided, the record is theirs to open like any other.
+		let label = null;
+		if (status === "Pending") {
+			if (cint(state.can_decide)) label = __("Review the proposal");
+		} else {
+			label = __("Open the proposal");
+		}
+		if (label) {
+			// A plain desk link: the router picks it up, so it works in the page and
+			// in the form panel without either of them knowing about routes.
+			$("<a class='agent-chat-action-link'></a>")
+				.attr("href", `/app/agent-action/${encodeURIComponent(state.action)}`)
+				.text(label)
+				// Mounted in the form panel the route changes behind the dialog, so
+				// step out of the way and let the router carry on.
+				.on("click", () => this.$body.closest(".modal").modal("hide"))
+				.appendTo($card);
+		}
+		return $card;
+	}
 
-		this.insert_before_pending(data.run, $card);
-		this.actions[data.action] = $card;
+	/**
+	 * A proposal was decided. The event is delivered to the person who asked, so
+	 * it is only ever about a card in one of their conversations — this one, if
+	 * the card is on screen.
+	 */
+	on_action_decided(data) {
+		if (!data || !data.action || !this.actions[data.action]) return;
+		// The status is in the event, so the title moves at once. The note and the
+		// reason are not, and are read through the permission check behind them.
+		const following = this.at_bottom();
+		this.render_action_proposed({ action: data.action, status: data.status });
+		if (following) this.scroll_to_bottom();
+		this.refresh_action(data.action);
+	}
+
+	/** Ask again about every card still waiting. Few, and only on a tab coming back. */
+	refresh_waiting_actions() {
+		Object.keys(this.actions).forEach((action) => {
+			const status = this.actions[action].state.status;
+			if (!status || status === "Pending") this.refresh_action(action);
+		});
+	}
+
+	/** Read one proposal's state from the server and redraw its card. */
+	refresh_action(action) {
+		if (!action) return;
+		frappe
+			.xcall(ACTION_STATE_METHOD, { action: action })
+			.then((state) => {
+				if (this.destroyed || !state || !this.actions[action]) return;
+				const following = this.at_bottom();
+				this.render_action_proposed(state);
+				if (following) this.scroll_to_bottom();
+			})
+			// The card already says what the event said. A proposal this user cannot
+			// read any more stays as it was drawn.
+			.catch(() => {});
 	}
 
 	/**
