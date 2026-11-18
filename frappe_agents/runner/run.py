@@ -55,6 +55,7 @@ from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
 	CAPABILITY_DRAFT,
+	FORBIDDEN_USERS,
 	KillSwitchActive,
 	execute_tool,
 	log_interrupted_call,
@@ -98,7 +99,6 @@ STREAM_EVENTS = {
 	ThinkingEndEvent: ("thinking", "end"),
 }
 
-FORBIDDEN_USERS = ("Administrator", "Guest")
 DEFAULT_MAX_STEPS = 10
 DEFAULT_MAX_DEPTH = 3
 HISTORY_LIMIT = 20

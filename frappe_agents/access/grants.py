@@ -118,6 +118,14 @@ FILE_TOOLS = frozenset({"read_document"})
 # a tool another app registered — keeps riding the selection table.
 GENERIC_TOOLS = frozenset(DOCTYPE_TOOL_VERBS) | REPORT_TOOLS | FILE_TOOLS | BUILDER_TOOLS
 
+# What an outside MCP client may be offered, out of what the matrix exposes.
+# Extraction is left out because it spends this site's model tokens for a client
+# that brings its own model; the builder tools because designing agents is the
+# configuration of the runtime, not work inside it; tools other apps registered
+# because nobody has said they are safe to hand to a model the site did not pick.
+MCP_HIDDEN_TOOLS = frozenset({"extract_document"}) | BUILDER_TOOLS
+MCP_TOOLS = GENERIC_TOOLS - MCP_HIDDEN_TOOLS
+
 
 def compiled_grants(agent: Any) -> dict:
 	"""Every rule attached to this agent, compiled into one mapping.

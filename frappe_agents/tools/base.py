@@ -29,6 +29,20 @@ OUTCOME_ERROR = "Error"
 
 RUN_FLAG = "agent_current_run"
 
+# Nobody a tool call may run as, whoever wrote the run row. The runner refuses
+# them before a run starts; `execute_tool` refuses them again, because it now has
+# a caller that is not the runner.
+FORBIDDEN_USERS = ("Administrator", "Guest")
+
+# The run surface an outside MCP client drives. A run on it is offered fewer
+# tools and never more than Draft, whatever the agent's autonomy says: the model
+# on the other end is one the site did not choose and cannot instruct.
+SURFACE_MCP = "MCP"
+MCP_CAPABILITIES = frozenset({CAPABILITY_READ, CAPABILITY_DRAFT})
+# Rolled back to when an MCP tool call does not succeed, so a handler that wrote
+# half of something and then failed leaves nothing behind but its audit row.
+MCP_SAVEPOINT = "frappe_agents_mcp_call"
+
 INTERRUPTED = "The tool call was interrupted before it finished."
 
 SETTINGS = "Agent Settings"
@@ -114,18 +128,26 @@ def _grants() -> Any:
 	return grants
 
 
-def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
+def execute_tool(run: Any, tool_name: str, args: dict | None = None, atomic: bool = False) -> dict:
 	"""Run one tool for one Agent Run and log it.
 
 	`run` is an Agent Run document or its name. Returns
 	`{"ok": bool, "result": any, "error": str | None}`. Handler failures come back
 	as data so the model can react; only the kill switch is raised.
+
+	`atomic` undoes whatever the handler wrote when the call does not succeed.
+	The audit row is written after the undo, so it survives it.
 	"""
 	args = args if isinstance(args, dict) else {}
 	started = time.monotonic()
 
 	run_doc = frappe.get_doc("Agent Run", run) if isinstance(run, str) else run
 	run_name = run_doc.name
+
+	refusal = _identity_refusal(run_doc)
+	if refusal:
+		_log_call(run_name, tool_name, args, OUTCOME_DENIED, _elapsed_ms(started), error=refusal)
+		return {"ok": False, "result": None, "error": refusal}
 
 	try:
 		_check_kill_switch()
@@ -148,6 +170,8 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 	# travels beside the call rather than inside the model's payload.
 	previous_run = frappe.flags.get(RUN_FLAG)
 	frappe.flags[RUN_FLAG] = run_doc
+	if atomic:
+		frappe.db.savepoint(MCP_SAVEPOINT)
 	try:
 		handler = _resolve_handler(run_doc, tool_name)
 		result = handler(args)
@@ -164,6 +188,9 @@ def execute_tool(run: Any, tool_name: str, args: dict | None = None) -> dict:
 		frappe.logger("frappe_agents").warning(f"tool {tool_name} failed on run {run_name}: {error}")
 	finally:
 		frappe.flags[RUN_FLAG] = previous_run
+
+	if atomic and outcome != OUTCOME_SUCCESS:
+		frappe.db.rollback(save_point=MCP_SAVEPOINT)
 
 	_log_call(
 		run_name,
@@ -309,6 +336,22 @@ def _accepts(method: Any, name: str) -> bool:
 		return False
 
 
+def _identity_refusal(run_doc: Any) -> str | None:
+	"""Why this call may not run as the current user, or None if it may.
+
+	A tool call runs with the permissions of whoever is logged in, and the run
+	says who that must be. The runner binds the two before it calls a tool; any
+	other caller has to have bound them too, and this is where that is checked
+	rather than trusted.
+	"""
+	user = frappe.session.user
+	if user in FORBIDDEN_USERS:
+		return f"Tool calls never run as {user}."
+	if user != run_doc.get("effective_user"):
+		return f"This run acts for {run_doc.get('effective_user') or 'nobody'}, not for {user}."
+	return None
+
+
 def _check_kill_switch() -> None:
 	if not runtime_enabled():
 		raise KillSwitchActive("The agent runtime is switched off.")
@@ -326,6 +369,10 @@ def _resolve_handler(run_doc: Any, tool_name: str):
 		if tool_name not in get_agent_tool_names(agent):
 			raise ToolDenied(f"Tool {tool_name} is not enabled for agent {agent.name}.")
 
+	on_mcp = run_doc.get("surface") == SURFACE_MCP
+	if on_mcp and tool_name not in _grants().MCP_TOOLS:
+		raise ToolDenied(f"Tool {tool_name} is not offered to MCP clients.")
+
 	try:
 		tool = frappe.get_cached_doc("Agent Tool", tool_name)
 	except frappe.DoesNotExistError:
@@ -336,6 +383,8 @@ def _resolve_handler(run_doc: Any, tool_name: str):
 
 	if agent is not None:
 		allowed = AUTONOMY_CAPABILITIES.get(agent.autonomy, {CAPABILITY_READ})
+		if on_mcp:
+			allowed = allowed & MCP_CAPABILITIES
 		if tool.capability not in allowed:
 			raise ToolDenied(
 				f"Tool {tool_name} needs {tool.capability} capability, agent autonomy is {agent.autonomy}."
