@@ -19,8 +19,13 @@
 			}
 			clearTimeout(frm.__fa_poll);
 			if (WAITING.includes(frm.doc.status)) {
+				const name = frm.doc.name;
 				frm.__fa_poll = setTimeout(() => {
-					if (frm.doc && cur_frm === frm) frm.reload_doc();
+					// Only while this result is still the page on screen.
+					const [view, doctype, docname] = frappe.get_route();
+					if (view === "Form" && doctype === frm.doctype && docname === name) {
+						frm.reload_doc();
+					}
 				}, POLL_MS);
 			}
 		},

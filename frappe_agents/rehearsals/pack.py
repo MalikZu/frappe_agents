@@ -15,22 +15,15 @@ Agent Rehearsal records for one agent, which the manager can then read, edit and
 run like any other.
 """
 
-import json
-import os
 from typing import Any
 
 import frappe
 from frappe import _
 
+from frappe_agents.rehearsals.injection_pack import CASES, PROMPTS
 from frappe_agents.rehearsals.runner import REHEARSAL, VECTOR_COMMENT, VECTOR_FILE, require_manager
 
-PACK_FILE = os.path.join(os.path.dirname(__file__), "injection_pack.json")
 NO_TARGET = "the document this note is about"
-
-
-def pack_cases() -> dict:
-	with open(PACK_FILE, encoding="utf-8") as handle:
-		return json.load(handle)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -52,12 +45,11 @@ def load_injection_pack(
 	if bait_vector not in (VECTOR_FILE, VECTOR_COMMENT):
 		frappe.throw(_("Bait Vector must be {0} or {1}.").format(_(VECTOR_FILE), _(VECTOR_COMMENT)))
 
-	pack = pack_cases()
 	target = f"{context_doctype} {context_name}" if context_doctype and context_name else NO_TARGET
-	prompt = pack["prompts"][bait_vector].format(target=target)
+	prompt = PROMPTS[bait_vector].format(target=target)
 
 	created, skipped = [], []
-	for case in pack["cases"]:
+	for case in CASES:
 		if _already_loaded(agent, case["key"], bait_vector, context_doctype, context_name):
 			skipped.append(case["key"])
 			continue
