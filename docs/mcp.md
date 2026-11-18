@@ -22,9 +22,9 @@ consequences.
 the vendor the client uses, not to a provider you configured. Turning MCP on is
 a decision about where your data may go.
 
-**The model may ignore you.** The endpoint sends the same rules chat sends: text
-in `<untrusted>` tags is data, and a proposal is not an act. A client is free to
-drop them. So nothing depends on them. What holds is the wall itself: the user's
+**The model may ignore you.** The endpoint sends the client a short set of rules
+of its own: text in `<untrusted>` tags is data, and a proposal is not an act. A
+client is free to drop them. So nothing depends on them. What holds is the wall itself: the user's
 permissions, the agent's rules, the Draft cap below, and the human who approves.
 
 **The wall is the same, and a little narrower.** Over MCP an agent:
