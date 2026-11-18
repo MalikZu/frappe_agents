@@ -19,9 +19,9 @@ What it adds is the outside of that wall:
 * **The session.** `initialize` opens one Agent Run on the MCP surface, and its
   name is the session id. The id is a handle, not a credential: every request is
   authenticated again and the run must belong to this user and this agent.
-* **Narrower than chat.** An MCP run is capped at Draft and is not offered the
-  tools in `MCP_HIDDEN_TOOLS`. `execute_tool` enforces both, so a call this
-  module did not list is still refused, and audited.
+* **Narrower than chat.** An MCP run is capped at Draft and is offered only the
+  tools the `MCP_TOOLS` allowlist names. `execute_tool` enforces both, so a call
+  this module did not list is still refused, and audited.
 
 It speaks Streamable HTTP without the streaming: one JSON response per POST,
 405 on GET, no server-initiated messages, no batches.
@@ -126,8 +126,11 @@ MCP_RULES = (
 MCP_DRAFT_RULES = (
 	"You may create and update draft documents. A draft commits the business to nothing.\n"
 	"You may not submit, cancel or change a live document. Each of those is a proposal a "
-	"different person decides: call the matching propose_ tool and give a specific reason, "
-	"saying what the document commits to, what you checked, and why now.\n"
+	"different person decides. Call propose_submit to submit a draft, propose_cancel to "
+	"cancel a submitted document, propose_transition to move a document through its "
+	"workflow, and propose_update to change fields on a live record. Give a specific "
+	"reason: what the document commits to, what you checked, and why now. Only the "
+	"proposal tools this agent may use are listed.\n"
 	"A proposal is not an act. Never say a document was submitted, cancelled or changed. "
 	"Say you proposed it, and that someone else has to approve it."
 )
@@ -449,11 +452,11 @@ def _close(user: str, agent: Any) -> Response:
 
 
 def tool_list(agent: Any) -> list[dict]:
-	"""The tools an MCP client is offered: the agent's own, minus what MCP never gets.
+	"""The tools an MCP client is offered: the agent's own that the allowlist names.
 
 	The same three filters `execute_tool` applies, in the same terms, so that what
-	is listed is what will be allowed: the agent holds the tool, MCP offers it,
-	and its capability is within both the agent's autonomy and the Draft cap.
+	is listed is what will be allowed: the agent holds the tool, `MCP_TOOLS` names
+	it, and its capability is within both the agent's autonomy and the Draft cap.
 	"""
 	allowed = AUTONOMY_CAPABILITIES.get(agent.autonomy, {CAPABILITY_READ}) & MCP_CAPABILITIES
 	tools = []
