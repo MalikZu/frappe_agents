@@ -112,6 +112,11 @@ ORDER_DT = "FA Test Order"
 ORDER_ITEM_DT = "FA Test Order Item"
 BUNDLE_DT = "FA Test Bundle"
 VENDOR_DT = "FA Test Vendor"
+# A live record: no submit step, so it sits at docstatus 0 for its whole life the
+# way a ticket or a lead does. Changes to it are proposed with propose_update.
+CASE_DT = "FA Test Case"
+CASE_STATUSES = ("Open", "Working", "Closed")
+CASE_PRIORITIES = ("Low", "Medium", "High")
 
 PROJECT_ALPHA = "FA Alpha"
 PROJECT_BETA = "FA Beta"
@@ -142,7 +147,7 @@ PASSWORD_FIELD = "portal_password"
 # by reading and a comparison catches every time.
 VENDOR_IBAN = "AE07 0331 2345 6789 0123 456"
 ALTERED_IBAN = "AE07 0331 9999 8888 7777 666"
-SENSITIVE_FIELDS = ((ORDER_DT, IBAN_FIELD), (ORDER_ITEM_DT, IBAN_FIELD))
+SENSITIVE_FIELDS = ((ORDER_DT, IBAN_FIELD), (ORDER_ITEM_DT, IBAN_FIELD), (CASE_DT, IBAN_FIELD))
 
 # Text that tries to talk to the model, and to close the wrapper it arrives in.
 INJECTION = (
@@ -213,6 +218,7 @@ DRAFT_TOOL_NAMES = (
 	"propose_submit",
 	"propose_cancel",
 	"propose_transition",
+	"propose_update",
 	"extract_document",
 )
 # Every agent fixture is granted every tool: what a Suggest agent may actually
@@ -1296,6 +1302,7 @@ def _ensure_doctypes() -> None:
 
 	_ensure_order_doctypes()
 	_ensure_vendor_doctype()
+	_ensure_case_doctype()
 
 
 def _ensure_vendor_doctype() -> None:
@@ -1516,6 +1523,71 @@ def _ensure_order_doctypes() -> None:
 	)
 
 
+def _ensure_case_doctype() -> None:
+	"""A live record with one field of every kind a proposal must refuse.
+
+	The approval cast's rights are spelled out to the zero, because frappe fills an
+	unstated right with 1. `DRAFTER_ROLE` reads permlevel 1 and may propose a change
+	to it; `SUBMITTER_ROLE` — the approver's — writes level 0 only, which is how the
+	tests show that an approver who may not write a field cannot change it either.
+	"""
+	none = {"create": 0, "delete": 0, "submit": 0, "cancel": 0, "amend": 0}
+	_make_doctype(
+		CASE_DT,
+		"subject",
+		fields=[
+			{"fieldname": "subject", "fieldtype": "Data", "label": "Subject", "reqd": 1, "unique": 1},
+			{"fieldname": "project", "fieldtype": "Link", "label": "Project", "options": PROJECT_DT},
+			{
+				"fieldname": "status",
+				"fieldtype": "Select",
+				"label": "Status",
+				"options": "\n".join(CASE_STATUSES),
+				"default": CASE_STATUSES[0],
+			},
+			{
+				"fieldname": "priority",
+				"fieldtype": "Select",
+				"label": "Priority",
+				"options": "\n".join(CASE_PRIORITIES),
+				"default": CASE_PRIORITIES[0],
+			},
+			{"fieldname": "hours", "fieldtype": "Float", "label": "Hours"},
+			{"fieldname": "due_date", "fieldtype": "Date", "label": "Due Date"},
+			{"fieldname": "urgent", "fieldtype": "Check", "label": "Urgent"},
+			{"fieldname": "notes", "fieldtype": "Small Text", "label": "Notes"},
+			{"fieldname": "reference", "fieldtype": "Data", "label": "Reference", "read_only": 1},
+			{"fieldname": "internal_rate", "fieldtype": "Data", "label": "Internal Rate", "permlevel": 1},
+			{"fieldname": PASSWORD_FIELD, "fieldtype": "Password", "label": "Portal Password"},
+			{"fieldname": IBAN_FIELD, "fieldtype": "Data", "label": "IBAN"},
+			{"fieldname": "details", "fieldtype": "Text Editor", "label": "Details"},
+			{"fieldname": "lines", "fieldtype": "Table", "label": "Lines", "options": ORDER_ITEM_DT},
+		],
+		permissions=[
+			{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1},
+			{"role": "System Manager", "read": 1, "write": 1, "permlevel": 1},
+			{"role": READER_ROLE, "read": 1, "write": 0, **none},
+			{"role": DRAFTER_ROLE, "read": 1, "write": 1, "create": 1, "delete": 0},
+			{"role": DRAFTER_ROLE, "read": 1, "write": 0, "permlevel": 1},
+			{"role": SUBMITTER_ROLE, "read": 1, "write": 1, **none},
+		],
+	)
+
+
+def make_case(subject: str | None = None, **values: Any) -> Any:
+	"""Insert one FA Test Case on the Alpha project, as Administrator."""
+	case = frappe.get_doc(
+		{
+			"doctype": CASE_DT,
+			"subject": subject or f"FA Case {frappe.generate_hash(length=8)}",
+			"project": PROJECT_ALPHA,
+			**values,
+		}
+	)
+	case.insert(ignore_permissions=True)
+	return case
+
+
 def _ensure_read_only_roles() -> None:
 	"""Hold the reader roles to reading, on every doctype that grants them anything.
 
@@ -1525,7 +1597,7 @@ def _ensure_read_only_roles() -> None:
 	that prove an agent cannot write what its user may not write would pass on a
 	user who may, which is the same as not testing it.
 	"""
-	for doctype in (PROJECT_DT, TICKET_DT, VAULT_DT, BUNDLE_DT, ORDER_DT):
+	for doctype in (PROJECT_DT, TICKET_DT, VAULT_DT, BUNDLE_DT, ORDER_DT, CASE_DT):
 		doc = frappe.get_doc("DocType", doctype)
 		granted = [
 			perm
