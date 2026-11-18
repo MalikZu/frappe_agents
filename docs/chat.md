@@ -105,6 +105,34 @@ conversation and back picks the run up where it was and carries on live.
 Reloading the page in the middle of a run loses that much; the answer lands on
 the run either way, and the conversation shows it all once the run ends.
 
+## After a proposal is decided
+
+A proposal card follows the proposal to its end. Its title says where it stands:
+
+| Title | Means |
+|---|---|
+| **Waiting for an approver** | Nobody has decided yet. |
+| **Approved and applied** | An approver approved it, and the submit or cancel went through. |
+| **Rejected** | An approver said no. The card shows what they wrote. |
+| **Approved, but it did not go through** | The document refused the submit or cancel. The card shows why. |
+| **Expired with no decision** | Nobody decided in time. |
+
+The card changes as soon as the decision is made, while the chat is open. A
+reloaded chat shows the state the proposal is in now.
+
+**Review the proposal** shows only to a person who could decide the proposal.
+You cannot decide a proposal you asked for, so on your own cards it does not
+show. Once the proposal is decided, **Open the proposal** opens the record.
+
+If you can no longer read the document, the card keeps its title and says only
+that it is about a document you cannot read.
+
+The agent is told too. Its next turn starts with a short note, from the system
+and not from you, that says how each decided proposal ended. The approver's note
+is marked as text a person wrote, so the agent reads it and does not obey it.
+The agent does not propose a rejected action again unless you ask it to. See
+[Approvals](approvals.md#what-the-agent-learns).
+
 ## How much of the conversation the agent reads
 
 Every model has a context limit, and a long conversation walks past it. So the

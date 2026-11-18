@@ -176,6 +176,9 @@ The agent never applies a workflow action itself. No tool can.
 Rejecting requires a note. That is deliberate — the note is the answer to the
 proposal, and the agent's reason deserves one back.
 
+The agent learns of the rejection and the note on its next turn. It does not
+propose the same action on the same document again unless the user asks it to.
+
 Rejection works even when the kill switch is off. Emptying the queue is exactly
 what a stopped site should still be able to do.
 
@@ -187,6 +190,46 @@ window is refused even if the sweep has not run yet.
 
 Expiry is not a decision. Nobody is recorded as deciding it, and the agent is
 free to propose the same thing again.
+
+## What the agent learns
+
+A proposal is decided after the run that made it has ended. So the next run in
+the same conversation starts with a note: each decided proposal, and how it
+ended. It is written in the user's message, ahead of what the user typed, and it
+says it comes from the system.
+
+- **Applied** says so.
+- **Rejected** carries the approver's note.
+- **Failed** carries the reason the document gave.
+- **Expired** says nobody decided it.
+
+The approver's note and the failure reason reach the agent inside the
+`<untrusted>` wrapper. A note that says "ignore your rules" is something the
+agent reads about, never an instruction it follows.
+
+Each decision is told once. The note is stored on the run, under **Proposal
+Updates**, and the history sends it again exactly as it was first sent. If the
+user can no longer read the document, the note does not name it and leaves the
+approver's note out.
+
+A long conversation can trim that turn out of what the agent reads. The
+proposal tools do not forget: they refuse a proposal that was rejected on the
+same version of the document. The agent can still propose it when the document
+has changed, or when the user asks again. In that case the reason says so, and
+you see it before you decide.
+
+## What the person who asked sees
+
+The chat card follows the proposal: waiting, applied, rejected with your note,
+failed with the reason, or expired. It updates as soon as you decide. See
+[Agent Chat](chat.md#after-a-proposal-is-decided).
+
+The card offers **Review the proposal** only to a person who could decide it.
+The person who asked never can, so they do not see it.
+
+The card hides the document, the reason and your note from a person who can no
+longer read the document. That is a courtesy, not a wall: the person who asked
+may still open their own Agent Action record, which shows those fields.
 
 ## The states
 
