@@ -315,6 +315,13 @@ def _execute(run: Any) -> None:
 	provider = ModelProfileProvider(profile)
 	cancellation = RunCancellation()
 	events = RunEvents(run, cancellation)
+	if run.get("trigger"):
+		# A document wrote this run's input, not a person. Its stored copies keep
+		# back what the document's sensitive fields hold, wherever it appears.
+		from frappe_agents.tools.base import HELD_BACK_FLAG
+
+		events.redactor.input_from_document = True
+		events.redactor.hold_back(run.flags.get(HELD_BACK_FLAG) or set())
 	# A triggered run has no tools, so its first answer is its last.
 	max_turns = 1 if run.get("trigger") else cint(agent.max_steps) or DEFAULT_MAX_STEPS
 
@@ -360,7 +367,7 @@ def _execute(run: Any) -> None:
 
 		problem = finish_trigger_run(run, events.final_text)
 		if problem:
-			_update(run, {"output_message": events.final_text})
+			_update(run, {"output_message": events.redactor.scrub(events.final_text)})
 			return _fail(run, problem)
 
 	_update(

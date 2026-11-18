@@ -30,8 +30,10 @@ from frappe.utils import cint, cstr, escape_html, now_datetime, strip_html
 from frappe_agents.access.grants import VERB_READ, VERB_UPDATE_DRAFT
 from frappe_agents.context.untrusted import unwrap, wrap
 from frappe_agents.extraction.gate import sensitive_fieldnames
+from frappe_agents.redaction import doctype_sensitive_keys, redact, scrub
 from frappe_agents.runner.run import _fail, _update, publish_event
 from frappe_agents.tools.base import (
+	HELD_BACK_FLAG,
 	RUN_FLAG,
 	ToolDenied,
 	execute_tool,
@@ -97,6 +99,7 @@ def prepare_trigger_run(run: Any, agent: Any) -> bool:
 		trigger = _trigger(run)
 		with _as_run(run):
 			doc = _check_writable(run, trigger, agent)
+			run.flags[HELD_BACK_FLAG] = held_back_values(doc)
 			if trigger.event == EVENT_ATTACHMENT:
 				read = _read_file(run)
 				if trigger.writes == WRITES_FILE_TEXT:
@@ -106,12 +109,38 @@ def prepare_trigger_run(run: Any, agent: Any) -> bool:
 			else:
 				message = _field_message(run, trigger, doc)
 	except TriggerRefused as exc:
-		_fail(run, str(exc))
+		_fail(run, stored(run, str(exc)))
 		return True
 
-	_update(run, {"input_message": message})
+	# The model is handed the text as it is; the person whose action fired the run
+	# already holds it. The row keeps what an auditor may read.
+	_update(run, {"input_message": stored(run, message)})
 	run.input_message = message
 	return False
+
+
+def held_back_values(doc: Any) -> set[str]:
+	"""What this document's sensitive, masked and password fields hold, as text.
+
+	The same fields the audit redaction holds back from every row. A triggered
+	run's text came from this document or a file attached to it, so a scan of an
+	invoice can carry the very value the document's IBAN field holds. Every stored
+	copy of the run is scrubbed of these values, whatever key they arrive under.
+	"""
+	keys = doctype_sensitive_keys(doc.doctype)
+	if not keys:
+		return set()
+	rows = [doc]
+	for df in doc.meta.get_table_fields():
+		rows += list(doc.get(df.fieldname) or [])
+	payload = [{key: row.get(key) for key in keys if row.get(key) not in (None, "")} for row in rows]
+	_, values = redact(payload, keys)
+	return values
+
+
+def stored(run: Any, text: str | None) -> str | None:
+	"""Text as a stored copy of this run may keep it."""
+	return scrub(text, run.flags.get(HELD_BACK_FLAG) or set())
 
 
 def _trigger(run: Any) -> Any:
@@ -256,7 +285,7 @@ def _copy_file_text(run: Any, trigger: Any, read: dict) -> None:
 		else _("The file had no text to copy.")
 	)
 	if note:
-		output = f"{output} {note}"
+		output = stored(run, f"{output} {note}")
 	_update(
 		run, {"status": "Completed", "output_message": output, "ended_at": now_datetime(), "steps_taken": 0}
 	)
@@ -325,7 +354,7 @@ def finish_trigger_run(run: Any, answer: str | None) -> str | None:
 		trigger = _trigger(run)
 		write_target(run, trigger, answer)
 	except TriggerRefused as exc:
-		return str(exc)
+		return stored(run, str(exc))
 	return None
 
 

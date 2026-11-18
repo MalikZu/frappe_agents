@@ -340,6 +340,13 @@ class EventRedactor:
 		# learned, so nothing the model writes after it can be scrubbed of them:
 		# that prose is withheld too. Fail closed.
 		self.blind = False
+		# A run whose input a document wrote, not a person: a triggered run. Its
+		# user message is the document's text, so it is scrubbed like prose.
+		self.input_from_document = False
+
+	def hold_back(self, values: set[str]) -> None:
+		"""Values to keep out of everything stored from here on, whatever key they came under."""
+		self.secrets |= set(values) - {REDACTED}
 
 	def withhold(self, payload: dict) -> dict:
 		"""An event that could not be redacted, stored without its body."""
@@ -454,6 +461,13 @@ class EventRedactor:
 		role = message.get("role")
 		if role == "toolResult":
 			return self._result(message.get("toolCallId"), message)
+		if role == "user" and self.input_from_document:
+			content = message.get("content")
+			if isinstance(content, str):
+				message["content"] = self.scrub(content)
+			else:
+				self._scrub_blocks(content, self.secrets, self.blind)
+			return message
 		if role != "assistant":
 			# The person's own words are theirs and are stored as they typed them.
 			return message
