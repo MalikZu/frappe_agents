@@ -136,9 +136,16 @@ What it keeps:
     `02/01/2025`. A date with a time stays whole: `2025-01-02T10:00:00`,
     `2025-01-02T10:00:00Z`, `2025-01-02T10:00:00+04:00`.
   - A date range is two or more dates joined by a slash: `2025-01-02/2025-02-01`.
-  - A reference is one or more word parts, then two or more number parts, then
-    at most one short word part: `ORD-2025-0001`, `PO2-2025-0001`,
-    `ORD-2025-0001-A`. A word part starts with a letter and can hold digits.
+  - A reference is one or more word parts, then number parts that read as a
+    naming series, then at most one single letter: `ORD-2025-0001`,
+    `SINV-25-00012`, `PO2-2025-0001`, `ORD-2025-0001-A`. A word part starts
+    with a letter and can hold digits. The number parts start with a year of 2
+    or 4 digits and hold a counter with a leading zero, 3 digits or more.
+
+  The number must lie wholly inside the date or reference: `2025-01-02T98,765`
+  loses 98,765. Anything else around a number does not keep it. A currency, a unit or a label
+  next to it is no protection: `AED-98765-99000`, `AED-98765-99000-pm`,
+  `98765/month/employee`, `Q1-98765-99000` and `net-pay-98765` all lose it.
 - Shorter values, numbers written in words, and number formats other than the
   ones above, such as `98 765` or `98.765,00`.
 
