@@ -56,6 +56,8 @@ MAX_FIELDS = 20
 FORBIDDEN_FIELDS = frozenset(default_fields) | {"naming_series", "amended_from", "workflow_state"}
 
 INTEGER = re.compile(r"^[+-]?\d+$")
+# Named so the formatter cannot rewrite the except clause into syntax version-15 cannot parse.
+NOT_A_NUMBER = (TypeError, ValueError)
 
 
 class UnusableValue(ValueError):
@@ -104,7 +106,9 @@ def field_refusal(meta: Any, fieldname: Any, doc: Any) -> str | None:
 	if fieldname in sensitive_fields(meta):
 		return f"{fieldname} is marked sensitive. A person changes it by hand."
 	if fieldname == workflow_state_field(meta.name):
-		return f"{fieldname} is the workflow state. Propose a workflow action with propose_transition instead."
+		return (
+			f"{fieldname} is the workflow state. Propose a workflow action with propose_transition instead."
+		)
 	if cint(df.set_only_once) and not is_blank(doc.get(fieldname)):
 		return f"{fieldname} can only be set once, and it is already set."
 	return None
@@ -211,7 +215,7 @@ def _number(value: Any) -> float:
 		raise UnusableValue("expected a number")
 	try:
 		number = float(value.strip() if isinstance(value, str) else value)
-	except (TypeError, ValueError):
+	except NOT_A_NUMBER:
 		raise UnusableValue("expected a number")
 	if not math.isfinite(number):
 		raise UnusableValue("expected a finite number")
