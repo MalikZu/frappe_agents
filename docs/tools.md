@@ -79,8 +79,10 @@ accepts it again in two cases:
 - the document changed since the rejection;
 - the agent sets `user_asked_again`, because the user asked.
 
-In both cases the reason starts by saying the proposal was rejected before, so
-the approver knows.
+In both cases the reason starts by saying the proposal was rejected before, and
+names the earlier proposal, so the approver can open it. When the agent set
+`user_asked_again`, the reason says the agent reports that the user asked. The
+system cannot check that claim, so the reason does not state it as fact.
 
 A pending proposal past its expiry window does not block a new one.
 

@@ -210,13 +210,17 @@ agent reads about, never an instruction it follows.
 Each decision is told once. The note is stored on the run, under **Proposal
 Updates**, and the history sends it again exactly as it was first sent. If the
 user can no longer read the document, the note does not name it and leaves the
-approver's note out.
+approver's note out. Decisions made before the upgrade that added this
+note count as told already, so the first turn after the upgrade does not list
+them.
 
 A long conversation can trim that turn out of what the agent reads. The
 proposal tools do not forget: they refuse a proposal that was rejected on the
 same version of the document. The agent can still propose it when the document
-has changed, or when the user asks again. Either way the reason starts by saying
-it was rejected before, so you can check that the change answers your note.
+has changed, or when the agent says the user asked again. Either way the reason
+starts by saying it was rejected before and names the earlier proposal, so you
+can check that the change answers your note. "The agent says the user asked" is
+the agent's claim. Read the conversation if it matters.
 
 ## What the person who asked sees
 

@@ -199,5 +199,9 @@ much use when you are deciding whether to trust something:
 - **A permission you granted is a permission the agent can use.** The ceiling is
   the running user's own rights. If those are broad, narrowing the agent's
   access rules is the only thing keeping the agent narrow.
+- **Proposal updates are stored as written.** A run's **Proposal Updates** field
+  holds what the agent was told about decided proposals: the approver's note and
+  the reason an apply failed. A failure reason can quote document fields. The
+  field is not redacted, so a person who can read the run reads it whole.
 - **Cost is bounded but not zero.** `Max Steps` and the daily token budget stop
   a runaway loop; they do not make a misconfigured agent free.

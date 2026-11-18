@@ -67,10 +67,12 @@ answer, and it is never what the conversation is stored with.
 ## When the agent asks for a submit or a cancel
 
 An agent cannot submit or cancel a document. It asks, and the chat shows a card:
-**Waiting for an approver**, the document, the agent's reason, and a link to the
-proposal. Someone else decides it — not you, if you asked, and not the person who
-owns the agent. The approvers who could decide it are notified, and you are
-notified when it is decided or expires. See [Approvals](approvals.md).
+**Waiting for an approver**, the document, and the agent's reason. Someone else
+decides it — not you, if you asked, and not the person who owns the agent. The
+approvers who could decide it are notified, and you are notified when it is
+decided or expires. The card changes when that happens. See
+[After a proposal is decided](#after-a-proposal-is-decided) and
+[Approvals](approvals.md).
 
 ## When something does not go through
 
