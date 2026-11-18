@@ -20,6 +20,11 @@
 	const RECORD_METHOD = "frappe_agents.api.record_filled_document";
 	const DISCARD_METHOD = "frappe_agents.api.discard_extraction";
 	const UPDATE_EVENT = "frappe_agents:extraction_update";
+	// Carried on the filled document until it is saved, so the save itself records
+	// the reading on the server (`fill.stamp_on_save`). Kept on the document, not on
+	// the form object, because the form object is shared by every record of the
+	// doctype and is reset when the person looks at another one.
+	const TOKEN_KEY = "__fa_fill";
 
 	const STYLE_ID = "frappe-agents-fill-styles";
 	const POLL_MS = 4000;
@@ -93,8 +98,13 @@
 	}
 
 	/** Blank, or still the value the doctype would have put there by itself. */
-	function is_untouched(df, doc, value) {
+	/**
+	 * Blank, or, on a form never saved, still what the doctype would have put there
+	 * by itself. On a saved draft every stored value is the person's.
+	 */
+	function is_untouched(df, doc, value, is_new) {
 		if (is_blank(value)) return true;
+		if (!is_new) return false;
 		if (["Int", "Float", "Currency", "Percent", "Check"].includes(df.fieldtype) && !flt(value))
 			return true;
 		try {
@@ -327,6 +337,9 @@
 		const values = data.values || {};
 		const notes = data.notes || {};
 		const report = { filled: [], conflicts: [], tables: [], skipped: [] };
+		// Before the first value: from here on, whatever this form saves came in part
+		// from this reading, and the save has to say so.
+		frm.doc[TOKEN_KEY] = state.extraction;
 
 		const scalars = Object.keys(values).filter((key) => !Array.isArray(values[key]));
 		const tables = Object.keys(values).filter((key) => Array.isArray(values[key]));
@@ -372,7 +385,7 @@
 			return;
 		}
 		const current = frm.doc[fieldname];
-		if (!is_untouched(df, frm.doc, current)) {
+		if (!is_untouched(df, frm.doc, current, frm.is_new())) {
 			if (!same(current, value)) report.conflicts.push({ fieldname, value, current });
 			return;
 		}
@@ -392,7 +405,8 @@
 		const value_fields = (frappe.get_meta(child_doctype).fields || []).filter(
 			(cdf) => !frappe.model.no_value_type.includes(cdf.fieldtype),
 		);
-		const blank = (row) => value_fields.every((cdf) => is_untouched(cdf, row, row[cdf.fieldname]));
+		const blank = (row) =>
+			value_fields.every((cdf) => is_untouched(cdf, row, row[cdf.fieldname], true));
 		if (frm.is_new() && existing.length && existing.every(blank)) {
 			frm.clear_table(table);
 		}
@@ -711,11 +725,17 @@
 			// there, unsaved; reloading the form throws them away.
 			frappe.call({ method: DISCARD_METHOD, args: { name: state.extraction } }).catch(() => {});
 		}
+		if (frm.doc && state && frm.doc[TOKEN_KEY] === state.extraction) delete frm.doc[TOKEN_KEY];
 		teardown(frm);
 	}
 
 	// -- after the save -----------------------------------------------------------
 
+	/**
+	 * The save has already recorded the reading on the server. This asks how it
+	 * went, for the message, and records it itself if the save could not. Losing
+	 * this call loses the message, never the record.
+	 */
 	function record(frm) {
 		const state = state_of(frm);
 		if (!state || state.phase !== "applied" || frm.is_new()) return;
@@ -768,6 +788,8 @@
 			try {
 				const state = state_of(frm);
 				if (state && same_document(state, frm)) state.docname = frm.docname;
+				// The save carried the token and recorded the reading; it has done its job.
+				if (frm.doc) delete frm.doc[TOKEN_KEY];
 				record(frm);
 			} catch (error) {
 				console.error("frappe_agents: could not record the filled document", error);

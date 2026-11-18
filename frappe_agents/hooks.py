@@ -54,6 +54,18 @@ agent_tools = [
 	"frappe_agents.tools.builder_tools",
 ]
 
+# Document events
+# ---------------
+
+# Fill from file: a form filled from a reading carries the reading's name until it
+# is saved, and the save itself records the reading against the document. Every
+# other save pays one attribute lookup.
+doc_events = {
+	"*": {
+		"on_update": "frappe_agents.extraction.fill.stamp_on_save",
+	},
+}
+
 # Scheduled jobs
 # --------------
 

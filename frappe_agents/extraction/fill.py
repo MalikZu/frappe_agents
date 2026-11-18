@@ -71,7 +71,11 @@ SAVED_EMPTY = "empty"
 SAVED_PRINTED = "printed"
 SAVED_TYPED = "typed"
 
-STALE_NOTE = "Not filled into a form within {0} hours, so it was closed."
+STALE_NOTE = "Never tied to a saved document within {0} hours, so it was closed."
+
+# The key a filled form carries on its document until it is saved. It names the
+# reading, so the save itself can record it: see `stamp_on_save`.
+TOKEN_KEY = "__fa_fill"
 
 
 def extract_doctypes(agent: Any) -> list[str]:
@@ -164,7 +168,7 @@ def fill_values(doc: Any) -> dict:
 			"doctype": doctype,
 			"target_name": doc.get("target_name") or None,
 			"values": values,
-			"sensitive": _sensitive_view(flags),
+			"sensitive": _sensitive_view(doctype, flags),
 			"candidates": candidates,
 			"notes": _parsed(doc.field_confidence),
 			"duplicates": _readable_duplicates(doctype, _parsed(doc.duplicate_flags), doc.get("target_name")),
@@ -175,7 +179,7 @@ def fill_values(doc: Any) -> dict:
 	return answer
 
 
-def record_filled(doc: Any, docname: str) -> dict:
+def record_filled(doc: Any, docname: str, saved: Any = None) -> dict:
 	"""Tie a Ready reading to the document the person saved from it.
 
 	The saved document is read back here, as the person, and every sensitive flag
@@ -185,11 +189,15 @@ def record_filled(doc: Any, docname: str) -> dict:
 	# Locked: a sweep or a discard landing at the same moment waits, then finds the
 	# row decided, or this request does.
 	status = stored_status(doc)
+	docname = (docname or "").strip()
+	if status == STATUS_ACCEPTED and docname and doc.get("created_doc") == docname:
+		# The save already recorded it (`stamp_on_save`); the form's own call after
+		# the save is then only asking how it went.
+		return _recorded(doc, docname)
 	if status != STATUS_READY:
 		frappe.throw(_("This reading is {0}, so it cannot be tied to a document.").format(status))
 
 	doctype = doc.target_doctype
-	docname = (docname or "").strip()
 	target = doc.get("target_name")
 	if target and docname != target:
 		frappe.throw(_("This reading was for {0} {1}.").format(doctype, target))
@@ -202,7 +210,7 @@ def record_filled(doc: Any, docname: str) -> dict:
 	):
 		raise frappe.PermissionError(_("You are not allowed to change {0} {1}.").format(doctype, docname))
 
-	saved = frappe.get_doc(doctype, docname)
+	saved = saved if saved is not None else frappe.get_doc(doctype, docname)
 	if not target and (
 		saved.owner != frappe.session.user or get_datetime(saved.creation) < get_datetime(doc.creation)
 	):
@@ -221,14 +229,52 @@ def record_filled(doc: Any, docname: str) -> dict:
 		},
 	)
 	doc.status = STATUS_ACCEPTED
-	attached = _attach_source(doc, doctype, docname)
+	doc.created_doc = docname
+	doc.sensitive_flags = frappe.as_json(flags)
+	_attach_source(doc, doctype, docname)
 	publish_extraction(doc, status=STATUS_ACCEPTED, created_doc=docname)
+	return _recorded(doc, docname)
 
+
+def stamp_on_save(doc: Any, method: str | None = None) -> None:
+	"""`on_update` for every doctype: record a fill when the form saved from it.
+
+	The form puts the reading's name on its document as `__fa_fill` when it fills
+	it, and the key travels with the save. So the save itself records the reading,
+	whatever the browser does next: a closed tab, a failed request, or a person
+	who looked at another record and came back. Every other save pays one
+	attribute lookup and nothing else.
+
+	It never breaks the save it rides on. A token that names somebody else's
+	reading, a reading already decided, or a different document is ignored; any
+	failure is logged and rolled back to before this hook.
+	"""
+	reading = doc.get(TOKEN_KEY)
+	if not reading or not isinstance(reading, str):
+		return
+	savepoint = "fa_fill_stamp"
+	frappe.db.savepoint(savepoint)
+	try:
+		row = fill_row(reading)
+		if row.target_doctype == doc.doctype and stored_status(row) == STATUS_READY:
+			record_filled(row, doc.name, saved=doc)
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		frappe.logger("frappe_agents").warning(
+			f"could not record fill {reading} against {doc.doctype} {doc.name}", exc_info=True
+		)
+	finally:
+		doc.__dict__.pop(TOKEN_KEY, None)
+
+
+def _recorded(doc: Any, docname: str) -> dict:
+	"""What a recorded fill reports: the document, the attachment, each sensitive field."""
+	flags = _parsed(doc.sensitive_flags)
 	return {
 		"extraction": doc.name,
 		"status": STATUS_ACCEPTED,
 		"created_doc": docname,
-		"source_attached": attached,
+		"source_attached": _source_attached(doc, doc.target_doctype, docname),
 		"sensitive": {key: flag.get("saved") for key, flag in flags.items() if isinstance(flag, dict)},
 	}
 
@@ -335,43 +381,59 @@ def _readable_candidates(candidates: dict) -> dict:
 	return clean
 
 
-def _sensitive_view(flags: dict) -> dict:
+def _sensitive_view(doctype: str, flags: dict) -> dict:
 	"""What the form shows beside each sensitive field. Never a value to set.
 
 	The printed value is returned because the owner can already read it on their
-	own extraction row; withholding it here would protect nothing. The master's
-	name and value follow only while the user may still read that record.
+	own extraction row; withholding it here would protect nothing. The comparison
+	with the master is made again, now, as this user: the master's value may have
+	changed since the reading, and so may whether they may see it (read access to
+	the record, its permlevel, its masking). A master out of reach keeps any
+	mismatch found at reading time and loses everything else.
 	"""
 	view: dict[str, dict] = {}
 	for key, flag in flags.items():
 		if not isinstance(flag, dict):
 			continue
-		master_doctype = flag.get("master_doctype")
-		master_name = flag.get("master_name")
-		readable = bool(master_doctype and master_name and gate.readable(master_doctype, master_name))
-		visible = (
-			readable
-			and cint(flag.get("master_visible"))
-			and not gate.is_masked(master_doctype, SENSITIVE_ROW.sub(r"\g<field>", key))
-		)
-		compared = readable and cint(flag.get("compared"))
-		mismatch = cint(flag.get("mismatch"))
+		fresh = _compare_now(doctype, key, flag)
+		if fresh:
+			compared = cint(fresh.get("compared"))
+			mismatch = cint(fresh.get("mismatch"))
+			view[key] = {
+				"value": flag.get("value"),
+				"master_doctype": fresh.get("master_doctype"),
+				"master_name": fresh.get("master_name"),
+				"master_field": fresh.get("master_field"),
+				"master_value": fresh.get("master_value") if cint(fresh.get("master_visible")) else None,
+				"compared": compared,
+				"mismatch": mismatch,
+				# One click only when the record this document links to holds the same
+				# value. Anything else is typed by the person after checking elsewhere.
+				"blocked": 0 if (compared and not mismatch) else 1,
+			}
+			continue
 		view[key] = {
 			"value": flag.get("value"),
-			"master_doctype": master_doctype if readable else None,
-			"master_name": master_name if readable else None,
-			"master_field": flag.get("master_field") if readable else None,
-			"master_value": flag.get("master_value") if visible else None,
-			"compared": 1 if compared else 0,
-			# A mismatch found at reading time stays found, even when the master has
-			# since gone out of reach: losing sight of a record is not agreeing with it.
-			"mismatch": mismatch,
-			# One click is offered only when the record this document links to holds
-			# the same value. Anything else (a mismatch, nothing compared, a master
-			# out of reach) is typed by the person after checking somewhere else.
-			"blocked": 0 if (compared and not mismatch) else 1,
+			"master_doctype": None,
+			"master_name": None,
+			"master_field": None,
+			"master_value": None,
+			"compared": 0,
+			# Losing sight of a record is not agreeing with it.
+			"mismatch": cint(flag.get("mismatch")),
+			"blocked": 1,
 		}
 	return view
+
+
+def _compare_now(doctype: str, key: str, flag: dict) -> dict | None:
+	"""The reading's master comparison, made again now. None when there is no master."""
+	master_field = flag.get("master_field")
+	master_name = flag.get("master_name")
+	if SENSITIVE_ROW.match(key) or not master_field or not master_name:
+		return None
+	fresh = gate.compare_with_master(doctype, key, flag.get("value"), {master_field: master_name})
+	return fresh if fresh.get("master_name") else None
 
 
 def _readable_duplicates(doctype: str, duplicates: dict, target_name: str | None) -> dict:
@@ -489,19 +551,8 @@ def _attach_source(doc: Any, doctype: str, docname: str) -> bool:
 	savepoint = "fa_fill_attach"
 	frappe.db.savepoint(savepoint)
 	try:
-		source = readable_file(doc.source_file)
-		already = frappe.get_list(
-			"File",
-			filters={
-				"file_url": source.file_url,
-				"attached_to_doctype": doctype,
-				"attached_to_name": docname,
-			},
-			pluck="name",
-			limit_page_length=1,
-		)
-		if not already:
-			source.create_attachment_copy(doctype, docname)
+		if not _source_attached(doc, doctype, docname):
+			readable_file(doc.source_file).create_attachment_copy(doctype, docname)
 		return True
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
@@ -509,6 +560,21 @@ def _attach_source(doc: Any, doctype: str, docname: str) -> bool:
 			f"could not attach the source of {doc.name} to {doctype} {docname}", exc_info=True
 		)
 		return False
+
+
+def _source_attached(doc: Any, doctype: str, docname: str) -> bool:
+	"""Whether the reading's file hangs off the document, as far as this user can see."""
+	file_url = frappe.db.get_value("File", doc.source_file, "file_url") if doc.source_file else None
+	if not file_url:
+		return False
+	return bool(
+		frappe.get_list(
+			"File",
+			filters={"file_url": file_url, "attached_to_doctype": doctype, "attached_to_name": docname},
+			pluck="name",
+			limit_page_length=1,
+		)
+	)
 
 
 def _parsed(value: Any) -> dict:
