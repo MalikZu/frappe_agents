@@ -51,6 +51,7 @@ from frappe_agents.harness.provider_events import (
 )
 from frappe_agents.harness.tools import AgentTool, AgentToolResult
 from frappe_agents.model_profiles import check_profile
+from frappe_agents.runner.proposal_updates import note_for, with_note
 from frappe_agents.runner.stream_adapter import ModelProfileProvider
 from frappe_agents.tools.base import (
 	AUTONOMY_CAPABILITIES,
@@ -226,7 +227,10 @@ DRAFT_DISCIPLINE = (
 	"The approver reads that reason next to the document, so make it specific — what the "
 	"document commits to, what you checked, and why now.\n"
 	"A proposal is not an act. Never tell the user that a document was submitted or "
-	"cancelled; tell them you proposed it and that someone else has to approve it."
+	"cancelled; tell them you proposed it and that someone else has to approve it.\n"
+	"A user message may open with proposal updates from the system: how proposals you "
+	"made were decided. If an approver rejected a proposal, tell the user what they "
+	"wrote, and do not propose the same action again unless the user asks you to."
 )
 
 SKILLS_HEADING = "## Approved skills"
@@ -293,6 +297,7 @@ def _execute(run: Any) -> None:
 
 	_update(run, {"status": "Running", "started_at": now_datetime(), "model_profile": profile})
 	publish_event(run, "status", status="Running")
+	_note_proposal_updates(run)
 
 	provider = ModelProfileProvider(profile)
 	cancellation = RunCancellation()
@@ -775,6 +780,23 @@ def build_system_prompt(agent: Any, run: Any) -> str:
 	return "\n\n".join(part for part in parts if part)
 
 
+def _note_proposal_updates(run: Any) -> None:
+	"""Store, on this run, what its user message will say about decided proposals.
+
+	Written before the history is built and never again: the history reads it
+	back from the run. A note that cannot be worked out is left out, and the run
+	goes on — the decisions wait for the next turn.
+	"""
+	try:
+		values = note_for(run, REPLAYABLE_STATUSES)
+		if values:
+			_update(run, values)
+	except Exception:
+		frappe.logger("frappe_agents").error(
+			f"could not note proposal updates on run {run.name}", exc_info=True
+		)
+
+
 def _draft_section(agent: Any) -> str:
 	"""The draft rules, and only for an agent that can actually write drafts.
 
@@ -890,12 +912,14 @@ def _build_messages(profile: str, run: Any, system: str = "") -> list[AgentMessa
 	messages: list[AgentMessage] = []
 	for prior in history:
 		if prior.get("input_message"):
-			messages.append(UserMessage(content=prior["input_message"]))
+			messages.append(
+				UserMessage(content=with_note(prior.get("proposal_updates"), prior["input_message"]))
+			)
 		if prior.get("output_message"):
 			messages.append(AssistantMessage(model=profile, content=prior["output_message"]))
 		elif _is_replayed(prior):
 			messages.extend(_replayed(prior))
-	messages.append(UserMessage(content=run.input_message or ""))
+	messages.append(UserMessage(content=with_note(run.get("proposal_updates"), run.input_message)))
 
 	if dropped:
 		_record_truncation(run)
@@ -918,7 +942,7 @@ def _fitted_history(profile: str, run: Any, system: str) -> tuple[list[dict], in
 	budget = _prompt_budget(profile)
 
 	# What cannot be dropped is spent first: the prompt and this turn's question.
-	room = budget - len(system or "") - len(run.input_message or "")
+	room = budget - len(system or "") - len(with_note(run.get("proposal_updates"), run.input_message))
 
 	kept: list[dict] = []
 	used = 0
@@ -946,7 +970,7 @@ def _turn_cost(prior: dict) -> int:
 	costed would read as almost nothing, and the guard this fitter is would go on
 	reporting room that is not there.
 	"""
-	cost = len(prior.get("input_message") or "")
+	cost = len(with_note(prior.get("proposal_updates"), prior.get("input_message")))
 	if _is_replayed(prior):
 		return cost + sum(_message_cost(message) for message in _replayed(prior))
 	return cost + len(prior.get("output_message") or "")
@@ -1009,7 +1033,7 @@ def _history(run: Any) -> list[dict]:
 				"name": ("!=", run.name),
 				"status": ("in", REPLAYABLE_STATUSES),
 			},
-			fields=["name", "status", "input_message", "output_message", "creation"],
+			fields=["name", "status", "input_message", "proposal_updates", "output_message", "creation"],
 			order_by="creation desc",
 			limit_page_length=HISTORY_LIMIT,
 		)

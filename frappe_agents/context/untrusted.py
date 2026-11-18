@@ -40,11 +40,20 @@ def neutralise(text: str) -> str:
 	return _TAG.sub(lambda match: match.group(0).replace("<", "&lt;", 1), str(text))
 
 
+def plain(text: str | None, limit: int = SOURCE_CHARS) -> str:
+	"""Short authored text made safe to sit in a trusted line, such as a document name.
+
+	A name can be anything a user typed. Inside a sentence the system writes it
+	must not be able to open a tag, start a new line, or run on for a page.
+	"""
+	cleaned = _SOURCE_UNSAFE.sub(" ", neutralise(str(text or ""))).strip()
+	return cleaned[:limit]
+
+
 def is_untrusted_fieldtype(fieldtype: str | None) -> bool:
 	"""True when a field of this type holds text a user authored."""
 	return fieldtype in UNTRUSTED_FIELDTYPES
 
 
 def _source(source: str) -> str:
-	cleaned = _SOURCE_UNSAFE.sub(" ", str(source or "")).strip()
-	return cleaned[:SOURCE_CHARS] or "unknown"
+	return plain(source) or "unknown"
