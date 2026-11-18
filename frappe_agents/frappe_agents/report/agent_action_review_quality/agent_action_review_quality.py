@@ -78,15 +78,37 @@ def get_data(filters: frappe._dict) -> list[dict]:
 	actions = frappe.get_list(
 		"Agent Action",
 		filters=get_filters(filters),
-		fields=["agent", "status", "edited_before_approval", "creation", "decided_at"],
+		fields=["agent", "run", "status", "edited_before_approval", "creation", "decided_at"],
 		limit_page_length=0,
 		order_by="agent asc",
 	)
+	rehearsals = rehearsal_runs({action.run for action in actions if action.run})
+	actions = [action for action in actions if action.run not in rehearsals]
 
 	rows = [summarise(agent, group) for agent, group in group_by_agent(actions).items()]
 	rows.sort(key=lambda row: (-row["proposed"], row["agent"]))
 
 	return rows
+
+
+def rehearsal_runs(runs: set[str]) -> set[str]:
+	"""The runs among these that were rehearsals.
+
+	A rehearsal's proposal is closed by the scorer the moment it is made. It was
+	never a request, so counting it as proposed and expired — and its instant
+	"decision" in the latency — would make the report describe tests, not review.
+	Asked without a permission check: it decides which rows to leave out, and
+	returns nothing from the runs themselves.
+	"""
+	if not runs:
+		return set()
+	return set(
+		frappe.get_all(
+			"Agent Run",
+			filters={"name": ("in", list(runs)), "surface": "Rehearsal"},
+			pluck="name",
+		)
+	)
 
 
 def get_filters(filters: frappe._dict) -> list[list]:

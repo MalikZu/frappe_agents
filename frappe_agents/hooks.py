@@ -67,5 +67,6 @@ scheduler_events = {
 	],
 	"daily": [
 		"frappe_agents.actions.expire_stale_actions",
+		"frappe_agents.rehearsals.runner.fail_stale_results",
 	],
 }

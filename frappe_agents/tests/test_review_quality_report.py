@@ -118,6 +118,17 @@ class TestReviewQualityReport(AgentTestCase):
 		self.assertEqual(second["edited_before_approval_rate"], 0.0)
 		self.assertEqual(second["median_decision_latency"], 60)
 
+	def test_a_rehearsal_proposal_is_not_counted(self):
+		"""The scorer expires a rehearsal's proposal at once; counted, it would read as neglect."""
+		rehearsal = make_run(effective_user=DRAFT_USER, agent=DRAFT_AGENT)
+		frappe.db.set_value("Agent Run", rehearsal.name, "surface", "Rehearsal", update_modified=False)
+		make_action(agent=DRAFT_AGENT, status="Expired", run=rehearsal)
+
+		_, rows = execute(frappe._dict({"agent": DRAFT_AGENT}))
+
+		self.assertEqual(rows[0]["proposed"], 6)
+		self.assertEqual(rows[0]["expired"], 1)
+
 	def test_the_columns_name_what_the_rows_carry(self):
 		columns, rows = execute(frappe._dict({"agent": DRAFT_AGENT}))
 

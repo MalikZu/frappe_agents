@@ -17,6 +17,10 @@ AGENT_ROLES = (
 	"Agent User",
 	"Agent Approver",
 	"Agent Auditor",
+	# Held by the users a rehearsal may run as, other than the manager running it.
+	# Only a System Manager assigns roles, so an Agent Manager cannot make anyone
+	# into a test user just to read what they can read.
+	"Agent Rehearsal User",
 )
 
 
@@ -29,7 +33,7 @@ def after_install() -> None:
 
 
 def create_roles() -> None:
-	"""Create the four agent roles if they are missing. Safe to run again."""
+	"""Create the agent roles if they are missing. Safe to run again."""
 	for role_name in AGENT_ROLES:
 		if frappe.db.exists("Role", role_name):
 			continue
@@ -76,6 +80,7 @@ SIDEBAR = (
 	("Link", "Review Quality", "Report", "Agent Action Review Quality", None, 1),
 	("Section Break", BUILD_SECTION, None, None, "bot", 0),
 	("Link", "Agents", "DocType", "Agent", None, 1),
+	("Link", "Rehearsals", "DocType", "Agent Rehearsal", None, 1),
 	("Link", "Access Profiles", "DocType", "Agent Access Profile", None, 1),
 	("Link", "Blueprints", "DocType", "Agent Blueprint", None, 1),
 	("Link", "Skills", "DocType", "Agent Skill", None, 1),
@@ -88,6 +93,7 @@ SIDEBAR = (
 	("Link", "Conversations", "DocType", "Agent Conversation", None, 1),
 	("Link", "Runs", "DocType", "Agent Run", None, 1),
 	("Link", "Tool Calls", "DocType", "Agent Tool Call", None, 1),
+	("Link", "Rehearsal Results", "DocType", "Agent Rehearsal Result", None, 1),
 )
 
 

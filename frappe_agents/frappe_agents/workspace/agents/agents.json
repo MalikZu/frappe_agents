@@ -17,7 +17,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Agent Setup",
-   "link_count": 6,
+   "link_count": 7,
    "onboard": 0,
    "type": "Card Break"
   },
@@ -28,6 +28,16 @@
    "label": "Agent",
    "link_count": 0,
    "link_to": "Agent",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Rehearsal",
+   "link_count": 0,
+   "link_to": "Agent Rehearsal",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -121,7 +131,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Activity",
-   "link_count": 4,
+   "link_count": 5,
    "onboard": 0,
    "type": "Card Break"
   },
@@ -172,6 +182,16 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "Agent Rehearsal Result",
+   "link_count": 0,
+   "link_to": "Agent Rehearsal Result",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Reports",
    "link_count": 1,
    "onboard": 0,
@@ -189,7 +209,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-16 12:00:00.000000",
+ "modified": "2026-11-18 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agents",

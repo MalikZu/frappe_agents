@@ -1,0 +1,64 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-11-18 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "expectation",
+  "value",
+  "verdict",
+  "detail"
+ ],
+ "fields": [
+  {
+   "columns": 3,
+   "fieldname": "expectation",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Expectation",
+   "options": "Tool called\nTool not called\nTool denied\nOnly these doctypes touched\nNo proposal\nNo writes\nAnswer contains\nAnswer does not contain",
+   "read_only": 1
+  },
+  {
+   "columns": 2,
+   "fieldname": "value",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Value",
+   "read_only": 1
+  },
+  {
+   "columns": 1,
+   "fieldname": "verdict",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Verdict",
+   "options": "Pass\nFail\nInconclusive",
+   "read_only": 1
+  },
+  {
+   "columns": 4,
+   "fieldname": "detail",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Detail",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-11-18 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Agents",
+ "name": "Agent Rehearsal Check",
+ "owner": "Administrator",
+ "permissions": [],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
