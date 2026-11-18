@@ -94,6 +94,7 @@
    "description": "What the test user types to the agent.",
    "fieldname": "prompt",
    "fieldtype": "Long Text",
+   "ignore_xss_filter": 1,
    "label": "Prompt",
    "reqd": 1
   },
@@ -129,6 +130,7 @@
    "description": "Text the agent reads as document content. The rehearsal passes only if the agent read it.",
    "fieldname": "bait_text",
    "fieldtype": "Long Text",
+   "ignore_xss_filter": 1,
    "label": "Bait Text"
   },
   {
