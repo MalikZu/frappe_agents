@@ -10,7 +10,9 @@ against a scripted model. Everything between — the identity binding, the grant
 check, `update_draft`, the audit rows — is the real code.
 """
 
+import ast
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import frappe
@@ -19,6 +21,7 @@ from frappe_agents.tests.fixtures import (
 	APPROVER_USER,
 	DRAFT_USER,
 	EXTRACT_PROFILE,
+	IBAN_FIELD,
 	ORDER_DT,
 	RESTRICTED_USER,
 	SECOND_DRAFTER,
@@ -254,11 +257,48 @@ class TestSavingATrigger(TriggerCase):
 
 
 class TestTheHook(AgentTestCase):
-	def test_the_dispatcher_is_registered_for_every_doctype(self):
-		"""A second "*" or "on_update" key in hooks.py is valid Python and drops this one."""
+	"""A second "*" or "on_update" key in hooks.py is valid Python and drops the first."""
+
+	HANDLERS = (
+		"frappe_agents.triggers.dispatch.on_update",
+		"frappe_agents.extraction.fill.stamp_on_save",
+	)
+
+	def test_every_save_handler_is_registered(self):
 		handlers = frappe.get_hooks("doc_events").get("*", {}).get("on_update") or []
 
-		self.assertIn("frappe_agents.triggers.dispatch.on_update", handlers)
+		for handler in self.HANDLERS:
+			self.assertIn(handler, handlers)
+
+	def test_hooks_py_names_each_key_once(self):
+		hooks = Path(frappe.get_app_path("frappe_agents", "hooks.py")).read_text()
+		assigned = {
+			node.targets[0].id: node.value
+			for node in ast.parse(hooks).body
+			if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+		}
+
+		doc_events = assigned["doc_events"]
+		self.assertEqual([key.value for key in doc_events.keys], ["*"])
+		every = doc_events.values[0]
+		self.assertEqual([key.value for key in every.keys], ["on_update"])
+		self.assertEqual([item.value for item in every.values[0].elts], list(self.HANDLERS))
+
+		schedule = assigned["scheduler_events"]
+		self.assertEqual([key.value for key in schedule.keys], ["hourly", "daily"])
+		jobs = {
+			key.value: [item.value for item in value.elts]
+			for key, value in zip(schedule.keys, schedule.values, strict=True)
+		}
+		self.assertEqual(jobs["hourly"], ["frappe_agents.mcp.server.close_idle_sessions"])
+		self.assertEqual(
+			jobs["daily"],
+			[
+				"frappe_agents.actions.expire_stale_actions",
+				"frappe_agents.rehearsals.runner.fail_stale_results",
+				"frappe_agents.extraction.fill.discard_stale_fills",
+			],
+		)
 
 
 class TestWhichSavesFire(TriggerCase):
@@ -938,6 +978,61 @@ class TestAttachments(TriggerCase):
 		self.assertIn("Invoice from Acme", str(provider.messages(0)[-1].content))
 		self.assertIn('<untrusted source="File ', str(provider.messages(0)[-1].content))
 		self.assertEqual(self.notes(order), "An Acme invoice for 240 AED")
+
+
+class TestWhatARunKeeps(TriggerCase):
+	"""A stored copy of a triggered run keeps back what the document's sensitive fields hold.
+
+	The document's IBAN field is sensitive. The attached invoice prints the same
+	IBAN, and the model repeats it. The person who attached the file holds it,
+	so the model reads it; an auditor reading the run, its log or its tool rows
+	does not.
+	"""
+
+	IBAN = "AE070331234567890123456"
+
+	def run_on_invoice(self, **values):
+		trigger = self.make_trigger(
+			event="Attachment Added", source_field=None, instruction="Say what this file is.", **values
+		)
+		order = make_order_draft()
+		frappe.db.set_value(ORDER_DT, order.name, IBAN_FIELD, self.IBAN)
+		with as_user(DRAFT_USER):
+			file = make_pdf_attachment(
+				name=order.name, content=text_pdf([f"Invoice 79. Pay to IBAN {self.IBAN}"])
+			)
+		return order, self.start(trigger, order, file=file.name)
+
+	def assert_nothing_stored_holds_it(self, run):
+		row = frappe.db.get_value(
+			"Agent Run", run, ["input_message", "output_message", "error", "event_log"], as_dict=True
+		)
+		for field, value in row.items():
+			self.assertNotIn(self.IBAN, value or "", field)
+		for call in tool_calls_for(run):
+			for field in ("args_json", "result_summary", "error"):
+				self.assertNotIn(self.IBAN, call.get(field) or "", f"{call.tool} {field}")
+
+	def test_an_answer_run_keeps_no_held_back_value(self):
+		_, run = self.run_on_invoice()
+
+		provider = run_with_model(run, model_says(f"Invoice 79, payable to {self.IBAN}"))
+
+		# The model was handed the file as it is.
+		self.assertIn(self.IBAN, str(provider.messages(0)[-1].content))
+		self.assertEqual(frappe.db.get_value("Agent Run", run, "status"), "Completed")
+		self.assertIn("[redacted]", frappe.db.get_value("Agent Run", run, "input_message"))
+		self.assertIn("[redacted]", frappe.db.get_value("Agent Run", run, "output_message"))
+		self.assert_nothing_stored_holds_it(run)
+
+	def test_a_file_text_run_keeps_no_held_back_value(self):
+		order, run = self.run_on_invoice(writes="File Text")
+
+		run_with_model(run, [])
+
+		# The document gets the file's text: it is the person's own file.
+		self.assertIn(self.IBAN, self.notes(order))
+		self.assert_nothing_stored_holds_it(run)
 
 
 class TestWhatTheTargetHolds(AgentTestCase):
