@@ -672,7 +672,24 @@ class TestEventsThatAreGone(TriggerCase):
 		mark_dirty(trigger.name, ORDER_DT, order.name, DRAFT_USER, "fa-file-one")
 
 		with self.queue() as calls:
-			run_trigger(trigger.name, ORDER_DT, order.name, "Administrator", "fa-file-two")
+			run_trigger(trigger.name, ORDER_DT, order.name, "Administrator", None)
+
+		self.assertEqual(skips_today(trigger.name).get(SKIP_NO_USER), 1)
+		self.assertEqual(
+			[(kwargs["file"], kwargs["fired_by"]) for kwargs in self.dispatched(calls)],
+			[("fa-file-one", DRAFT_USER)],
+		)
+		self.assertTrue(take_lock(trigger.name, ORDER_DT, order.name))
+		self.addCleanup(release_lock, trigger.name, ORDER_DT, order.name)
+
+	def test_a_job_that_breaks_still_hands_on_what_waits(self):
+		trigger = self.make_trigger(event="Attachment Added", source_field=None, instruction="Read it.")
+		order = make_order_draft()
+		mark_dirty(trigger.name, ORDER_DT, order.name, DRAFT_USER, "fa-file-one")
+
+		broken = patch("frappe_agents.triggers.dispatch._insert_run", side_effect=RuntimeError("broke"))
+		with self.queue() as calls, broken:
+			run_trigger(trigger.name, ORDER_DT, order.name, SECOND_DRAFTER, None)
 
 		self.assertEqual(
 			[(kwargs["file"], kwargs["fired_by"]) for kwargs in self.dispatched(calls)],
@@ -689,8 +706,9 @@ class TestEventsThatAreGone(TriggerCase):
 		mark_dirty(trigger.name, ORDER_DT, order.name, DRAFT_USER, "fa-file-one")
 
 		with self.queue() as calls:
-			run_trigger(trigger.name, ORDER_DT, order.name, "Administrator", "fa-file-two")
+			run_trigger(trigger.name, ORDER_DT, order.name, "Administrator", None)
 
+		self.assertEqual(skips_today(trigger.name).get(SKIP_NO_USER), 1)
 		self.assertEqual(self.dispatched(calls), [])
 		self.assertEqual(
 			take_dirty(trigger.name, ORDER_DT, order.name)["files"],
