@@ -36,6 +36,9 @@ Publishing on save is what crosses that gap. See
 | **Max Extraction File MB** | 10 | Larger files are refused |
 | **PDF Parser Engine** | native | How a PDF reaches the model |
 | **Extractions Per User Per Day** | 50 | Per-person daily cap |
+| **MCP Enabled** | off | Opens the endpoint for outside clients. See [Outside clients](mcp.md) |
+| **MCP Requests per User per Minute** | 60 | Requests past this get a 429 |
+| **MCP Tool Calls per Session** | 50 | A session ends after this many calls |
 
 **Sensitive Fields is empty on a new site, and it is the whole configuration of
 the extraction gate.** Until you fill it in, extraction holds nothing back. On a
@@ -52,6 +55,10 @@ Four record types make up the trail.
 | **Agent Tool Call** | One tool call: arguments, outcome, result summary, duration, error |
 | **Agent Action** | One proposal and its decision |
 | **Document Extraction** | One file read, and what was held back |
+
+A rehearsal run is an ordinary Agent Run with the surface **Rehearsal**, so it
+is on the trail like any other. Its scored copy is an **Agent Rehearsal
+Result**, which no role may edit either. See [Rehearsals](rehearsals.md).
 
 Find them under **Agents → Activity**.
 
@@ -76,14 +83,22 @@ call *did* stays readable — the tool, the doctype, the field names, the outcom
 
 ## Scheduled work
 
-Two daily jobs. Both are safe to run by hand and safe to run twice.
+Three daily jobs and one hourly job. Each is safe to run by hand and safe to run
+twice.
 
-- **Expire stale actions** moves proposals nobody decided to Expired after the
-  number of days in Agent Settings. Expiry is the clock, not a decision — nobody
-  is recorded as having decided, and the agent may propose the same thing again.
-- **Close stale Fill from file readings** moves a reading that is still
+- **Expire stale actions** (daily) moves proposals nobody decided to Expired
+  after the number of days in Agent Settings. Expiry is the clock, not a
+  decision — nobody is recorded as having decided, and the agent may propose the
+  same thing again.
+- **Fail stale rehearsal results** (daily) marks a rehearsal result still Queued
+  or Running after 6 hours as Failed. Its job never finished. See
+  [Rehearsals](rehearsals.md).
+- **Close stale Fill from file readings** (daily) moves a reading that is still
   **Ready** after 24 hours to Discarded. No saved document was tied to it. See
   [Fill from file](extraction.md#fill-from-file).
+- **Close idle MCP sessions** (hourly) ends MCP sessions nobody has used for 30
+  minutes. A client whose session it ended opens a new one. See
+  [Outside clients](mcp.md#sessions-and-limits).
 
 ## Upgrading
 

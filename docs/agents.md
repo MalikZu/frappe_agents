@@ -96,6 +96,10 @@ document the file hangs off. See [Files in chat](files-in-chat.md).
 It also offers **Fill from file** on every doctype where the agent has the
 **Extract** verb. See [Fill from file](extraction.md#fill-from-file).
 
+**Allow MCP** lets outside clients such as Claude Code or an IDE call this
+agent's tools. It is off by default, and Agent Settings must allow MCP too. Over
+MCP the agent never goes past Draft. See [Outside clients](mcp.md).
+
 ## Skills
 
 A **skill** is a reusable block of instructions. Write one once, attach it to
@@ -133,3 +137,9 @@ standing between a misconfigured agent and a large bill.
 
 A new agent reaches nothing until you give it access rules. That is deliberate:
 the first thing you write on an agent is what it is for.
+
+## Testing
+
+Test an agent before you enable it for users, and again after you change its
+model. Write rehearsals for it, and load the prompt-injection pack. See
+[Rehearsals](rehearsals.md).

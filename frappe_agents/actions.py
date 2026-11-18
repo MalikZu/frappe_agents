@@ -6,6 +6,19 @@ the approver's own session under the approver's own permissions. There is no
 `ignore_permissions` on the apply path, deliberately: an approver who may not
 submit the document may not cause it to be submitted either.
 
+A Workflow Transition is applied the same way, through Frappe's own
+`apply_workflow`, in the approver's session. The Workflow then decides: the
+transition must be open to the approver's roles, its condition must hold, and
+self-approval is refused where the transition says so. `apply_workflow` may
+submit or cancel the document, which is why this module is the only place in
+the app that calls it — no tool does.
+
+An Update changes plain fields on a live record — a document of a doctype with
+no submit step — and is applied with an ordinary `save()` as the approver.
+`frappe_agents.updates` holds what that save needs on top: write at each
+field's permlevel, the Workflow's edit role, each field still at the value the
+agent saw, and a read-back proving the save kept what was approved.
+
 Three things in here look like belt-and-braces and are not:
 
 * **The workflow refusal is checked twice.** Frappe does not block a server-side
@@ -34,14 +47,40 @@ into the approver's request as an unhandled error.
 """
 
 import datetime
+from contextlib import contextmanager
 from typing import Any
 
 import frappe
 from frappe import _
-from frappe.model.workflow import get_workflow_name
-from frappe.utils import add_to_date, cint, get_datetime, now_datetime, strip_html
+from frappe.desk.doctype.notification_log.notification_log import (
+	enqueue_create_notification,
+	make_notification_logs,
+)
+from frappe.model.workflow import apply_workflow, get_workflow, get_workflow_name
+from frappe.utils import (
+	add_to_date,
+	cint,
+	escape_html,
+	get_datetime,
+	get_fullname,
+	now_datetime,
+	strip_html,
+)
+from frappe.utils.user import get_users_with_role
 
+from frappe_agents.field_changes import dumps
 from frappe_agents.tools.base import runtime_enabled
+from frappe_agents.updates import (
+	ACTION_UPDATE,
+	FIELD_SEPARATOR,
+	UpdateNotKept,
+	apply_update,
+	field_names,
+	refused_on_save,
+	update_diff,
+	update_problem,
+	workflow_edit_problem,
+)
 
 APPROVER_ROLE = "Agent Approver"
 
@@ -53,14 +92,40 @@ STATUS_EXPIRED = "Expired"
 
 ACTION_SUBMIT = "Submit"
 ACTION_CANCEL = "Cancel"
+ACTION_TRANSITION = "Workflow Transition"
 
 DRAFT = 0
 SUBMITTED = 1
+CANCELLED = 2
 
 DEFAULT_EXPIRY_DAYS = 7
+# The Agent Run surface a rehearsal runs on. Proposals from it are never applied.
+REHEARSAL_SURFACE = "Rehearsal"
 FAILURE_LIMIT = 500
 NOTE_LIMIT = 1000
 SAVEPOINT = "agent_action_apply"
+
+# A proposal is a question for a few people, not a broadcast. Past this many
+# eligible approvers the rest are not told; they still see it in the queue.
+MAX_NOTIFIED_APPROVERS = 20
+NOTIFICATION_TYPE = "Alert"
+NOTIFY_SAVEPOINT = "agent_action_notify"
+SUBJECT_NOTE_LIMIT = 140
+# What a notification is built from. Never the reason, never the target's fields.
+NOTICE_FIELDS = (
+	"name",
+	"status",
+	"run",
+	"agent",
+	"requested_by",
+	"action_type",
+	"workflow_action",
+	"workflow_name",
+	"from_workflow_state",
+	"target_doctype",
+	"target_name",
+	"update_fields",
+)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -81,6 +146,7 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	_check_kill_switch()
 	_require_pending(doc_action)
+	_refuse_rehearsal(doc_action)
 	_check_expiry(doc_action)
 	_require_separation_of_duties(doc_action)
 
@@ -95,23 +161,9 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	_check_lock(doc_action, target, expected_modified)
 
-	# Re-checked here, not only at proposal time: a Workflow activated in between
-	# would otherwise be bypassed by this submit, silently and without a trace.
-	workflow = get_workflow_name(doc_action.target_doctype)
-	if workflow:
-		return _record_failure(
-			doc_action,
-			note,
-			0,
-			_(
-				"{0} is now governed by an active Workflow ({1}). Agent proposals cannot "
-				"submit or cancel workflow-governed documents; use the workflow's own transitions."
-			).format(doc_action.target_doctype, workflow),
-		)
-
-	state_problem = _state_problem(doc_action, target)
-	if state_problem:
-		return _record_failure(doc_action, note, 0, state_problem)
+	problem = _apply_problem(doc_action, target)
+	if problem:
+		return _record_failure(doc_action, note, 0, problem)
 
 	# Before the apply, never after: submit() overwrites `modified` with the
 	# approver's own timestamp, and the comparison stops meaning anything.
@@ -128,14 +180,30 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 
 	frappe.db.savepoint(SAVEPOINT)
 	try:
-		if doc_action.action_type == ACTION_SUBMIT:
+		if doc_action.action_type == ACTION_TRANSITION:
+			# As the session user, who is the approver. apply_workflow lists the
+			# transitions for the approver's roles, checks the condition and
+			# self-approval, and saves, submits or cancels with their permissions.
+			apply_workflow(target, doc_action.workflow_action)
+		elif doc_action.action_type == ACTION_SUBMIT:
 			target.submit()
-		else:
+		elif doc_action.action_type == ACTION_CANCEL:
 			target.cancel()
+		elif doc_action.action_type == ACTION_UPDATE:
+			apply_update(doc_action, target)
+		else:
+			frappe.throw(_("Unknown action type {0}.").format(doc_action.action_type))
 	except Exception as exc:
 		# Undo whatever the half-finished transition wrote — a cancel that trips on a
 		# back-link has already written docstatus 2 by the time it throws.
 		frappe.db.rollback(save_point=SAVEPOINT)
+		if doc_action.action_type == ACTION_UPDATE and not isinstance(exc, UpdateNotKept):
+			# A controller's own message may quote the values the row hides at
+			# permlevel 1, and `failure` is level 0. The approver gets the detail in
+			# this response; the row and the requester get a sentence with no values.
+			result = _record_failure(doc_action, note, edited, refused_on_save())
+			result["detail"] = _failure_text(exc)
+			return result
 		return _record_failure(doc_action, note, edited, _failure_text(exc))
 
 	_write(
@@ -150,13 +218,18 @@ def approve_action(action: str, expected_modified: Any, note: str | None = None)
 			"failure": None,
 		},
 	)
+	_notify_requester(doc_action, STATUS_APPLIED)
 
 	return {
 		"action": doc_action.name,
 		"status": STATUS_APPLIED,
 		"target_doctype": doc_action.target_doctype,
 		"target_name": doc_action.target_name,
-		"docstatus": cint(target.docstatus),
+		# Read back rather than taken from `target`: apply_workflow loads and saves
+		# its own copy of the document.
+		"docstatus": cint(
+			frappe.db.get_value(doc_action.target_doctype, doc_action.target_name, "docstatus")
+		),
 		"edited_before_approval": edited,
 	}
 
@@ -186,21 +259,49 @@ def reject_action(action: str, note: str) -> dict:
 			"decision_note": note,
 		},
 	)
+	_notify_requester(doc_action, STATUS_REJECTED, note)
 
 	return {"action": doc_action.name, "status": STATUS_REJECTED}
 
 
-def pending_action_for(target_doctype: str, target_name: str, action_type: str) -> str | None:
-	"""The Pending proposal already covering this target and action, if there is one."""
-	return frappe.db.exists(
-		"Agent Action",
-		{
-			"target_doctype": target_doctype,
-			"target_name": target_name,
-			"action_type": action_type,
-			"status": STATUS_PENDING,
-		},
-	)
+@frappe.whitelist()
+def get_update_diff(action: str) -> dict:
+	"""Before, now and proposed, for each field an Update would change.
+
+	The values on the row are stored where no role reads them. This is the one
+	way out, and it answers for the session user: read on the Agent Action, read
+	on the target, and read at each field's permlevel, or no value.
+	"""
+	doc_action = _load_action(action)
+	if doc_action.action_type != ACTION_UPDATE:
+		frappe.throw(_("This proposal is not a field change."))
+	return update_diff(doc_action)
+
+
+def pending_action_for(
+	target_doctype: str,
+	target_name: str,
+	action_type: str,
+	workflow_action: str | None = None,
+	from_workflow_state: str | None = None,
+) -> str | None:
+	"""The Pending proposal already covering this target and action, if there is one.
+
+	For a workflow transition the action is the workflow's own verb out of one
+	state: a pending Approve does not block a Reject, and a stale Approve out of an
+	earlier state does not block the Approve out of this one.
+	"""
+	filters = {
+		"target_doctype": target_doctype,
+		"target_name": target_name,
+		"action_type": action_type,
+		"status": STATUS_PENDING,
+	}
+	if workflow_action:
+		filters["workflow_action"] = workflow_action
+	if from_workflow_state:
+		filters["from_workflow_state"] = from_workflow_state
+	return frappe.db.exists("Agent Action", filters)
 
 
 def record_proposal(
@@ -210,6 +311,11 @@ def record_proposal(
 	target_name: str,
 	reason: str,
 	proposal_modified: Any,
+	workflow_action: str | None = None,
+	workflow_name: str | None = None,
+	from_workflow_state: str | None = None,
+	proposed_values: dict | None = None,
+	seen_values: dict | None = None,
 ) -> Any:
 	"""Insert one Pending Agent Action for a proposal the tools have already checked.
 
@@ -217,7 +323,18 @@ def record_proposal(
 	to no role at all: proposals arrive through this function and leave through
 	`approve_action`, `reject_action` or the expiry sweep, and through nothing else.
 	It lives here rather than in the tools so that tool code stays free of it.
+
+	An Update carries its values. They are stored at a permlevel no role reads,
+	because Agent Action is readable by people who may not read the target:
+	`get_update_diff` hands them out field by field, after checking.
 	"""
+	values = {}
+	if proposed_values is not None:
+		values = {
+			"update_fields": FIELD_SEPARATOR.join(proposed_values),
+			"proposed_values": dumps(proposed_values),
+			"seen_values": dumps(seen_values or {}),
+		}
 	action = frappe.get_doc(
 		{
 			"doctype": "Agent Action",
@@ -225,6 +342,9 @@ def record_proposal(
 			"agent": run.agent,
 			"requested_by": frappe.session.user,
 			"action_type": action_type,
+			"workflow_action": workflow_action,
+			"workflow_name": workflow_name,
+			"from_workflow_state": from_workflow_state,
 			"target_doctype": target_doctype,
 			"target_name": target_name,
 			"reason": reason,
@@ -232,11 +352,35 @@ def record_proposal(
 			# stored as a datetime — never a string, whose formatting is not stable.
 			"proposal_modified": get_datetime(proposal_modified),
 			"status": STATUS_PENDING,
+			**values,
 		}
 	)
 	action.flags.ignore_permissions = True
 	action.insert(ignore_permissions=True)
+	_enqueue_approver_notice(action.name)
 	return action
+
+
+def close_rehearsal_proposals(run: str, note: str) -> list[str]:
+	"""Close every Pending proposal a rehearsal run made. Returns their names.
+
+	A rehearsal tests whether an agent proposes; it must never leave a proposal a
+	person could approve. Closing reuses Expired, the status for a proposal nobody
+	will decide, and keeps the row: what the agent asked for is the evidence.
+	Closing it at once also frees the document for a real proposal, which
+	`pending_action_for` would otherwise refuse as a duplicate.
+	"""
+	names = frappe.get_all(
+		"Agent Action",
+		filters={"run": run, "status": STATUS_PENDING},
+		pluck="name",
+	)
+	for name in names:
+		_write(
+			frappe.get_doc("Agent Action", name),
+			{"status": STATUS_EXPIRED, "decided_at": now_datetime(), "decision_note": note},
+		)
+	return names
 
 
 def expire_stale_actions() -> int:
@@ -249,20 +393,34 @@ def expire_stale_actions() -> int:
 	days = _expiry_days()
 	filters = {"status": STATUS_PENDING, "creation": ("<", _cutoff(days))}
 
-	stale = frappe.get_all("Agent Action", filters=filters, pluck="name")
+	# Read before the bulk write: once it lands, nothing tells these rows apart from
+	# the ones an earlier sweep expired, and those must not be announced twice.
+	stale = frappe.get_all("Agent Action", filters=filters, fields=list(NOTICE_FIELDS))
 	if not stale:
 		return 0
 
 	frappe.db.set_value(
 		"Agent Action",
-		filters,
+		{"name": ("in", [row.name for row in stale]), "status": STATUS_PENDING},
 		{
 			"status": STATUS_EXPIRED,
 			"failure": _("Expired after {0} days with no decision.").format(days),
 		},
 		update_modified=False,
 	)
-	return len(stale)
+	# Announce only what this sweep moved. A row decided between the read and the
+	# write kept its status, and its requester hears about the decision instead.
+	expired = set(
+		frappe.get_all(
+			"Agent Action",
+			filters={"name": ("in", [row.name for row in stale]), "status": STATUS_EXPIRED},
+			pluck="name",
+		)
+	)
+	for row in stale:
+		if row.name in expired:
+			_notify_requester(row, STATUS_EXPIRED)
+	return len(expired)
 
 
 def separation_of_duties_block(action: Any, user: str | None = None) -> str | None:
@@ -291,12 +449,305 @@ def separation_of_duties_block(action: Any, user: str | None = None) -> str | No
 	return None
 
 
+def expiry_cutoff() -> Any:
+	"""The creation time before which a Pending proposal can no longer be decided."""
+	return _cutoff(_expiry_days())
+
+
 def is_stale(action: Any) -> bool:
 	"""True when a Pending proposal is already past the expiry window."""
 	created = get_datetime(action.creation)
 	if not created:
 		return False
 	return created < _cutoff(_expiry_days())
+
+
+def notify_approvers(action_name: str) -> None:
+	"""Tell the approvers who could actually decide a new proposal that it is waiting.
+
+	A background job, queued after the proposal commits. It never raises: a
+	notification that fails is an Error Log, and the proposal stands either way.
+	"""
+	with _never_raises("frappe_agents: approver notification failed"):
+		action = frappe.db.get_value("Agent Action", action_name, list(NOTICE_FIELDS), as_dict=True)
+		if not action or action.status != STATUS_PENDING:
+			return
+		if not frappe.db.exists(action.target_doctype, action.target_name):
+			return
+		target = frappe.get_doc(action.target_doctype, action.target_name)
+
+		recipients = eligible_approvers(action, target)
+		if not recipients:
+			return
+		make_notification_logs(
+			frappe._dict(
+				{
+					"type": NOTIFICATION_TYPE,
+					"document_type": "Agent Action",
+					"document_name": action.name,
+					"from_user": action.requested_by,
+					"subject": _approver_subject(action),
+				}
+			),
+			recipients,
+		)
+
+
+def eligible_approvers(action: Any, target: Any) -> list[str]:
+	"""The approvers who may decide `action` and could carry it through.
+
+	The same walls `approve_action` puts up, asked ahead of time: the
+	separation-of-duties block, read on the target, and the right the apply will
+	need. For a submit or a cancel that right is submit or cancel. For a workflow
+	action it is a role the step is open to, plus the right its target state needs.
+	An approver who fails any of them would only be told about a proposal they
+	cannot open or cannot apply. The step's condition and self-approval stay the
+	Workflow's call, made when the approver applies it. For a field change the
+	right is write, at every permlevel above 0 the change touches, with the
+	workflow state's edit role when a Workflow governs the document.
+	"""
+	steps = _approval_steps(action, target)
+	update = action.action_type == ACTION_UPDATE
+	levels = _update_permlevels(action) if update else set()
+	meta = frappe.get_meta(action.target_doctype)
+	eligible = []
+	for user in sorted(get_users_with_role(APPROVER_ROLE)):
+		if separation_of_duties_block(action, user):
+			continue
+		if not frappe.has_permission(action.target_doctype, "read", doc=target, user=user):
+			continue
+		if not _may_take_a_step(action, target, user, steps):
+			continue
+		if levels and not levels <= set(meta.get_permlevel_access("read", user=user)):
+			continue
+		if levels and not levels <= set(meta.get_permlevel_access("write", user=user)):
+			continue
+		if update and workflow_edit_problem(target, user):
+			continue
+		eligible.append(user)
+		if len(eligible) >= MAX_NOTIFIED_APPROVERS:
+			break
+	return eligible
+
+
+def _approval_steps(action: Any, target: Any) -> list[tuple[str | None, str]]:
+	"""The ways an approver could apply `action`: (role required, right required).
+
+	A submit or a cancel has one way, open to any role. A workflow action has one
+	per matching transition in the Workflow, and none at all when the Workflow
+	changed or the document left the state the proposal was made from — the apply
+	would fail on those, so nobody is asked to try it.
+	"""
+	if action.action_type == ACTION_SUBMIT:
+		return [(None, "submit")]
+	if action.action_type == ACTION_CANCEL:
+		return [(None, "cancel")]
+	if action.action_type == ACTION_UPDATE:
+		return [(None, "write")]
+	if action.action_type != ACTION_TRANSITION:
+		return []
+
+	if not action.workflow_name or get_workflow_name(action.target_doctype) != action.workflow_name:
+		return []
+	workflow = get_workflow(action.target_doctype)
+	if target.get(workflow.workflow_state_field) != action.from_workflow_state:
+		return []
+
+	docstatus = {row.state: cint(row.doc_status) for row in workflow.states}
+	before = docstatus.get(action.from_workflow_state, DRAFT)
+	steps = []
+	for row in workflow.transitions:
+		if row.state != action.from_workflow_state or row.action != action.workflow_action:
+			continue
+		steps.append((row.allowed, _right_for(before, docstatus.get(row.next_state, before))))
+	return steps
+
+
+def _update_permlevels(action: Any) -> set[int]:
+	meta = frappe.get_meta(action.target_doctype)
+	levels = set()
+	for fieldname in field_names(action.get("update_fields")):
+		df = meta.get_field(fieldname)
+		# Level 0 is the document's own write, already asked of every approver.
+		if df and cint(df.permlevel):
+			levels.add(cint(df.permlevel))
+	return levels
+
+
+def _right_for(before: int, after: int) -> str:
+	"""The document right a workflow step needs, from the docstatus it moves between."""
+	if after == SUBMITTED and before == DRAFT:
+		return "submit"
+	if after == CANCELLED:
+		return "cancel"
+	if before == SUBMITTED:
+		# A step between two submitted states updates a submitted document.
+		return "submit"
+	return "write"
+
+
+def _may_take_a_step(action: Any, target: Any, user: str, steps: list[tuple[str | None, str]]) -> bool:
+	roles = set(frappe.get_roles(user)) if any(role for role, _right in steps) else set()
+	for role, right in steps:
+		if role and role not in roles:
+			continue
+		if frappe.has_permission(action.target_doctype, right, doc=target, user=user):
+			return True
+	return False
+
+
+def _enqueue_approver_notice(action_name: str) -> None:
+	# After commit, so a proposal that rolls back tells nobody. Inline under test,
+	# where nothing ever commits.
+	try:
+		frappe.enqueue(
+			"frappe_agents.actions.notify_approvers",
+			queue="short",
+			enqueue_after_commit=True,
+			now=bool(frappe.flags.in_test),
+			action_name=action_name,
+		)
+	except Exception:
+		frappe.log_error(title="frappe_agents: approver notification failed")
+
+
+def _notify_requester(action: Any, status: str, note: str | None = None) -> None:
+	"""Tell whoever asked for a proposal how it ended. Never raises.
+
+	The requester and the run's effective user, when that is someone else. The
+	decider is left out: they know. Called after the status write, so a failure
+	here is logged and the decision stands.
+	"""
+	with _never_raises("frappe_agents: requester notification failed"):
+		decider = None if status == STATUS_EXPIRED else frappe.session.user
+		recipients = _requester_recipients(action, decider)
+		if not recipients:
+			return
+
+		notice = {
+			"type": NOTIFICATION_TYPE,
+			"document_type": "Agent Action",
+			"document_name": action.name,
+			"subject": _requester_subject(action, status, decider, note),
+		}
+		if decider:
+			notice["from_user"] = decider
+		enqueue_create_notification(recipients, notice)
+
+		for user in recipients:
+			frappe.publish_realtime(
+				"agent_action_decided",
+				{"action": action.name, "status": status, "run": action.run},
+				user=user,
+				after_commit=True,
+			)
+
+
+def _requester_recipients(action: Any, decider: str | None) -> list[str]:
+	run_user = frappe.db.get_value("Agent Run", action.run, "effective_user") if action.run else None
+	recipients = []
+	for user in (action.requested_by, run_user):
+		if user and user != decider and user not in recipients:
+			recipients.append(user)
+	return recipients
+
+
+def _approver_subject(action: Any) -> str:
+	# Agent, verb and target identity only. The reason is model-written and the
+	# fields are the target's business: both stay on the Agent Action form, behind
+	# its own permission check, and out of the bell.
+	if action.action_type == ACTION_TRANSITION:
+		template = _("{0} proposes the workflow action {3} on {1} {2}. It needs an approver.")
+	elif action.action_type == ACTION_CANCEL:
+		template = _("{0} proposes to cancel {1} {2}. It needs an approver.")
+	elif action.action_type == ACTION_UPDATE:
+		template = _("{0} proposes to change fields on {1} {2}. It needs an approver.")
+	else:
+		template = _("{0} proposes to submit {1} {2}. It needs an approver.")
+	return template.format(
+		escape_html(action.agent or _("An agent")),
+		escape_html(_(action.target_doctype)),
+		escape_html(action.target_name),
+		_workflow_step(action),
+	)
+
+
+def _workflow_step(action: Any) -> str:
+	"""The workflow verb with the state it starts from. The same verb can be another
+	step out of another state, so the verb alone does not say which step this is."""
+	if not action.workflow_action:
+		return ""
+	verb = escape_html(_(action.workflow_action))
+	if not action.from_workflow_state:
+		return verb
+	return _("{0} (from {1})").format(verb, escape_html(_(action.from_workflow_state)))
+
+
+def _requester_subject(action: Any, status: str, decider: str | None, note: str | None = None) -> str:
+	# The subject is the whole notice: released frappe shows nothing else in the
+	# bell, and an Alert is never emailed. So a rejection's note rides in it, cut
+	# short, and the full note stays on the Agent Action form.
+	templates = _requester_templates(action.action_type)
+	subject = templates[status].format(
+		escape_html(get_fullname(decider) if decider else ""),
+		escape_html(_(action.target_doctype)),
+		escape_html(action.target_name),
+		_workflow_step(action),
+	)
+	if note:
+		subject = _("{0} Note: {1}").format(subject, escape_html(_shorten(note, SUBJECT_NOTE_LIMIT)))
+	return subject
+
+
+def _requester_templates(action_type: str) -> dict:
+	# Whole sentences per verb, so a translator never has to glue fragments.
+	if action_type == ACTION_TRANSITION:
+		return {
+			STATUS_APPLIED: _("{0} approved the workflow action {3} on {1} {2}."),
+			STATUS_REJECTED: _("{0} rejected the workflow action {3} on {1} {2}."),
+			STATUS_FAILED: _("The workflow action {3} on {1} {2} failed when {0} approved it."),
+			STATUS_EXPIRED: _("The proposed workflow action {3} on {1} {2} expired with no decision."),
+		}
+	if action_type == ACTION_UPDATE:
+		return {
+			STATUS_APPLIED: _("{0} approved the proposal to change fields on {1} {2}."),
+			STATUS_REJECTED: _("{0} rejected the proposal to change fields on {1} {2}."),
+			STATUS_FAILED: _("The proposal to change fields on {1} {2} failed when {0} approved it."),
+			STATUS_EXPIRED: _("The proposal to change fields on {1} {2} expired with no decision."),
+		}
+	if action_type == ACTION_CANCEL:
+		return {
+			STATUS_APPLIED: _("{0} approved the proposal to cancel {1} {2}."),
+			STATUS_REJECTED: _("{0} rejected the proposal to cancel {1} {2}."),
+			STATUS_FAILED: _("The proposal to cancel {1} {2} failed when {0} approved it."),
+			STATUS_EXPIRED: _("The proposal to cancel {1} {2} expired with no decision."),
+		}
+	return {
+		STATUS_APPLIED: _("{0} approved the proposal to submit {1} {2}."),
+		STATUS_REJECTED: _("{0} rejected the proposal to submit {1} {2}."),
+		STATUS_FAILED: _("The proposal to submit {1} {2} failed when {0} approved it."),
+		STATUS_EXPIRED: _("The proposal to submit {1} {2} expired with no decision."),
+	}
+
+
+def _shorten(text: str, limit: int) -> str:
+	text = " ".join(strip_html(text).split())
+	return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+@contextmanager
+def _never_raises(title: str):
+	"""Run a notification step; on any failure, undo its writes and log it.
+
+	The savepoint matters under test, where the notification inserts inline: a
+	half-written batch is rolled back rather than committed with the decision.
+	"""
+	frappe.db.savepoint(NOTIFY_SAVEPOINT)
+	try:
+		yield
+	except Exception:
+		frappe.db.rollback(save_point=NOTIFY_SAVEPOINT)
+		frappe.log_error(title=title)
 
 
 def _check_kill_switch() -> None:
@@ -327,6 +778,16 @@ def _require_pending(action: Any) -> None:
 				_(action.status)
 			)
 		)
+
+
+def _refuse_rehearsal(action: Any) -> None:
+	"""A proposal made during a rehearsal is evidence, never a request.
+
+	The scorer closes these as soon as the run ends. This is the second wall, for
+	the moment between the proposal and the scorer, and for a scorer that died.
+	"""
+	if frappe.db.get_value("Agent Run", action.run, "surface") == REHEARSAL_SURFACE:
+		frappe.throw(_("This proposal was made during a rehearsal. It cannot be approved."))
 
 
 def _check_expiry(action: Any) -> None:
@@ -386,6 +847,88 @@ def _check_lock(action: Any, target: Any, expected_modified: Any) -> None:
 		)
 
 
+def _apply_problem(action: Any, target: Any) -> str | None:
+	"""Why this proposal cannot be applied to the document as it is now, if it cannot."""
+	workflow = get_workflow_name(action.target_doctype)
+
+	# Before the workflow refusal below: a Workflow governs a record's transitions,
+	# not its other fields. update_problem checks the state's edit role instead.
+	if action.action_type == ACTION_UPDATE:
+		return update_problem(action, target)
+
+	if action.action_type == ACTION_TRANSITION:
+		if not workflow:
+			return _(
+				"{0} is no longer governed by an active Workflow, so there is no transition to apply."
+			).format(action.target_doctype)
+		return _transition_problem(action, target, workflow)
+
+	# Re-checked here, not only at proposal time: a Workflow activated in between
+	# would otherwise be bypassed by this submit, silently and without a trace.
+	if workflow:
+		return _(
+			"{0} is now governed by an active Workflow ({1}). Agent proposals cannot "
+			"submit or cancel workflow-governed documents; the agent can propose a workflow action instead."
+		).format(action.target_doctype, workflow)
+
+	return _state_problem(action, target)
+
+
+def _transition_problem(action: Any, target: Any, workflow: str) -> str | None:
+	"""Why this workflow action may not run on the document as it is now, if it may not.
+
+	A workflow action is a verb, and verbs repeat: Draft -Approve-> Manager Approved
+	-Approve-> Approved is an ordinary two-level approval. `apply_workflow` resolves
+	the verb against the state the document is in *now*, so a proposal made from the
+	first state, approved after someone took that step by hand, would take the second
+	step instead — one the run's user may never have been offered. The proposal is
+	bound to the Workflow and the state it was made from, and anything else fails.
+	The timestamp lock cannot stand in for this: an approver who reloads sends the
+	new timestamp and passes it.
+	"""
+	if not action.workflow_action:
+		return _("This proposal names no workflow action.")
+	if not action.workflow_name or not action.from_workflow_state:
+		# Fail closed: without the state it was made from, the verb has no meaning.
+		return _("This proposal does not record the workflow state it was made from. Ask the agent again.")
+	if workflow != action.workflow_name:
+		return _(
+			"{0} is now governed by the Workflow {1}, not {2} as when the agent proposed. Ask the agent again."
+		).format(action.target_doctype, workflow, action.workflow_name)
+
+	state = target.get(get_workflow(action.target_doctype).workflow_state_field)
+	if state != action.from_workflow_state:
+		return _(
+			"{0} {1} has moved from {2} to {3} since the agent proposed {4}. The proposal was "
+			"for the step out of {2}, so it cannot be applied now."
+		).format(
+			action.target_doctype,
+			action.target_name,
+			action.from_workflow_state,
+			state,
+			action.workflow_action,
+		)
+
+	if _queues_in_background(action.target_doctype):
+		return _(
+			"{0} submits and cancels in the background, so this approval could not tell whether the "
+			"workflow action went through. Apply it from the document itself."
+		).format(action.target_doctype)
+
+	# Whether the step is open to this approver, and its condition, are the
+	# Workflow's call, made inside apply_workflow.
+	return None
+
+
+def _queues_in_background(doctype: str) -> bool:
+	"""Whether Frappe would hand this doctype's submit or cancel to a background job.
+
+	`apply_workflow` then returns before anything is written, and the row would say
+	Applied about a document that has not moved.
+	"""
+	return bool(cint(frappe.get_meta(doctype).queue_in_background))
+
+
 def _state_problem(action: Any, target: Any) -> str | None:
 	docstatus = cint(target.docstatus)
 	if action.action_type == ACTION_SUBMIT and docstatus != DRAFT:
@@ -411,6 +954,7 @@ def _record_failure(action: Any, note: str | None, edited: int, failure: str) ->
 			"failure": failure[:FAILURE_LIMIT],
 		},
 	)
+	_notify_requester(action, STATUS_FAILED)
 	return {
 		"action": action.name,
 		"status": STATUS_FAILED,

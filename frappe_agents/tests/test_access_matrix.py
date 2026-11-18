@@ -53,6 +53,7 @@ from frappe_agents.tools.registry import get_tool_schemas
 
 READ_FAMILY = {
 	"search_documents",
+	"summarize_documents",
 	"get_doctype_meta",
 	"get_document_context",
 	"get_document_slice",
@@ -92,6 +93,8 @@ class TestToolExposure(AgentTestCase):
 				"update_draft",
 				"propose_submit",
 				"propose_cancel",
+				"propose_transition",
+				"propose_update",
 				"extract_document",
 			},
 		)
@@ -100,7 +103,10 @@ class TestToolExposure(AgentTestCase):
 		"""The ceiling is unchanged: a Suggest agent proposes nothing, rule or no rule."""
 		agent = make_matrix_agent([rule(ORDER_DT, can_propose=1)], autonomy="Suggest")
 
-		self.assertFalse({"propose_submit", "propose_cancel"} & exposed_tool_names(agent))
+		self.assertFalse(
+			{"propose_submit", "propose_cancel", "propose_transition", "propose_update"}
+			& exposed_tool_names(agent)
+		)
 
 	def test_a_report_rule_is_what_offers_run_report(self):
 		"""run_report used to ride tool selection. It rides a Report row now."""

@@ -233,3 +233,168 @@
 		max_rows_per_call: (frm) => mark_stale(frm),
 	});
 })();
+
+// Rehearsals: saved test cases run against this agent. The buttons only queue
+// work or read results; the rehearsal records and their results hold the rest.
+// Everything a person typed is drawn with .text().
+(function () {
+	const RUNNER = "frappe_agents.rehearsals.runner";
+	const PACK = "frappe_agents.rehearsals.pack.load_injection_pack";
+	const MANAGER_ROLES = ["Agent Manager", "System Manager"];
+	const GROUP = __("Rehearsals");
+	const COLOURS = { Pass: "green", Fail: "red", Inconclusive: "orange" };
+
+	function run_all(frm) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Run all rehearsals"),
+			fields: [
+				{
+					fieldname: "model_profile",
+					fieldtype: "Link",
+					options: "LLM Model Profile",
+					label: __("Model Profile"),
+					description: __(
+						"Leave empty for the agent's own model. Any other profile must be one of its alternates."
+					),
+				},
+			],
+			primary_action_label: __("Run"),
+			primary_action(values) {
+				dialog.hide();
+				frappe
+					.call({
+						method: `${RUNNER}.run_all`,
+						args: { agent: frm.doc.name, model_profile: values.model_profile || null },
+						freeze: true,
+					})
+					.then((r) => {
+						const { batch, results, refused } = r.message;
+						frappe.show_alert({
+							message: __("{0} rehearsals queued", [results.length]),
+							indicator: "blue",
+						});
+						if (refused.length) {
+							const $list = $("<ul>");
+							refused.forEach((row) => $("<li>").text(`${row.rehearsal}: ${row.error}`).appendTo($list));
+							frappe.msgprint({
+								title: __("Not queued"),
+								message: $("<div>").append($list).html(),
+								indicator: "orange",
+							});
+						}
+						frappe.set_route("List", "Agent Rehearsal Result", { batch });
+					});
+			},
+		});
+		dialog.show();
+	}
+
+	function load_pack(frm) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Load the injection pack"),
+			fields: [
+				{
+					fieldname: "bait_vector",
+					fieldtype: "Select",
+					label: __("Bait Vector"),
+					options: ["Attached file", "Comment on the document"],
+					default: "Attached file",
+					description: __(
+						"A file touches no business data. A comment stays on the document after the rehearsal."
+					),
+				},
+				{
+					fieldname: "run_as_user",
+					fieldtype: "Link",
+					options: "User",
+					label: __("Run As"),
+					default: frappe.session.user,
+				},
+				{
+					fieldname: "context_doctype",
+					fieldtype: "Link",
+					options: "DocType",
+					label: __("Document Type"),
+					description: __("The document the bait talks about. Use a test record."),
+				},
+				{
+					fieldname: "context_name",
+					fieldtype: "Dynamic Link",
+					options: "context_doctype",
+					label: __("Document"),
+				},
+			],
+			primary_action_label: __("Load"),
+			primary_action(values) {
+				dialog.hide();
+				frappe
+					.call({ method: PACK, args: Object.assign({ agent: frm.doc.name }, values), freeze: true })
+					.then((r) => {
+						frappe.show_alert({
+							message: __("{0} rehearsals added, {1} already there", [
+								r.message.created.length,
+								r.message.skipped.length,
+							]),
+							indicator: "green",
+						});
+						frappe.set_route("List", "Agent Rehearsal", { agent: frm.doc.name });
+					});
+			},
+		});
+		dialog.show();
+	}
+
+	function compare(frm) {
+		frappe.call({ method: `${RUNNER}.comparison`, args: { agent: frm.doc.name } }).then((r) => {
+			const { profiles, rows } = r.message;
+			const $table = $('<table class="table table-bordered table-sm">');
+			const $head = $("<tr>").appendTo($("<thead>").appendTo($table));
+			$("<th>").text(__("Rehearsal")).appendTo($head);
+			profiles.forEach((profile) => $("<th>").text(profile || __("Unknown")).appendTo($head));
+			const $body = $("<tbody>").appendTo($table);
+			rows.forEach((row) => {
+				const $row = $("<tr>").appendTo($body);
+				$("<td>").text(row.title || row.rehearsal).appendTo($row);
+				profiles.forEach((profile) => {
+					const cell = row.cells[profile];
+					const $cell = $("<td>").appendTo($row);
+					if (!cell) {
+						$cell.text("—");
+						return;
+					}
+					$("<a>")
+						.attr("href", `/app/agent-rehearsal-result/${encodeURIComponent(cell.result)}`)
+						.addClass(`indicator-pill ${COLOURS[cell.verdict] || "gray"}`)
+						.text(__(cell.verdict || ""))
+						.appendTo($cell);
+					const cost = cell.cost ? ` · ${format_number(cell.cost, null, 4)}` : "";
+					$("<div>")
+						.addClass("text-muted small")
+						.text(__("{0} tokens", [cell.tokens]) + cost)
+						.appendTo($cell);
+				});
+			});
+			const dialog = new frappe.ui.Dialog({ title: __("Rehearsals by model"), size: "extra-large" });
+			$(dialog.body).append(
+				rows.length && profiles.length
+					? $table
+					: $("<p class='text-muted'>").text(__("No rehearsal of this agent has been scored yet."))
+			);
+			dialog.show();
+		});
+	}
+
+	frappe.ui.form.on("Agent", {
+		refresh(frm) {
+			if (frm.is_new() || !frappe.user.has_role(MANAGER_ROLES)) return;
+			frm.add_custom_button(
+				__("Open"),
+				() => frappe.set_route("List", "Agent Rehearsal", { agent: frm.doc.name }),
+				GROUP
+			);
+			frm.add_custom_button(__("Run all"), () => run_all(frm), GROUP);
+			frm.add_custom_button(__("Compare models"), () => compare(frm), GROUP);
+			frm.add_custom_button(__("Load injection pack"), () => load_pack(frm), GROUP);
+		},
+	});
+})();

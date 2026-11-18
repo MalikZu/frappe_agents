@@ -64,7 +64,7 @@
   {
    "default": "0",
    "depends_on": "eval:doc.target_type==\"DocType\"",
-   "description": "Ask a human to submit or cancel. The agent never does either itself.",
+   "description": "Ask a human to submit, cancel, take a workflow action, or change fields on a record with no submit step. The agent never does any of these itself.",
    "fieldname": "can_propose",
    "fieldtype": "Check",
    "label": "Propose"
@@ -102,7 +102,7 @@
  "index_web_pages_for_search": 0,
  "istable": 1,
  "links": [],
- "modified": "2026-08-14 00:00:00.000000",
+ "modified": "2026-11-18 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent Access Rule",

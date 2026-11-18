@@ -25,6 +25,8 @@
   "skills",
   "show_in_forms",
   "form_doctypes",
+  "mcp_section",
+  "allow_mcp",
   "max_steps",
   "daily_token_budget"
  ],
@@ -159,6 +161,18 @@
    "options": "Agent DocType Scope"
   },
   {
+   "fieldname": "mcp_section",
+   "fieldtype": "Section Break",
+   "label": "Outside Clients"
+  },
+  {
+   "default": "0",
+   "description": "Let MCP clients such as Claude Code or an IDE call this agent's tools as the user whose API key they hold. Document text then goes to whichever model that client uses. Agent Settings must also allow MCP. See docs/mcp.md.",
+   "fieldname": "allow_mcp",
+   "fieldtype": "Check",
+   "label": "Allow MCP"
+  },
+  {
    "default": "10",
    "fieldname": "max_steps",
    "fieldtype": "Int",
@@ -173,7 +187,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-13 20:00:00.000000",
+ "modified": "2026-11-18 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Agents",
  "name": "Agent",

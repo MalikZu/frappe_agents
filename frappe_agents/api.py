@@ -173,7 +173,9 @@ def list_conversations() -> list[dict]:
 
 	rows = frappe.get_list(
 		"Agent Conversation",
-		filters={"user": frappe.session.user},
+		# A rehearsal's bait conversation belongs to its test user but is not theirs
+		# to chat in.
+		filters={"user": frappe.session.user, "rehearsal": 0},
 		fields=["name", "agent", "title", "last_activity", "modified"],
 		order_by="last_activity desc, modified desc",
 		limit_page_length=CONVERSATION_LIMIT,
@@ -247,6 +249,17 @@ def _chat_agent(agent: str) -> Any:
 	if not runtime_enabled():
 		frappe.throw(_("The agent runtime is switched off."))
 
+	return usable_agent(agent)
+
+
+def usable_agent(agent: str) -> Any:
+	"""The agent this user may drive, or a refusal. Every door but the runtime switch.
+
+	Chat and the MCP endpoint both ask here, so the two can never disagree about
+	who may use which agent. The runtime switch is left to the caller: chat
+	refuses at the door, while an MCP tool call lets `execute_tool` refuse it so
+	that the refusal is audited.
+	"""
 	frappe.has_permission("Agent", "read", doc=agent, throw=True)
 	agent_doc = frappe.get_doc("Agent", agent)
 
@@ -258,7 +271,7 @@ def _chat_agent(agent: str) -> Any:
 
 	if agent_doc.run_as != "Session User":
 		frappe.throw(
-			_("Agent {0} runs as a service user and cannot be started from chat.").format(agent_doc.name)
+			_("Agent {0} runs as a service user, so nobody can start it directly.").format(agent_doc.name)
 		)
 
 	return agent_doc
@@ -633,6 +646,8 @@ def list_pending_actions(limit: int | None = None) -> list[dict]:
 		fields=[
 			"name",
 			"action_type",
+			"workflow_action",
+			"from_workflow_state",
 			"target_doctype",
 			"target_name",
 			"reason",
@@ -672,6 +687,10 @@ def _redacted_row(row: dict) -> dict:
 	row["target_doctype"] = None
 	row["target_name"] = None
 	row["reason"] = None
+	# A workflow's action names are part of the target's process, and can say
+	# what kind of document it is.
+	row["workflow_action"] = None
+	row["from_workflow_state"] = None
 	row["target_modified"] = None
 	# The proposal's snapshot is the target's own timestamp, and it is useless
 	# without the target anyway.

@@ -21,7 +21,7 @@ One rule row names one target and ticks what is allowed on it:
 | Read | list and read documents of this doctype |
 | Draft New | create documents, always as drafts |
 | Draft Edit | change a draft it or its user already made |
-| Propose | ask a person to submit or cancel — never do it |
+| Propose | ask a person to submit, cancel, take a workflow action or change a live record's fields — never do it |
 | Extract | read an attached file into a draft of this doctype, or into an open form with [Fill from file](extraction.md#fill-from-file) |
 
 Two more columns narrow a row:
@@ -30,6 +30,11 @@ Two more columns narrow a row:
   created. Tick it to let the agent edit a colleague's draft.
 - **Max Rows Per Call** — 0 means the tool's own limit. Anything else caps a
   single call at that many rows, whichever is smaller.
+
+A doctype with no submit step — a ticket, a lead, a task — has no drafts in
+this sense: every record is live. **Draft Edit** on such a doctype changes live
+records with no approval. To route those changes through a person, clear
+**Draft Edit** and tick **Propose**. See [Field changes](approvals.md#field-changes).
 
 A rule can also name a **Report** instead of a DocType. That one grants running
 that report and nothing else.

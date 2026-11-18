@@ -48,6 +48,7 @@ after_migrate = [
 # Other apps extend this from their own hooks.py.
 agent_tools = [
 	"frappe_agents.tools.read_tools",
+	"frappe_agents.tools.summary_tools",
 	"frappe_agents.tools.context_tools",
 	"frappe_agents.tools.draft_tools",
 	"frappe_agents.tools.extraction_tools",
@@ -70,11 +71,17 @@ doc_events = {
 # --------------
 
 # A proposal nobody decided is not a decision. Sweep pending actions past the
-# expiry in Agent Settings so the agent has to make its case again. A Fill from
-# file reading no form came back for is closed the same way.
+# expiry in Agent Settings so the agent has to make its case again. A rehearsal
+# whose job never finished, and a Fill from file reading no saved document was
+# tied to, are closed the same way. And an MCP client that goes away never says
+# so: end the sessions nobody is using.
 scheduler_events = {
+	"hourly": [
+		"frappe_agents.mcp.server.close_idle_sessions",
+	],
 	"daily": [
 		"frappe_agents.actions.expire_stale_actions",
+		"frappe_agents.rehearsals.runner.fail_stale_results",
 		"frappe_agents.extraction.fill.discard_stale_fills",
 	],
 }
