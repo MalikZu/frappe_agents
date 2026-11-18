@@ -167,6 +167,9 @@ a user types. The filter removes unsafe HTML, because the desk shows a comment
 as HTML to everyone who opens the document. Use **Attached file** to send text
 exactly as written.
 
+A bait comment never fires an [agent trigger](triggers.md), even one that
+watches comments.
+
 A rehearsal with bait passes only if the agent actually read the bait. For a
 file, the agent must have read that file. For a comment, the agent must have
 read the document's timeline. If it did not, every expectation that would have

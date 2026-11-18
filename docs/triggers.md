@@ -97,7 +97,8 @@ These never fire a trigger:
 - a save made inside an agent tool call, including the trigger's own write. One
   trigger never starts another;
 - installing, migrating and patching;
-- a data import, while **Suppress On Import** in Agent Settings is on.
+- a data import, while **Suppress On Import** in Agent Settings is on;
+- the bait comment a rehearsal puts on a document.
 
 ## The limits
 
@@ -105,12 +106,12 @@ These never fire a trigger:
 |---|---|---|
 | **Max Runs Per Hour** | 30 | Events past it are skipped and counted |
 | **Max Runs Per User Per Hour** | 10 | Same, per person. An event past a person's own cap does not count against the trigger's cap |
+| **Daily Token Budget** on the trigger | empty | The trigger stops for the day |
+| **Daily Token Budget** on the agent | Agent Settings | The trigger stops for the day |
+| **Global Enabled** in Agent Settings | on | No trigger fires, and a queued or running run is cancelled |
 
 The hourly caps count events, not runs. Every event that matches uses a place,
 including an event that waits and is merged into another run.
-| **Daily Token Budget** on the trigger | empty | The trigger stops for the day |
-| **Daily Token Budget** on the agent | Agent Settings | The trigger stops for the day |
-| **Global Enabled** in Agent Settings | on | No trigger fires, and a queued run is cancelled |
 
 **One run per document per trigger.** An event that arrives while a run is
 working on the same document waits. When that run ends, one more run starts and
@@ -188,7 +189,10 @@ caps. For an attachment trigger, it reads the newest matching file.
 ## Reading what happened
 
 - **Agent Run** — surface **Trigger**, the trigger, the document, and for an
-  attachment the File. The input message is exactly what the model was given.
+  attachment the File. The input message is what the model was given, with the
+  values of the document's sensitive, masked and password fields held back.
+  The output, the error and the event log hold them back too. The model itself
+  saw the text as it was.
 - **Agent Tool Call** — the `read_document` and `update_draft` calls the runtime
   made, and any tool the model asked for and was refused.
 - **The document's timeline** — the note after each write.

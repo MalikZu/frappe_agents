@@ -155,9 +155,19 @@ def execute_tool(
 	run_doc = frappe.get_doc("Agent Run", run) if isinstance(run, str) else run
 	run_name = run_doc.name
 
+	held_back = run_doc.flags.get(HELD_BACK_FLAG)
+
 	refusal = _identity_refusal(run_doc)
 	if refusal:
-		_log_call(run_name, tool_name, args, OUTCOME_DENIED, _elapsed_ms(started), error=refusal)
+		_log_call(
+			run_name,
+			tool_name,
+			args,
+			OUTCOME_DENIED,
+			_elapsed_ms(started),
+			error=refusal,
+			held_back=held_back,
+		)
 		return {"ok": False, "result": None, "error": refusal}
 
 	try:
@@ -170,6 +180,7 @@ def execute_tool(
 			OUTCOME_DENIED,
 			_elapsed_ms(started),
 			error=str(exc),
+			held_back=held_back,
 		)
 		raise
 
@@ -215,7 +226,7 @@ def execute_tool(
 		result_summary=summary,
 		docs_touched=docs_touched,
 		error=error,
-		held_back=run_doc.flags.get(HELD_BACK_FLAG),
+		held_back=held_back,
 	)
 
 	return {"ok": outcome == OUTCOME_SUCCESS, "result": result, "error": error}
