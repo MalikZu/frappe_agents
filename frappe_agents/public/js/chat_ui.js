@@ -821,7 +821,9 @@ frappe_agents.ChatUI = class ChatUI {
 			// An input method is still composing — Arabic, Chinese, Japanese,
 			// Korean. Enter there picks a word or ends the composition; it is not
 			// the person asking to send. 229 is what older browsers report instead.
-			if (e.isComposing || e.keyCode === 229) return;
+			// Read off the native event: jQuery does not copy `isComposing`.
+			const native = e.originalEvent || e;
+			if (native.isComposing || e.keyCode === 229) return;
 			if (e.key === "Escape") {
 				// An open popover takes Escape first; its own handler closes it.
 				if (this.pop_owner || !this.running_turns().length) return;
