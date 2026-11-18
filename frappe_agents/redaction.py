@@ -14,6 +14,7 @@ outcome. Only values that must not become audit content are replaced with
 import copy
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import frappe
@@ -40,11 +41,15 @@ _UNTRUSTED = re.compile(r'<untrusted source="[^"]*">(.*)</untrusted>', re.DOTALL
 # What a stored result says when its value was cut at a sensitive key.
 CUT_NOTE = "\n... (truncated)"
 
-# A value that reads as a number. Prose is scrubbed of one only where it stands
-# alone: 2025 is not taken out of 2025-01-02, ORD-2025-0001 or 12025.
-_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
-_NUMBER_BEFORE = r"(?<![\w.\-/:])"
-_NUMBER_AFTER = r"(?![\w\-/:]|[.,]\d)"
+# A held-back value that is a number: 98765, 98765.0, 98,765.00.
+_NUMERIC = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+# A number as prose writes it, whole: never the middle of a longer one.
+_NUMBER_IN_TEXT = re.compile(r"(?<!\d)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?!\d)")
+# Parts joined by hyphens or slashes: a date (2025-01-02), a reference (ORD-2025-0001).
+_CHAIN = re.compile(r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)+")
+# A number below this many significant digits is not taken out of prose. 100 or
+# 12 is in every sentence; replacing each one would corrupt what an auditor reads.
+NUMBER_MIN_DIGITS = 4
 
 # A doctype named anywhere in a result's JSON text, for a result whose call is unknown.
 _DOCTYPE = re.compile(r'"doctype"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -198,14 +203,63 @@ def scrub(text: str | None, secrets: set[str]) -> str | None:
 	"""
 	if not text or not secrets:
 		return text
+	numbers = {number for number in map(_number, secrets) if number is not None}
 	for secret in secrets:
-		if len(secret) < SCRUB_MIN_LENGTH or secret not in text:
-			continue
-		if _NUMBER.fullmatch(secret):
-			text = re.sub(_NUMBER_BEFORE + re.escape(secret) + _NUMBER_AFTER, REDACTED, text)
-		else:
+		if len(secret) >= SCRUB_MIN_LENGTH and not _NUMERIC.fullmatch(secret) and secret in text:
 			text = text.replace(secret, REDACTED)
+	if numbers:
+		text = _scrub_numbers(text, numbers)
 	return text
+
+
+def _number(secret: str) -> Decimal | None:
+	"""A held-back value as the number it is, when it is one worth scrubbing."""
+	if not _NUMERIC.fullmatch(secret):
+		return None
+	try:
+		value = abs(Decimal(secret.replace(",", "")))
+	except InvalidOperation:
+		return None
+	digits = format(value.normalize(), "f").replace(".", "").lstrip("0")
+	return value if len(digits) >= NUMBER_MIN_DIGITS else None
+
+
+def _scrub_numbers(text: str, numbers: set[Decimal]) -> str:
+	"""Prose with every number equal to a held-back one taken out of it.
+
+	Compared by value, so the form does not matter: 98765, 98765.00, 98,765.00,
+	AED98765, 98765/month, amount:98765. A number is kept only where it is part
+	of something else — a longer number (12025, 2025.5), or a date or reference
+	joined by hyphens or slashes (2025-01-02, ORD-2025-0001) — see `_in_chain`.
+	"""
+	chains = [match.span() for match in _CHAIN.finditer(text)]
+	out: list[str] = []
+	copied = 0
+	for match in _NUMBER_IN_TEXT.finditer(text):
+		whole, fraction = match.group(1), match.group(2)
+		value = Decimal(whole.replace(",", "") + (f".{fraction}" if fraction else ""))
+		if value not in numbers or _in_chain(text, match.span(), chains):
+			continue
+		out.append(text[copied : match.start()])
+		out.append(REDACTED)
+		copied = match.end()
+	out.append(text[copied:])
+	return "".join(out)
+
+
+def _in_chain(text: str, span: tuple[int, int], chains: list[tuple[int, int]]) -> bool:
+	"""Whether a number is one part of a date or a reference, and not a value.
+
+	Three or more parts joined by hyphens or slashes is one: 2025-01-02,
+	02/01/2025, ORD-2025-0001. Two parts are not, because two parts are how a
+	value is written too — a range (98765-99000), an amount and its unit
+	(98765/month), a currency and an amount (AED-98765). Those are held back.
+	"""
+	start, end = span
+	for chain_start, chain_end in chains:
+		if chain_start <= start < chain_end or chain_start < end <= chain_end:
+			return len(re.split(r"[-/]", text[chain_start:chain_end])) >= 3
+	return False
 
 
 def scrub_values(value: Any, secrets: set[str]) -> Any:
@@ -254,6 +308,15 @@ class EventRedactor:
 		self.secrets: set[str] = set()
 		# Tool-call id -> (the text the model was handed, the text the log keeps).
 		self.results: dict[str, tuple[str, str]] = {}
+		# Set once an event or a result had to be withheld. Its values were never
+		# learned, so nothing the model writes after it can be scrubbed of them:
+		# that prose is withheld too. Fail closed.
+		self.blind = False
+
+	def withhold(self, payload: dict) -> dict:
+		"""An event that could not be redacted, stored without its body."""
+		self.blind = True
+		return body_withheld(payload)
 
 	def record_result(self, call_id: str, args: Any, result: Any, raw_text: str, serialise: Any) -> None:
 		"""Redact a tool's result while it is still a structure.
@@ -271,10 +334,13 @@ class EventRedactor:
 
 	def hold_back_result(self, call_id: str, raw_text: str) -> None:
 		"""A result that could not be redacted is stored as the marker alone."""
+		self.blind = True
 		self.results[call_id] = (raw_text, REDACTED)
 
 	def scrub(self, text: str | None) -> str | None:
 		"""Prose with every value held back in this run taken out of it."""
+		if self.blind and text:
+			return REDACTED
 		return scrub(text, self.secrets)
 
 	def event(self, payload: dict) -> dict:
@@ -371,21 +437,21 @@ class EventRedactor:
 					block["arguments"] = self._arguments(block.get("id"), block.get("arguments"))
 		# A model that read a value can repeat it. What it says is prose, so the
 		# values held back anywhere in the run so far are taken out of it.
-		self._scrub_blocks(blocks, self.secrets)
+		self._scrub_blocks(blocks, self.secrets, self.blind)
 		if isinstance(message.get("errorMessage"), str):
-			message["errorMessage"] = scrub(message["errorMessage"], self.secrets)
+			message["errorMessage"] = self.scrub(message["errorMessage"])
 		return message
 
 	@staticmethod
-	def _scrub_blocks(blocks: Any, secrets: set[str]) -> None:
-		if not isinstance(blocks, list) or not secrets:
+	def _scrub_blocks(blocks: Any, secrets: set[str], blind: bool = False) -> None:
+		if not isinstance(blocks, list) or not (secrets or blind):
 			return
 		for block in blocks:
 			if not isinstance(block, dict):
 				continue
 			for field in ("text", "thinking"):
-				if isinstance(block.get(field), str):
-					block[field] = scrub(block[field], secrets)
+				if isinstance(block.get(field), str) and block[field]:
+					block[field] = REDACTED if blind else scrub(block[field], secrets)
 
 
 def redact_json_text(text: str, keys: set[str], known: set[str] = frozenset()) -> tuple[str, set[str]]:

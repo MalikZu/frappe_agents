@@ -29,7 +29,7 @@ behind it, not tool code.
 
 import frappe
 
-from frappe_agents.redaction import EventRedactor, body_withheld
+from frappe_agents.redaction import EventRedactor
 
 BATCH = 200
 
@@ -93,4 +93,4 @@ def _redacted(redactor: EventRedactor, name: str, event: dict) -> dict:
 		frappe.logger("frappe_agents").error(
 			f"could not redact event {event.get('seq')} of run {name}", exc_info=True
 		)
-		return body_withheld(event)
+		return redactor.withhold(event)
